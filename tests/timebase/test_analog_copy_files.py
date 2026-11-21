@@ -12,7 +12,10 @@ code under test.
 
 from __future__ import annotations
 
+import datetime
 import logging
+import math
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -31,15 +34,18 @@ from wl_preproc.timebase import analog_copy, channels
 from wl_preproc.timebase.analog_copy import (
     DECIMATED_RATE_HZ,
     FAMILIES,
+    CLOCK_SLACK_S,
     MIN_PAIRS,
     SEARCH_PREFIX_S,
     CopyPlacement,
     CopyRefused,
     NoCopy,
     eye_candidates,
+    parse_openiris_stamp,
     place_eye_by_copy,
     read_xa_channels,
 )
+from wl_preproc.timebase._nidq_meta import read_nidq_meta
 from wl_preproc.timebase.clock import nidq_files
 
 #: The eye's clock 40 ppm fast and the NI's 25 ppm slow, as Task 1's own test.
@@ -165,22 +171,15 @@ def test_a_dropped_frame_does_not_shift_later_pairs(tmp_path):
 
 
 def test_the_channel_search_reads_only_its_prefix(session, monkeypatch):
-    """The search reads every XA channel to `SEARCH_PREFIX_S` from the eye
-    file's start (taken as the NI's first sample: nothing places the eye on the
-    NI before the copy does), and only the chosen channel is read in full. And
-    `read_xa_channels` reads no NI row past its `stop_s`."""
+    """The search reads every XA channel over `SEARCH_PREFIX_S` and
+    `CLOCK_SLACK_S` from the eye file's start, here taken as the NI's first
+    sample (the synthetic name carries no stamp, so the search is not aimed),
+    and only the chosen channel is read in full. And `read_xa_channels` reads
+    no NI row past its `stop_s`, nor before its `from_s`."""
     session_dir, eye_path = session
-    calls: list[tuple[float | None, int]] = []
-    original = analog_copy.read_xa_channels
-
-    def recording(ni_path, stop_s, *args, **kwargs):
-        start_s, read = original(ni_path, stop_s, *args, **kwargs)
-        calls.append((stop_s, len(read)))
-        return start_s, read
-
-    monkeypatch.setattr(analog_copy, "read_xa_channels", recording)
+    calls = _record_reads(monkeypatch)
     place_eye_by_copy(session_dir, eye_path)
-    assert calls == [(SEARCH_PREFIX_S, COPY.n_channels), (None, 1)]
+    assert calls == [(SEARCH_PREFIX_S + CLOCK_SLACK_S, 0.0, COPY.n_channels), (None, 0.0, 1)]
     monkeypatch.undo()
 
     ni_path = nidq_files(session_dir)[0]
@@ -213,6 +212,17 @@ def test_the_channel_search_reads_only_its_prefix(session, monkeypatch):
     _, (whole,) = read_xa_channels(ni_path, None, channels=[COPY.channel])
     assert whole.size == len(words) // block
     assert sum(rows) == whole.size * block
+
+    # From a bound: the first whole block at or after it, on the same grid of
+    # blocks as from the file's start, stamped at its true sample's centre.
+    rows.clear()
+    from_s = 10.0005
+    first_block = 10_001  # ceil(10.0005 s * 30000 / 30)
+    later_s, later = read_xa_channels(ni_path, stop_s, from_s=from_s)
+    assert later_s == pytest.approx(start_s + first_block / DECIMATED_RATE_HZ, abs=1e-12)
+    for k, channel in enumerate(later):
+        assert np.array_equal(channel, prefix[k][first_block:]), k
+    assert sum(rows) == COPY.n_channels * (stop_s * DECIMATED_RATE_HZ - first_block) * block
 
 
 def test_the_xa_channels_follow_mn_and_ma_at_the_files_own_rate(tmp_path):
@@ -292,3 +302,183 @@ def test_too_few_windows_over_the_whole_channel_is_a_refusal(session, monkeypatc
     assert f"XA{COPY.channel}" in message and "Left P1-P4 (X, Y)" in message and "3 of 25 windows" in message
     assert isinstance(refused.value.__cause__, NoCopy)
     assert _warned_about(caplog, eye_path)
+
+
+# ---------------------------------------------------------------------------
+# The search aimed by the two files' clocks (amendment 85, draft): OpenIris's
+# file-name stamp against SpikeGLX's `fileCreateTime`.
+#
+# A synthetic eye file starts 0.1 s after its NI file, and a recipe cannot move
+# it, so the gap is made here on a copy of the module's session: the eye file
+# loses its first rows (the eye started later), or the NI file loses its first
+# samples (the NI started later). Every recipe's bytes stay as they are. With
+# the prefix at 60 s and the slack at 10 s, a 100 s gap is beyond what an
+# unaimed search can bridge in a 252 s session; `MIN_PAIRS` at 5, since a 60 s
+# prefix holds 6 windows.
+
+#: The gap made between the two files' starts.
+GAP_S = 100.0
+
+
+@pytest.fixture
+def small_search(monkeypatch):
+    monkeypatch.setattr(analog_copy, "SEARCH_PREFIX_S", 60.0)
+    monkeypatch.setattr(analog_copy, "CLOCK_SLACK_S", 10.0)
+    monkeypatch.setattr(analog_copy, "MIN_PAIRS", 5)
+
+
+def _copied(session, root: Path) -> tuple[Path, Path]:
+    session_dir, eye_path = session
+    copy_dir = root / "session"
+    shutil.copytree(session_dir, copy_dir)
+    return copy_dir, copy_dir / eye_path.relative_to(session_dir)
+
+
+def _ni_created(session_dir: Path) -> datetime.datetime:
+    created = read_nidq_meta(nidq_files(session_dir)[0].with_suffix(".meta")).file_created
+    assert created is not None
+    return created
+
+
+def _stamped(eye_path: Path, wall: datetime.datetime) -> Path:
+    """The eye file renamed as OpenIris names it, `OpenIris-YYYYMonDD-HHMMSS`."""
+    stamped = eye_path.with_name(f"OpenIris-{wall:%Y}{_MONTHS[wall.month - 1]}{wall:%d-%H%M%S}.txt")
+    eye_path.rename(stamped)
+    return stamped
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _eye_starts_late(session, root: Path) -> tuple[Path, Path, float, int]:
+    """The module's session with the eye file's first `GAP_S` of rows gone:
+    the session's directory, its eye file (unstamped), the eye's true start on
+    the NI, in NI seconds, and the rows dropped."""
+    session_dir, eye_path = _copied(session, root)
+    dropped = int(GAP_S * OHDPI_FPS)
+    lines = eye_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    eye_path.write_text(lines[0] + "".join(lines[1 + dropped :]), encoding="utf-8")
+    eye_start_s = float(_truth_ni_s(np.array([dropped / OHDPI_FPS]), COPY)[0]) - _expected_delay_s(COPY)
+    return session_dir, eye_path, eye_start_s, dropped
+
+
+def _ni_starts_late(session, root: Path) -> tuple[Path, Path, float, int]:
+    """The module's session with the NI file's first `GAP_S` of samples gone
+    (its `fileCreateTime` left as it was, so the stamps are made against it):
+    the session's directory, its eye file (unstamped), the eye's true start on
+    the shortened NI, in NI seconds (negative), and the samples dropped."""
+    session_dir, eye_path = _copied(session, root)
+    ni_path = nidq_files(session_dir)[0]
+    dropped = int(GAP_S * NIDQ_SAMPLE_RATE_HZ)
+    words = np.fromfile(ni_path, dtype=np.int16).reshape(-1, COPY.n_channels + 2)
+    words[dropped:].tofile(ni_path)
+    eye_start_s = float(_truth_ni_s(np.array([0.0]), COPY)[0]) - _expected_delay_s(COPY) - dropped / NIDQ_SAMPLE_RATE_HZ
+    return session_dir, eye_path, eye_start_s, dropped
+
+
+def _record_reads(monkeypatch) -> list[tuple[float | None, float, int]]:
+    """`read_xa_channels`' calls, as `(stop_s, from_s, channels read)`."""
+    calls: list[tuple[float | None, float, int]] = []
+    original = analog_copy.read_xa_channels
+
+    def recording(ni_path, stop_s, channels=None, from_s=0.0):
+        start_s, read = original(ni_path, stop_s, channels, from_s=from_s)
+        calls.append((stop_s, from_s, len(read)))
+        return start_s, read
+
+    monkeypatch.setattr(analog_copy, "read_xa_channels", recording)
+    return calls
+
+
+def test_an_eye_file_started_well_after_the_ni_is_found_by_its_stamp(session, tmp_path, small_search):
+    session_dir, eye_path, eye_start_s, dropped = _eye_starts_late(session, tmp_path)
+    eye_path = _stamped(eye_path, _ni_created(session_dir) + datetime.timedelta(seconds=math.floor(eye_start_s)))
+
+    placement = place_eye_by_copy(session_dir, eye_path)
+
+    assert (placement.match.channel, placement.match.signal) == (COPY.channel, "Left P1-P4 (X, Y)")
+    ni_s, device_s = np.array(placement.match.pairs).T
+    # The eye's own seconds now start `dropped` frames later.
+    errors = ni_s - _truth_ni_s(device_s + dropped / OHDPI_FPS, COPY)
+    assert np.max(np.abs(errors)) <= PAIR_BOUND_S
+    assert abs(float(np.mean(errors))) <= MEAN_BOUND_S
+
+
+def test_an_eye_file_started_well_before_the_ni_is_found_by_its_stamp(session, tmp_path, small_search):
+    session_dir, eye_path, eye_start_s, dropped = _ni_starts_late(session, tmp_path)
+    eye_path = _stamped(eye_path, _ni_created(session_dir) + datetime.timedelta(seconds=math.floor(eye_start_s)))
+
+    placement = place_eye_by_copy(session_dir, eye_path)
+
+    assert (placement.match.channel, placement.match.signal) == (COPY.channel, "Left P1-P4 (X, Y)")
+    ni_s, device_s = np.array(placement.match.pairs).T
+    # The NI's own seconds now start `dropped` samples later.
+    errors = ni_s + dropped / NIDQ_SAMPLE_RATE_HZ - _truth_ni_s(device_s, COPY)
+    assert np.max(np.abs(errors)) <= PAIR_BOUND_S
+    assert abs(float(np.mean(errors))) <= MEAN_BOUND_S
+
+
+@pytest.mark.parametrize("missing", ["stamp", "fileCreateTime"])
+def test_without_both_clocks_the_search_is_not_aimed(session, tmp_path, small_search, caplog, missing):
+    """The same late eye file, its name unstamped or its NI meta without
+    `fileCreateTime`: the search is not aimed, so the copy is beyond it
+    (`NoCopy`), and an INFO line names the eye file and why."""
+    session_dir, eye_path, eye_start_s, _ = _eye_starts_late(session, tmp_path)
+    if missing == "fileCreateTime":
+        eye_path = _stamped(eye_path, _ni_created(session_dir) + datetime.timedelta(seconds=math.floor(eye_start_s)))
+        meta = nidq_files(session_dir)[0].with_suffix(".meta")
+        kept = [line for line in meta.read_text(encoding="utf-8").splitlines() if not line.startswith("fileCreateTime=")]
+        meta.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+    with caplog.at_level(logging.INFO, logger=analog_copy.__name__), pytest.raises(NoCopy):
+        place_eye_by_copy(session_dir, eye_path)
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and str(eye_path) in r.getMessage()]
+    assert len(infos) == 1
+    assert ("fileCreateTime" if missing == "fileCreateTime" else "OpenIris") in infos[0]
+
+
+def test_the_aimed_search_reads_from_the_aimed_ni_start(session, tmp_path, small_search, monkeypatch):
+    """The eye file stamped `d` seconds after the NI's creation: every XA
+    channel is read over `[d - CLOCK_SLACK_S, d + SEARCH_PREFIX_S +
+    CLOCK_SLACK_S]`, not from 0; then the chosen channel whole."""
+    session_dir, eye_path, eye_start_s, _ = _eye_starts_late(session, tmp_path)
+    d = float(math.floor(eye_start_s))
+    eye_path = _stamped(eye_path, _ni_created(session_dir) + datetime.timedelta(seconds=d))
+    calls = _record_reads(monkeypatch)
+
+    place_eye_by_copy(session_dir, eye_path)
+
+    (prefix_stop, prefix_from, n_read), whole = calls
+    assert prefix_from == pytest.approx(d - 10.0)
+    assert prefix_stop == pytest.approx(d + 60.0 + 10.0)
+    assert n_read == COPY.n_channels
+    assert whole == (None, 0.0, 1)
+
+
+def test_the_openiris_stamp_is_parsed_by_its_own_month_names():
+    assert parse_openiris_stamp("OpenIris-2024Jul31-114628") == datetime.datetime(2024, 7, 31, 11, 46, 28)
+    assert parse_openiris_stamp("OpenIris-2024JUL31-114628") == datetime.datetime(2024, 7, 31, 11, 46, 28)
+    assert parse_openiris_stamp("OpenIris-2026dec01-000000") == datetime.datetime(2026, 12, 1, 0, 0, 0)
+    for name in ("OpenIris-synthetic", "OpenIris-2024Foo31-114628", "OpenIris-2024Feb30-114628",
+                 "OpenIris-2024Jul31-256628", "recording-2024Jul31-114628"):
+        with pytest.raises(ValueError):
+            parse_openiris_stamp(name)
+
+
+def test_the_clock_offset_reads_both_clocks_in_one_zone(monkeypatch):
+    """Both stamps are lab PCs' local time: subtracted as they are, or across a
+    change to daylight-saving time in `clock.NIDQ_TIMEZONE` where it is set.
+    One aware and one naive, the naive one is UTC, as `clock.aware_utc` has it."""
+    from wl_preproc.timebase import clock
+
+    eye_path = Path("OpenIris-2026Mar08-030100.txt")
+    ni_created = datetime.datetime(2026, 3, 8, 1, 59, 0)
+    monkeypatch.setattr(clock, "NIDQ_TIMEZONE", None)
+    assert analog_copy.clock_offset_s(eye_path, ni_created) == pytest.approx(62 * 60.0)
+    # New York springs from 02:00 to 03:00 that night: two minutes apart.
+    monkeypatch.setattr(clock, "NIDQ_TIMEZONE", "America/New_York")
+    assert analog_copy.clock_offset_s(eye_path, ni_created) == pytest.approx(120.0)
+    # The eye's 03:01:00 read as UTC, whatever the zone: 90 s after 07:59:30
+    # at UTC+5, which is 02:59:30 UTC.
+    aware = datetime.datetime(2026, 3, 8, 7, 59, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
+    assert analog_copy.clock_offset_s(eye_path, aware) == pytest.approx(90.0)

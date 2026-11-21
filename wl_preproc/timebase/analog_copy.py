@@ -84,8 +84,10 @@ whole. The rest is the caller's: the fit, the lag (amendment 79), the rows.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import logging
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,6 +150,12 @@ MAX_DROPPED_FRACTION = 0.1
 #: above the copy's 4-5 ms of output latency, far below the spacing of
 #: saccades. Set on synthetic data; revisited on real traces (hardware check 17).
 LAG_CEILING_S = 0.03
+#: Either way of the start the two files' clocks give the eye file on the NI
+#: (amendment 85, draft), the search reads this much more of each channel:
+#: two lab PCs' wall clocks, each written to the second, and the delay between
+#: a recording's start and its stamp. Set on synthetic data; revisited on real
+#: traces (`docs/hardware-checks.md` item 17).
+CLOCK_SLACK_S = 120.0
 
 
 def _eye_families(eye: str) -> dict[str, tuple[tuple[str, ...], ...]]:
@@ -229,11 +237,17 @@ class CopyMatch:
 
 
 def find_channel(
-    eye_time_s: np.ndarray, candidates: dict[str, np.ndarray], channels: list[np.ndarray], fs_hz: float
+    eye_time_s: np.ndarray,
+    candidates: dict[str, np.ndarray],
+    channels: list[np.ndarray],
+    fs_hz: float,
+    *,
+    eye_from_s: float = 0.0,
 ) -> tuple[int, str]:
     """The `(channel, signal)` that carries the copy: the most distinct windows
-    over the eye's first `SEARCH_PREFIX_S`, against the channels' prefixes as
-    given. `candidates` maps a family's name (`"Left P1-P4 (X, Y)"`) to its
+    over `SEARCH_PREFIX_S` of the eye's, from `eye_from_s` after its first
+    sample, against the channels' stretches as given. Only windows are
+    counted, so where a stretch starts on the NI does not matter here. `candidates` maps a family's name (`"Left P1-P4 (X, Y)"`) to its
     columns, `(n_samples, k)`; a 1-D array is one column. A tie (the two eyes
     both follow the gaze) goes to the higher summed peak `R`. A constant
     family (an untracked eye) gives no window, and so no score.
@@ -243,7 +257,7 @@ def find_channel(
     eye_time_s = np.asarray(eye_time_s, dtype=np.float64)
     if not channels or not candidates:
         raise NoCopy(f"{len(channels)} analog channels and {len(candidates)} candidate traces: nothing to match")
-    starts = _window_starts(eye_time_s, limit_s=SEARCH_PREFIX_S)
+    starts = _window_starts(eye_time_s, limit_s=SEARCH_PREFIX_S, from_s=eye_from_s)
     references = [_Reference(channel, fs_hz) for channel in channels]
     best: tuple[int, float] = (-1, -math.inf)
     choice: tuple[int, str] | None = None
@@ -559,12 +573,13 @@ def _window_samples(fs_hz: float) -> int:
     return round(WINDOW_S * fs_hz)
 
 
-def _window_starts(eye_time_s: np.ndarray, limit_s: float | None = None) -> list[float]:
-    """Each window's start, `STEP_S` apart from the eye's first sample, every
-    window wholly inside the trace (and inside its first `limit_s`, if given)."""
+def _window_starts(eye_time_s: np.ndarray, limit_s: float | None = None, from_s: float = 0.0) -> list[float]:
+    """Each window's start, `STEP_S` apart from `from_s` after the eye's first
+    sample, every window wholly inside the trace (and inside `limit_s` from
+    there, if given)."""
     if eye_time_s.size < 2:
         return []
-    first, end = float(eye_time_s[0]), float(eye_time_s[-1])
+    first, end = float(eye_time_s[0]) + max(from_s, 0.0), float(eye_time_s[-1])
     if limit_s is not None:
         end = min(end, first + limit_s)
     count = max(math.floor((end - first - WINDOW_S) / STEP_S + 1e-9) + 1, 0)
@@ -686,26 +701,33 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
     """Place the eye file at `eye_path` on the session's NI clock by its copy.
 
     The NI file is the session's first (`clock.nidq_files`), the one on session
-    time. The channel is found on every XA channel's first `SEARCH_PREFIX_S`
+    time. The channel is found on a stretch of every XA channel
     (`find_channel`), and only that channel is then read whole (`match_copy`).
 
-    **The two prefixes line up only if the files started together.**
-    `find_channel` lays the eye file's own first `SEARCH_PREFIX_S` against each
-    channel's first `SEARCH_PREFIX_S`, counted from the NI's first sample: where
-    the eye file starts on the NI is what the copy is to find, and nothing
-    places it before. (In the synthetic sessions the two start 0.1 s apart.)
-    Two files that started more than about `SEARCH_PREFIX_S - MIN_PAIRS *
-    STEP_S` (400 s) apart, the eye file that much before the NI or that much
-    after it, share too few windows in their prefixes, and the copy is reported
-    absent (`NoCopy`), never matched wrongly. What a person then gets is 3b-3's
+    **The search is aimed by the two files' clocks** (amendment 85, draft).
+    `d`, the eye file's start less the NI's, is OpenIris's file-name stamp
+    (`parse_openiris_stamp`) less SpikeGLX's `fileCreateTime`, both the lab
+    PCs' local time, to the second (`clock_offset_s`). The eye's windows are
+    taken over `SEARCH_PREFIX_S` from `max(0, -d)` of its own time, which is
+    `max(0, d)` on the NI; each channel is read over that, `CLOCK_SLACK_S`
+    either way, clipped to the file. The clocks only aim the search: the match
+    is the whole channel's, and its pairs are the copy's alone.
+
+    **Without both clocks, `d` is 0** (an INFO line says why): the eye file is
+    taken to start with the NI. Two files that started more than about
+    `SEARCH_PREFIX_S - MIN_PAIRS * STEP_S` (400 s) apart, the eye file that
+    much before the NI, or that much and `CLOCK_SLACK_S` after it, then share
+    too few windows in the stretches searched, and the copy is reported
+    absent (`NoCopy`), never matched wrongly. The same holds where the clocks
+    are wrong by more than `CLOCK_SLACK_S`. What a person then gets is 3b-3's
     placement: with no sync box the eye file has no barcodes, and the session
     fails as `no_barcode`; with a partial box the eye file is placed over the
     box's span only.
 
     Raises `NoCopy` when no channel gives `MIN_PAIRS` distinct windows in the
-    prefixes (absent), and `CopyRefused` when the chosen channel, matched
-    whole, is refused (failed, amendment 77), including when it then gives too
-    few distinct windows: the prefix has already shown a copy there. Either is
+    search (absent), and `CopyRefused` when the chosen channel, matched whole,
+    is refused (failed, amendment 77), including when it then gives too few
+    distinct windows: the search has already shown a copy there. Either is
     logged first as a WARNING naming the eye file, as `intan.py::place_intan`
     does: nothing in `wl_preproc` configures logging, so an INFO line would
     never be seen.
@@ -713,22 +735,27 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
     from wl_preproc.timebase.clock import nidq_files
 
     ni_path = nidq_files(session_dir)[0]
-    _, fs_hz = _decimation(read_nidq_meta(ni_path.with_suffix(".meta")).sample_rate_hz)
+    meta = read_nidq_meta(ni_path.with_suffix(".meta"))
+    _, fs_hz = _decimation(meta.sample_rate_hz)
     eye_time_s, candidates = eye_candidates(eye_path)
+    offset_s = clock_offset_s(eye_path, meta.file_created)
+    ni_from_s = max(offset_s, 0.0)
     try:
-        start_s, prefixes = read_xa_channels(ni_path, SEARCH_PREFIX_S)
-        channel, signal = find_channel(eye_time_s, candidates, prefixes, fs_hz)
-        # The prefixes go before the chosen channel is read whole.
-        del prefixes
-        _, (whole,) = read_xa_channels(ni_path, None, channels=[channel])
+        _, stretches = read_xa_channels(
+            ni_path, ni_from_s + SEARCH_PREFIX_S + CLOCK_SLACK_S, from_s=max(ni_from_s - CLOCK_SLACK_S, 0.0)
+        )
+        channel, signal = find_channel(eye_time_s, candidates, stretches, fs_hz, eye_from_s=max(-offset_s, 0.0))
+        # The stretches go before the chosen channel is read whole.
+        del stretches
+        start_s, (whole,) = read_xa_channels(ni_path, None, channels=[channel])
         try:
             match = match_copy(eye_time_s, candidates[signal], whole, fs_hz)
         except NoCopy as short:
-            # The prefix found `MIN_PAIRS` distinct windows on this channel, so
+            # The search found `MIN_PAIRS` distinct windows on this channel, so
             # a copy is there: too few over the whole channel is a failure.
             raise CopyRefused(
-                f"channel XA{channel}'s {signal!r} gave at least {MIN_PAIRS} distinct windows in the first "
-                f"{SEARCH_PREFIX_S:g} s, but matched whole: {short}"
+                f"channel XA{channel}'s {signal!r} gave at least {MIN_PAIRS} distinct windows in the search, "
+                f"but matched whole: {short}"
             ) from short
     except (NoCopy, CopyRefused) as refusal:
         logger.warning("%s: %s", eye_path, refusal)
@@ -738,22 +765,96 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
     return CopyPlacement(match=placed, first_sample=_nearest_row(eye_time_s, pairs[0][1]))
 
 
+#: OpenIris's default file name: `OpenIris-YYYYMonDD-HHMMSS`, its recording's
+#: start on the eye PC's local clock, to the second
+#: (`OpenIris-2024Jul31-114628`, the reference recording's). Anything may
+#: follow it but another digit.
+_OPENIRIS_STAMP = re.compile(r"OpenIris-(\d{4})([A-Za-z]{3})(\d{2})-(\d{2})(\d{2})(\d{2})(?!\d)")
+# English, whatever the locale: `strptime`'s `%b` is the locale's.
+_MONTHS = {name: number for number, name in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), start=1)}
+
+
+def parse_openiris_stamp(name: str) -> datetime.datetime:
+    """The naive local time in an OpenIris file name (`name` its stem, or its
+    stem's start), the month's abbreviation in any case. Raises `ValueError`
+    saying why, for a name without the stamp or with one that is no date."""
+    found = _OPENIRIS_STAMP.match(name)
+    if found is None:
+        raise ValueError(f"{name!r} is not OpenIris's default name, OpenIris-YYYYMonDD-HHMMSS")
+    year, month, day, hour, minute, second = found.groups()
+    if month.lower() not in _MONTHS:
+        raise ValueError(f"{name!r}: {month!r} is not a month")
+    try:
+        return datetime.datetime(int(year), _MONTHS[month.lower()], int(day), int(hour), int(minute), int(second))
+    except ValueError as error:
+        raise ValueError(f"{name!r}: its stamp is not a time ({error})") from error
+
+
+def clock_offset_s(eye_path: Path, ni_created: datetime.datetime | None) -> float:
+    """The eye file's start less the NI file's, in seconds, by their clocks:
+    the eye's file-name stamp (`parse_openiris_stamp`) less `ni_created`, the
+    NI's `fileCreateTime`. Positive: the eye file started after the NI.
+
+    Both are lab PCs' local time, so both are read in one zone: subtracted as
+    they are, or in `clock.NIDQ_TIMEZONE` where it is set, so that a change
+    of daylight-saving time between them counts. One aware and one naive, the
+    naive one is UTC (`clock.aware_utc`). Not the file's mtime, which marks the
+    end of writing and which a copy resets (ruling R14).
+
+    0, with one INFO line naming the eye file and why, where either is
+    missing: the name carries no stamp, or one that is no time, or the NI has
+    no `fileCreateTime`."""
+    from wl_preproc.timebase import clock
+
+    try:
+        eye_started = parse_openiris_stamp(eye_path.stem)
+    except ValueError as missing:
+        reason = str(missing)
+    else:
+        if ni_created is not None:
+            return _wall_difference_s(eye_started, ni_created, clock.NIDQ_TIMEZONE, clock.aware_utc)
+        reason = "the NI file's .meta has no fileCreateTime"
+    logger.info("%s: the copy's search is not aimed by the clocks (the eye file is taken to start with the NI): %s",
+                eye_path, reason)
+    return 0.0
+
+
+def _wall_difference_s(later: datetime.datetime, earlier: datetime.datetime, zone: str | None, aware_utc) -> float:
+    """`later - earlier` in seconds, the two read in one zone."""
+    if (later.tzinfo is None) != (earlier.tzinfo is None):
+        later, earlier = aware_utc(later), aware_utc(earlier)
+    elif later.tzinfo is None and zone is not None:
+        import zoneinfo
+
+        tz = zoneinfo.ZoneInfo(zone)
+        later, earlier = later.replace(tzinfo=tz), earlier.replace(tzinfo=tz)
+    if later.tzinfo is not None:
+        # Through UTC: two times with one tzinfo subtract as if naive.
+        later, earlier = later.astimezone(datetime.timezone.utc), earlier.astimezone(datetime.timezone.utc)
+    return (later - earlier).total_seconds()
+
+
 def read_xa_channels(
-    ni_path: Path, stop_s: float | None, channels: Sequence[int] | None = None
+    ni_path: Path, stop_s: float | None, channels: Sequence[int] | None = None, from_s: float = 0.0
 ) -> tuple[float, list[np.ndarray]]:
     """The NI file's XA channels (the census's non-multiplexed analog ones,
     `XA<k>`), every one or those `channels` names, in that order, decimated by
     block means to about `DECIMATED_RATE_HZ`, as float32 in the file's int16
     counts. Each is streamed through `channels.column_chunks`, a block-aligned
-    chunk at a time, and no row at or past `stop_s` (NI seconds from the file's
-    first sample; None, the whole file) is read. Only whole blocks are kept.
+    chunk at a time, and no row before `from_s` or at or past `stop_s` (NI
+    seconds from the file's first sample; None, the whole file) is read. Only
+    whole blocks are kept, on one grid of blocks from the file's first sample,
+    so a stretch's blocks are the whole file's: the first is the first whole
+    block at or after `from_s`.
 
     **A decimated sample's time is its block's centre.** The mean of the block
     of native samples `j*B` to `j*B + B - 1` stands for the instant
     `(j*B + (B - 1) / 2) / niSampRate`: 14.5 samples after the block's first at
     30 kHz, not its first. So the first float returned is the first decimated
-    sample's NI time, `(B - 1) / 2 / niSampRate`, and sample `j` is at that
-    plus `j / fs_hz`, `fs_hz` being `_decimation`'s rate.
+    sample's NI time, `(j0*B + (B - 1) / 2) / niSampRate` for its block `j0`
+    (0 from the file's start), and sample `j` is at that plus `j / fs_hz`,
+    `fs_hz` being `_decimation`'s rate.
     """
     meta = read_nidq_meta(ni_path.with_suffix(".meta"))
     block, _ = _decimation(meta.sample_rate_hz)
@@ -765,14 +866,17 @@ def read_xa_channels(
     rows = _channels.n_rows(ni_path, meta.n_channels, np.int16)
     if stop_s is not None:
         rows = min(rows, math.floor(stop_s * meta.sample_rate_hz))
-    n_blocks = max(rows, 0) // block
+    first_block = max(math.ceil(from_s * meta.sample_rate_hz / block - 1e-9), 0)
+    end_block = max(rows, 0) // block
+    n_blocks = max(end_block - first_block, 0)
     chunk_rows = block * max(_channels.CHUNK_ROWS // block, 1)
     decimated = []
     for k in wanted:
         out = np.empty(n_blocks, dtype=np.float32)
         filled = 0
         chunks = _channels.column_chunks(
-            ni_path, meta.n_channels, first_xa + k, np.int16, chunk_rows=chunk_rows, stop_row=n_blocks * block
+            ni_path, meta.n_channels, first_xa + k, np.int16, chunk_rows=chunk_rows,
+            start_row=first_block * block, stop_row=end_block * block,
         )
         for chunk in chunks:
             counts = chunk.view(np.int16).astype(np.float64)
@@ -780,7 +884,7 @@ def read_xa_channels(
             out[filled : filled + means.size] = means
             filled += means.size
         decimated.append(out)
-    return (block - 1) / 2 / meta.sample_rate_hz, decimated
+    return (first_block * block + (block - 1) / 2) / meta.sample_rate_hz, decimated
 
 
 def eye_candidates(eye_path: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
