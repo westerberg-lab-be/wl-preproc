@@ -34,6 +34,7 @@ from wl_preproc.timebase.analog_copy import (
     MIN_PAIRS,
     SEARCH_PREFIX_S,
     CopyPlacement,
+    CopyRefused,
     NoCopy,
     eye_candidates,
     place_eye_by_copy,
@@ -257,3 +258,37 @@ def test_a_session_without_xa_channels_is_no_copy(tmp_path, caplog):
     assert any(
         record.levelno == logging.WARNING and str(eye_path) in record.getMessage() for record in caplog.records
     )
+
+
+def _warned_about(caplog, eye_path: Path) -> bool:
+    return any(record.levelno == logging.WARNING and str(eye_path) in record.getMessage() for record in caplog.records)
+
+
+def test_a_stalled_copy_is_refused_with_a_warning(tmp_path, caplog):
+    """A stall of 50 s, 20 ms late, mid-session: the copy is found, but its
+    pairs do not fit within `MAX_DROPPED_FRACTION`. `CopyRefused` (failed), said
+    as a WARNING naming the eye file, as a `NoCopy` is."""
+    stalled = EyeCopy(channel=COPY.channel, n_channels=COPY.n_channels, stall=(100.0, 150.0, 0.02))
+    session_dir, eye_path = _generate(tmp_path, _recipe(eye_copy=stalled))
+
+    with caplog.at_level(logging.WARNING, logger=analog_copy.__name__), pytest.raises(CopyRefused):
+        place_eye_by_copy(session_dir, eye_path)
+    assert _warned_about(caplog, eye_path)
+
+
+def test_too_few_windows_over_the_whole_channel_is_a_refusal(session, monkeypatch, caplog):
+    """`find_channel` found `MIN_PAIRS` distinct windows on the chosen channel's
+    prefix, so a copy is there: a `NoCopy` from matching that channel whole is
+    a failure (`CopyRefused`, amendment 77), not an absence, and names both."""
+    session_dir, eye_path = session
+
+    def too_few(*args, **kwargs):
+        raise NoCopy("3 of 25 windows matched the channel distinctly, and a copy needs 20")
+
+    monkeypatch.setattr(analog_copy, "match_copy", too_few)
+    with caplog.at_level(logging.WARNING, logger=analog_copy.__name__), pytest.raises(CopyRefused) as refused:
+        place_eye_by_copy(session_dir, eye_path)
+    message = str(refused.value)
+    assert f"XA{COPY.channel}" in message and "Left P1-P4 (X, Y)" in message and "3 of 25 windows" in message
+    assert isinstance(refused.value.__cause__, NoCopy)
+    assert _warned_about(caplog, eye_path)

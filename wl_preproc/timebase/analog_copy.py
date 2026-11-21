@@ -689,18 +689,26 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
     time. The channel is found on every XA channel's first `SEARCH_PREFIX_S`
     (`find_channel`), and only that channel is then read whole (`match_copy`).
 
-    **The prefix is counted from the NI's first sample.** It is meant to cover
-    the eye's own first `SEARCH_PREFIX_S`, which `find_channel` searches, but
-    where the eye file starts on the NI is what the copy is to find: nothing
-    places it before. The rig starts both recordings at the session's start
-    (in the synthetic sessions, 0.1 s apart), so the eye's start is taken as
-    the NI's. An eye file that started more than about `SEARCH_PREFIX_S -
-    MIN_PAIRS * STEP_S` after the NI leaves too few of its windows inside the
-    prefix, and is `NoCopy`: a fallback to its barcodes, never a wrong match.
+    **The two prefixes line up only if the files started together.**
+    `find_channel` lays the eye file's own first `SEARCH_PREFIX_S` against each
+    channel's first `SEARCH_PREFIX_S`, counted from the NI's first sample: where
+    the eye file starts on the NI is what the copy is to find, and nothing
+    places it before. (In the synthetic sessions the two start 0.1 s apart.)
+    Two files that started more than about `SEARCH_PREFIX_S - MIN_PAIRS *
+    STEP_S` (400 s) apart, the eye file that much before the NI or that much
+    after it, share too few windows in their prefixes, and the copy is reported
+    absent (`NoCopy`), never matched wrongly. What a person then gets is 3b-3's
+    placement: with no sync box the eye file has no barcodes, and the session
+    fails as `no_barcode`; with a partial box the eye file is placed over the
+    box's span only.
 
-    Raises `NoCopy` or `CopyRefused`, after logging its sentence as a WARNING
-    naming the eye file, as `intan.py::place_intan` does: nothing in
-    `wl_preproc` configures logging, so an INFO line would never be seen.
+    Raises `NoCopy` when no channel gives `MIN_PAIRS` distinct windows in the
+    prefixes (absent), and `CopyRefused` when the chosen channel, matched
+    whole, is refused (failed, amendment 77), including when it then gives too
+    few distinct windows: the prefix has already shown a copy there. Either is
+    logged first as a WARNING naming the eye file, as `intan.py::place_intan`
+    does: nothing in `wl_preproc` configures logging, so an INFO line would
+    never be seen.
     """
     from wl_preproc.timebase.clock import nidq_files
 
@@ -713,7 +721,15 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
         # The prefixes go before the chosen channel is read whole.
         del prefixes
         _, (whole,) = read_xa_channels(ni_path, None, channels=[channel])
-        match = match_copy(eye_time_s, candidates[signal], whole, fs_hz)
+        try:
+            match = match_copy(eye_time_s, candidates[signal], whole, fs_hz)
+        except NoCopy as short:
+            # The prefix found `MIN_PAIRS` distinct windows on this channel, so
+            # a copy is there: too few over the whole channel is a failure.
+            raise CopyRefused(
+                f"channel XA{channel}'s {signal!r} gave at least {MIN_PAIRS} distinct windows in the first "
+                f"{SEARCH_PREFIX_S:g} s, but matched whole: {short}"
+            ) from short
     except (NoCopy, CopyRefused) as refusal:
         logger.warning("%s: %s", eye_path, refusal)
         raise
