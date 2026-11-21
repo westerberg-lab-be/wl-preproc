@@ -22,6 +22,7 @@ import pytest
 
 from wl_preproc.timebase.analog_copy import (
     DECIMATED_RATE_HZ,
+    FAMILIES,
     MAX_DROPPED_FRACTION,
     MIN_CORRELATION,
     MIN_PAIRS,
@@ -34,12 +35,6 @@ from wl_preproc.timebase.analog_copy import (
     _window_starts,
     find_channel,
     match_copy,
-)
-
-#: The families `find_channel` is given (Task 3 builds them from the eye file),
-#: each at most 32 characters, the width of Task 4's `signal` column.
-FAMILY_NAMES = tuple(
-    f"{eye} {family}" for eye in ("Left", "Right") for family in ("P1-P4 (X, Y)", "P1 (X, Y)", "PupilWidth")
 )
 
 EYE_FS_HZ = 500.0
@@ -206,7 +201,10 @@ def test_a_family_with_a_constant_or_collinear_column_is_fitted_on_the_rest():
 
 
 def test_family_names_fit_the_signal_column():
-    assert all(len(name) <= 32 for name in FAMILY_NAMES)
+    """Each family `eye_candidates` builds is named in at most 32 characters,
+    the width of Task 4's `signal varchar(32)`."""
+    assert FAMILIES
+    assert all(len(name) <= 32 for name in FAMILIES)
 
 
 def test_the_channel_and_signal_are_found_among_noise():
@@ -227,7 +225,7 @@ def test_the_channel_and_signal_are_found_among_noise():
         "Left P1 (X, Y)": np.column_stack((p1_x, p1_y)),
         "Left PupilWidth": 40.0 + np.cumsum(rng.normal(0.0, 0.2, eye_time.size)),
     }
-    assert sorted(candidates) == sorted(FAMILY_NAMES)
+    assert sorted(candidates) == sorted(FAMILIES)
     channels = [_noise_channel(rng, 225.0) for _ in range(16)]
     channels[11] = _copy(eye_time, _mixed(left_x, left_y, "tanh"), rng, ni_duration_s=225.0)
 

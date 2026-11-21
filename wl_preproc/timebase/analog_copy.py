@@ -60,8 +60,10 @@ dropped stretches are named, since the eye's time there is the line's.
 
 **Time.** The eye's is its own device seconds, from frame numbers, so a dropped
 frame leaves a gap rather than shifting every later sample. The channel's
-sample `k` is at `k / fs_hz` NI seconds; what that instant means against the
-NI's native samples is the caller's (Task 3's decimation).
+sample `k` is at `k / fs_hz` seconds from the channel's first sample; what
+that instant means against the NI's native samples is the reading layer's
+(`read_xa_channels`: each decimated sample is its block's mean, stamped at the
+block's centre).
 
 **Memory.** The anchor's FFT and its normalisation span the channel given
 (one decimated channel, float64, about 1.4 GB at the peak for 12 h at 1 kHz),
@@ -71,20 +73,34 @@ channel-length array, not two. The walk holds a window's worth of arrays at a
 time. `find_channel` keeps every channel's spectrum for its prefix (about
 10 MB a channel for 600 s), since every family searches them all.
 
-Pure numeric: no DataJoint, no file I/O, no `wl_preproc.synth`, as `fit.py`.
+**Reading the files** (`place_eye_by_copy`, at the end). The matcher above is
+pure numeric: no DataJoint, no file I/O, no `wl_preproc.synth`, as `fit.py`.
+The reading layer reads the session's first NI file's XA channels, decimated
+(`read_xa_channels`), and the eye file's families (`eye_candidates`), finds the
+channel on every channel's first `SEARCH_PREFIX_S`, and matches the chosen one
+whole. The rest is the caller's: the fit, the lag (amendment 79), the rows.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 import scipy.fft
 import scipy.linalg
 
+from wl_preproc.eye.ohdpi import EYES, P1_X, P1_Y, P4_X, P4_Y, PUPIL_WIDTH, read_columns, read_ohdpi
+from wl_preproc.timebase import channels as _channels
+from wl_preproc.timebase._nidq_meta import read_nidq_meta
 from wl_preproc.timebase.fit import fit_pairs_across
+
+logger = logging.getLogger(__name__)
 
 # Every constant below was set on synthetic data (Task 1's generator, and this
 # module's tests) and is revisited on real traces with their copy
@@ -132,6 +148,25 @@ MAX_DROPPED_FRACTION = 0.1
 #: above the copy's 4-5 ms of output latency, far below the spacing of
 #: saccades. Set on synthetic data; revisited on real traces (hardware check 17).
 LAG_CEILING_S = 0.03
+
+
+def _eye_families(eye: str) -> dict[str, tuple[tuple[str, ...], ...]]:
+    return {
+        f"{eye} P1-P4 (X, Y)": ((eye + P1_X, eye + P4_X), (eye + P1_Y, eye + P4_Y)),
+        f"{eye} P1 (X, Y)": ((eye + P1_X,), (eye + P1_Y,)),
+        f"{eye} PupilWidth": ((eye + PUPIL_WIDTH,),),
+    }
+
+
+#: The candidates for what the DAC puts out (amendment 78a), each a family the
+#: matcher fits jointly: name to its columns, each column one eye-file column
+#: (`("LeftCR1X",)`) or the first less the second (`("LeftCR1X", "LeftCR4X")`,
+#: P1-P4 X). In order, `Left` before `Right`, as `eye_candidates` returns them.
+#: Each name is at most 32 characters, the width of the `signal` column it is
+#: stored in.
+FAMILIES: Mapping[str, tuple[tuple[str, ...], ...]] = MappingProxyType(
+    {name: columns for eye in EYES for name, columns in _eye_families(eye).items()}
+)
 
 # A window more than this fraction missing (NaN, or in a gap of dropped frames)
 # gives no pair: its correlation would rest on interpolation.
@@ -625,3 +660,160 @@ def _columns(trace: np.ndarray) -> np.ndarray:
 def _check_lengths(eye_time_s: np.ndarray, trace: np.ndarray) -> None:
     if len(trace) != eye_time_s.size:
         raise ValueError(f"a trace of {len(trace)} samples on {eye_time_s.size} eye times")
+
+
+# ---------------------------------------------------------------------------
+# Reading the files: the session's NI file and its eye file.
+
+
+@dataclass(frozen=True)
+class CopyPlacement:
+    """An eye file placed on the NI's clock by its copy.
+
+    `match`'s pairs are `(session_s, device_s)`: the NI's seconds from the
+    first NI file's first sample (session time under the NI), and the eye's
+    own seconds from its first frame, by frame number. `match.channel` is the
+    XA channel's index among the XA channels (`XA<k>`), and `match.signal` the
+    family's name (`FAMILIES`). `first_sample` is the native index, in the eye
+    file's rows, of the eye sample at the first pair: the row whose frame is
+    nearest the first pair's device time (the earlier at a tie)."""
+
+    match: CopyMatch
+    first_sample: int
+
+
+def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
+    """Place the eye file at `eye_path` on the session's NI clock by its copy.
+
+    The NI file is the session's first (`clock.nidq_files`), the one on session
+    time. The channel is found on every XA channel's first `SEARCH_PREFIX_S`
+    (`find_channel`), and only that channel is then read whole (`match_copy`).
+
+    **The prefix is counted from the NI's first sample.** It is meant to cover
+    the eye's own first `SEARCH_PREFIX_S`, which `find_channel` searches, but
+    where the eye file starts on the NI is what the copy is to find: nothing
+    places it before. The rig starts both recordings at the session's start
+    (in the synthetic sessions, 0.1 s apart), so the eye's start is taken as
+    the NI's. An eye file that started more than about `SEARCH_PREFIX_S -
+    MIN_PAIRS * STEP_S` after the NI leaves too few of its windows inside the
+    prefix, and is `NoCopy`: a fallback to its barcodes, never a wrong match.
+
+    Raises `NoCopy` or `CopyRefused`, after logging its sentence as a WARNING
+    naming the eye file, as `intan.py::place_intan` does: nothing in
+    `wl_preproc` configures logging, so an INFO line would never be seen.
+    """
+    from wl_preproc.timebase.clock import nidq_files
+
+    ni_path = nidq_files(session_dir)[0]
+    _, fs_hz = _decimation(read_nidq_meta(ni_path.with_suffix(".meta")).sample_rate_hz)
+    eye_time_s, candidates = eye_candidates(eye_path)
+    try:
+        start_s, prefixes = read_xa_channels(ni_path, SEARCH_PREFIX_S)
+        channel, signal = find_channel(eye_time_s, candidates, prefixes, fs_hz)
+        # The prefixes go before the chosen channel is read whole.
+        del prefixes
+        _, (whole,) = read_xa_channels(ni_path, None, channels=[channel])
+        match = match_copy(eye_time_s, candidates[signal], whole, fs_hz)
+    except (NoCopy, CopyRefused) as refusal:
+        logger.warning("%s: %s", eye_path, refusal)
+        raise
+    pairs = tuple((start_s + ni_s, device_s) for ni_s, device_s in match.pairs)
+    placed = dataclasses.replace(match, pairs=pairs, channel=channel, signal=signal)
+    return CopyPlacement(match=placed, first_sample=_nearest_row(eye_time_s, pairs[0][1]))
+
+
+def read_xa_channels(
+    ni_path: Path, stop_s: float | None, channels: Sequence[int] | None = None
+) -> tuple[float, list[np.ndarray]]:
+    """The NI file's XA channels (the census's non-multiplexed analog ones,
+    `XA<k>`), every one or those `channels` names, in that order, decimated by
+    block means to about `DECIMATED_RATE_HZ`, as float32 in the file's int16
+    counts. Each is streamed through `channels.column_chunks`, a block-aligned
+    chunk at a time, and no row at or past `stop_s` (NI seconds from the file's
+    first sample; None, the whole file) is read. Only whole blocks are kept.
+
+    **A decimated sample's time is its block's centre.** The mean of the block
+    of native samples `j*B` to `j*B + B - 1` stands for the instant
+    `(j*B + (B - 1) / 2) / niSampRate`: 14.5 samples after the block's first at
+    30 kHz, not its first. So the first float returned is the first decimated
+    sample's NI time, `(B - 1) / 2 / niSampRate`, and sample `j` is at that
+    plus `j / fs_hz`, `fs_hz` being `_decimation`'s rate.
+    """
+    meta = read_nidq_meta(ni_path.with_suffix(".meta"))
+    block, _ = _decimation(meta.sample_rate_hz)
+    first_xa = meta.n_analog_channels - meta.n_xa_channels
+    wanted = list(range(meta.n_xa_channels)) if channels is None else list(channels)
+    for k in wanted:
+        if not 0 <= k < meta.n_xa_channels:
+            raise ValueError(f"{ni_path}: XA channel {k} is not among its {meta.n_xa_channels}")
+    rows = _channels.n_rows(ni_path, meta.n_channels, np.int16)
+    if stop_s is not None:
+        rows = min(rows, math.floor(stop_s * meta.sample_rate_hz))
+    n_blocks = max(rows, 0) // block
+    chunk_rows = block * max(_channels.CHUNK_ROWS // block, 1)
+    decimated = []
+    for k in wanted:
+        out = np.empty(n_blocks, dtype=np.float32)
+        filled = 0
+        chunks = _channels.column_chunks(
+            ni_path, meta.n_channels, first_xa + k, np.int16, chunk_rows=chunk_rows, stop_row=n_blocks * block
+        )
+        for chunk in chunks:
+            counts = chunk.view(np.int16).astype(np.float64)
+            means = counts.reshape(-1, block).mean(axis=1)
+            out[filled : filled + means.size] = means
+            filled += means.size
+        decimated.append(out)
+    return (block - 1) / 2 / meta.sample_rate_hz, decimated
+
+
+def eye_candidates(eye_path: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """The eye file's own seconds and its `FAMILIES`, in that order.
+
+    The seconds are `(frame_number - first_frame_number) / fs_hz`, `fs_hz`
+    being `eye.ohdpi.read_ohdpi`'s, so a dropped frame leaves a gap rather than
+    shifting every later sample. Each family is `(n_rows, k)` float64, one
+    column per entry of `FAMILIES`."""
+    recording = read_ohdpi(eye_path)
+    frames = np.asarray(recording.frame_numbers, dtype=np.int64)
+    eye_time_s = (frames - frames[0]) / recording.fs_hz
+    names = list(dict.fromkeys(name for family in FAMILIES.values() for column in family for name in column))
+    data = read_columns(eye_path, names)
+    candidates = {
+        signal: np.column_stack([_family_column(data, column) for column in family])
+        for signal, family in FAMILIES.items()
+    }
+    return eye_time_s, candidates
+
+
+def _family_column(data: Mapping[str, np.ndarray], column: tuple[str, ...]) -> np.ndarray:
+    """One family column: a file column, or the first less the second."""
+    values = np.asarray(data[column[0]], dtype=np.float64)
+    if len(column) == 2:
+        return values - np.asarray(data[column[1]], dtype=np.float64)
+    if len(column) != 1:
+        raise ValueError(f"a family column is one name or two, not {column!r}")
+    return values
+
+
+def _decimation(sample_rate_hz: float) -> tuple[int, float]:
+    """The block length `B` and the decimated rate, `niSampRate / B`.
+
+    `B` is `niSampRate / DECIMATED_RATE_HZ` rounded to an integer, never below
+    1: SpikeGLX's `niSampRate` is a calibrated rate (30000.123 Hz, say), so the
+    ratio is rarely whole. The rate is then `niSampRate / B` exactly, not
+    `DECIMATED_RATE_HZ`, so that decimated sample `j` is at `j * B` native
+    samples, with no error growing over the file (at 30000.123 Hz, 1000.004 Hz)."""
+    block = max(round(sample_rate_hz / DECIMATED_RATE_HZ), 1)
+    return block, sample_rate_hz / block
+
+
+def _nearest_row(eye_time_s: np.ndarray, device_s: float) -> int:
+    """The row whose time is nearest `device_s`, the earlier at a tie."""
+    right = int(np.searchsorted(eye_time_s, device_s, side="left"))
+    if right == 0:
+        return 0
+    if right == eye_time_s.size:
+        return right - 1
+    left = right - 1
+    return left if device_s - eye_time_s[left] <= eye_time_s[right] - device_s else right

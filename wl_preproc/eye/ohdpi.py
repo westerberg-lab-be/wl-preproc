@@ -42,6 +42,14 @@ SYNC_WORD_COLUMN = "Int0"
 # this is the constant.
 SYNC_BIT_INDEX = 0
 
+# Per-eye column names, read after an eye of `EYES` (`"LeftCR1X"`): P1, the
+# first Purkinje image, in `CR1`; P4 in `CR4`; and the pupil's width. Named
+# for a consumer that builds its columns from them, as the analog copy's
+# candidates are built (`timebase/analog_copy.py::FAMILIES`).
+P1_X, P1_Y = "CR1X", "CR1Y"
+P4_X, P4_Y = "CR4X", "CR4Y"
+PUPIL_WIDTH = "PupilWidth"
+
 _FRAME_NUMBER = "LeftFrameNumber"
 _SECONDS = "LeftSeconds"
 

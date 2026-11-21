@@ -41,13 +41,16 @@ def n_values(path: Path, dtype) -> int:
 
 
 def column_chunks(
-    path: Path, n_channels: int, column: int, dtype, chunk_rows: int = CHUNK_ROWS
+    path: Path, n_channels: int, column: int, dtype, chunk_rows: int = CHUNK_ROWS, stop_row: int | None = None
 ) -> Iterator[np.ndarray]:
     """Column `column` of `path`'s `(samples, n_channels)` values, as uint16
-    chunks of at most `chunk_rows` samples, in order. Each chunk is a copy, so
+    chunks of at most `chunk_rows` samples, in order, up to (not including)
+    sample `stop_row` if given: nothing past it is read. Each chunk is a copy, so
     nothing holds the map open past it. An int16 word becomes the uint16 with
     the same bits, as `astype(np.uint16)` makes it."""
     rows = n_rows(path, n_channels, dtype)
+    if stop_row is not None:
+        rows = min(rows, max(stop_row, 0))
     if rows == 0:
         return
     mapped = np.memmap(path, dtype=dtype, mode="r", shape=(rows, n_channels))
