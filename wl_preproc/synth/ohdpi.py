@@ -192,6 +192,44 @@ _INT0_BASE = 0b1100
 SAMPLE_DTYPE_DECIMALS = 4
 
 
+# **The saccadic gaze of a session with an analog copy** (`saccadic_gaze_px`).
+# Fixations of 150-450 ms (uniform), each followed by a saccade: about three a
+# second, a free-viewing monkey's rate. Each target is drawn about the centre
+# with these spreads per axis, Y 0.75 of X as the sinusoids' 30 px against 40,
+# so saccades run 2-16 deg (5th to 95th percentile), median 7. A saccade's
+# duration is the main sequence's (Carpenter 1988, `Movements of the eyes`:
+# 2.2 ms/deg + 21 ms); its profile a raised cosine, whose peak velocity, pi/2
+# times the mean, is the main sequence's too (about 310 deg/s at 7 deg). X and Y share each saccade's
+# timing and profile, as one eye's rotation does. 8 px/deg puts X's spread at
+# 40 px, the sinusoid's amplitude: a raw P1 - P4 scale, not a calibrated one.
+SACCADE_FIXATION_S = (0.15, 0.45)
+SACCADE_TARGET_SD_DEG = (5.0, 3.75)
+SACCADE_MAIN_SEQUENCE_S = (0.021, 0.0022)  # intercept s, slope s/deg
+SACCADE_PX_PER_DEG = 8.0
+_SACCADE_SEED_KEY = 0x5ACC
+
+
+def saccadic_gaze_px(n: int, rng: np.random.Generator) -> np.ndarray:
+    """`(2, n)` gaze in P1 - P4 pixels, X then Y: fixations joined by
+    main-sequence saccades (`SACCADE_*`), one frame per column."""
+    sd = np.array(SACCADE_TARGET_SD_DEG)
+    intercept_s, slope_s = SACCADE_MAIN_SEQUENCE_S
+    gaze = np.empty((2, n))
+    position, i = rng.normal(0.0, sd), 0
+    while i < n:
+        hold = int(rng.uniform(*SACCADE_FIXATION_S) * OHDPI_FPS)
+        gaze[:, i : i + hold] = position[:, None]
+        i += hold
+        target = rng.normal(0.0, sd)
+        amplitude_deg = float(np.hypot(*(target - position)))
+        frames = max(round((intercept_s + slope_s * amplitude_deg) * OHDPI_FPS), 1)
+        shape = (1.0 - np.cos(np.pi * np.arange(1, frames + 1) / frames)) / 2.0
+        ramp = position[:, None] + (target - position)[:, None] * shape
+        gaze[:, i : i + frames] = ramp[:, : max(n - i, 0)]
+        position, i = target, i + frames
+    return gaze * SACCADE_PX_PER_DEG
+
+
 def _fmt(value: float) -> str:
     """One sample field, at the fixture's own decimal precision."""
     return f"{value:.{SAMPLE_DTYPE_DECIMALS}f}"
@@ -281,6 +319,18 @@ def eye_traces(recipe: SessionRecipe, drift_ppm: float = 0.0) -> EyeTraces:
     # distinguishable (see `RIGHT_EYE_ROTATION_OFFSET_PX`).
     rot_x_left = 40.0 * np.sin(2 * np.pi * 0.20 * t) + rng.normal(0, 0.5, n)
     rot_y_left = 30.0 * np.cos(2 * np.pi * 0.17 * t) + rng.normal(0, 0.5, n)
+
+    # **Saccades, for a session with an analog copy** (`SessionRecipe.eye_copy`):
+    # the sinusoids above are periodic, and a periodic trace matches its copy a
+    # period off as well as at the right shift, so the matcher rightly refuses
+    # it (`timebase/analog_copy.py`). Fixations and saccades make each window
+    # distinct, as a real eye's are. Added before the holds below, so a hold
+    # still holds; drawn from their own stream, so a recipe without a copy is
+    # byte-identical and one with a copy keeps every other draw.
+    if recipe.eye_copy is not None:
+        gaze = saccadic_gaze_px(n, np.random.default_rng([recipe.seed, _SACCADE_SEED_KEY]))
+        rot_x_left += gaze[0]
+        rot_y_left += gaze[1]
 
     # Held fixations OVERWRITE the drift for their own frames, rather than
     # adding to it: a calibration hold is the eye stopping, not the eye

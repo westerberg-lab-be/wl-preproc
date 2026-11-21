@@ -441,10 +441,16 @@ EYE_PROCESSING_IQR_S = 0.1e-3
 EYE_SLOW_FRAME_FRACTION = 0.02
 EYE_SLOW_FRAME_RANGE_S = (10e-3, 50e-3)
 
-# Mixed in the copy, so that it is not any one column the matcher reads (78).
+# Mixed in the copy, so that it is not any one column the matcher reads (78),
+# and limited by `tanh` at this many standard deviations of the mix, so that it
+# is not a linear map of the family the matcher fits jointly either: P1-P4
+# (X, Y) explains R^2 0.880-0.930 of it over six seeds, in 10-frame means
+# (0.997 at 3 SDs), while each 10 s window still reaches R 0.925-0.94 at the
+# least, 0.96 at the median, and its pairs lie within 0.07 ms of the truth
+# (`tests/synth/test_eye_copy.py`).
 EYE_COPY_X_WEIGHT = 0.7
 EYE_COPY_Y_WEIGHT = 0.3
-EYE_COPY_TANH_SCALE_SDS = 3.0
+EYE_COPY_TANH_SCALE_SDS = 0.8
 
 # An independent stream from the recipe's seed, so no other draw moves.
 _EYE_COPY_SEED_KEY = 0xEC09
@@ -477,10 +483,11 @@ def _eye_copy_analog(recipe: SessionRecipe, copy: EyeCopy, n_samples: int, ni_dr
     and `copy.channel` the eye's copy (or noise alone, or flat).
 
     The value is `0.7 * (P1-P4 X) + 0.3 * (P1-P4 Y)` of the left eye, soft-limited
-    by `tanh` at 3 standard deviations of the trace, times `gain_v` (volts per
-    pixel), plus `offset_v`, held per frame from its arrival, averaged over
-    `smoothing_samples`, with noise, clipped at `clip_v`. A mixed, mildly
-    nonlinear map, never one column of the eye file the matcher reads (78).
+    by `tanh` at `EYE_COPY_TANH_SCALE_SDS` standard deviations of the mix, times
+    `gain_v` (volts per pixel), plus `offset_v`, held per frame from its
+    arrival, averaged over `smoothing_samples`, with noise, clipped at
+    `clip_v`. A mixed, nonlinear map, never one column of the eye file the
+    matcher reads, nor a linear map of a family of them (78).
     Volts become int16 by SpikeGLX's convention: full scale is the range, so a
     reader gets volts back as `value * 5 / 32768`."""
     rng = np.random.default_rng([recipe.seed, _EYE_COPY_SEED_KEY, 1])
