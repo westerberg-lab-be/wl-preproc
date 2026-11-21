@@ -9,11 +9,26 @@ lines up at one shift; that shift, at the window's centre, is a pair
 `(ni_s, device_s)`, and pairs fit the eye's clock to the NI's as barcodes do
 (`fit.py::fit_pairs_across`).
 
-**What is compared.** Correlation, normalised over each window (Pearson), so
-the DAC's scale and offset drop out. The eye's trace is interpolated onto the
-channel's grid, `fs_hz`, before it is compared. The copy is not the trace: it
-is the tracker's output, which amendment 78a does not know, so the caller tries
-several candidate columns and `find_channel` takes the best.
+**What is compared.** At each shift, the channel's stretch is regressed on a
+window of a candidate *family* of the eye's columns jointly, by least squares
+on `[columns, 1]`, and the fit is scored by its multiple correlation `R`, the
+square root of the variance it explains. So the DAC's scale and offset drop
+out, and so does any linear mix of the family's columns: the copy is the
+tracker's output, which amendment 78a does not know, and OpenIris's calibrated
+gaze mixes P1-P4 X with Y. Matched against one column, such a copy's peak is
+tilted by the other column's saccades, about a millisecond a window. The
+families (`"Left P1-P4 (X, Y)"`, `"Left P1 (X, Y)"`, `"Left PupilWidth"`, and
+the same for `Right`) are the caller's; each is an `(n_samples, k)` array, and
+`find_channel` takes the best. A family with one column is Pearson's
+correlation's magnitude. The eye's columns are interpolated onto the
+channel's grid, `fs_hz`, before they are compared.
+
+**How `R` is computed.** A window's columns are centred and orthonormalised
+(QR, `_basis`), so `R^2` at a shift is the sum over the basis of each one's
+squared sliding correlation with the channel, over the channel's moving
+spread: `k` sliding correlations, by FFT for the anchor and directly for the
+walk. A column constant over the window (an untracked eye) or dependent on the
+others is dropped; a window with no column left is skipped.
 
 **The pairs, in two stages,** as `strobes.py` finds its own:
 
@@ -23,12 +38,13 @@ several candidate columns and `find_channel` takes the best.
 * **The walk.** Each later window is searched only within
   `RUNNER_UP_EXCLUSION_S` of the line through the pairs found so far.
 
-**Distinct, or no pair.** A window gives a pair only when its best shift
-correlates at least `MIN_CORRELATION` and beats the best rival shift (another
+**Distinct, or no pair.** A window gives a pair only when its best shift's
+`R` is at least `MIN_CORRELATION` and beats the best rival shift (another
 local maximum) more than `RUNNER_UP_EXCLUSION_S` from it by `MIN_PEAK_MARGIN`
 (`_distinct` says why a rival, not any shift). A flat channel correlates 0; a
 periodic stretch, or a fixation whose only movement is noise the copy does not
-share, has rivals as good as its peak. Each gives no pair rather than a guess.
+share, has rivals as good as its peak (`R` is never negative, so an
+anti-correlated shift is a rival too). Each gives no pair rather than a guess.
 A periodic trace never anchors at all, so it is `NoCopy`, never a match a
 period off, whose residuals would be as small as a right one's. A window whose
 channel sits at its rail for more than a tenth of it (a clipped copy) gives no
@@ -49,10 +65,11 @@ NI's native samples is the caller's (Task 3's decimation).
 
 **Memory.** The anchor's FFT and its normalisation span the channel given
 (one decimated channel, float64, about 1.4 GB at the peak for 12 h at 1 kHz),
-and `match_copy` releases them when the anchor is found. The walk holds a
-window's worth of arrays at a time. `find_channel` keeps every channel's
-spectrum for its prefix (about 10 MB a channel for 600 s), since every
-candidate searches them all.
+and `match_copy` releases them when the anchor is found. A family's columns are
+correlated one at a time and their squares summed, so two columns add one
+channel-length array, not two. The walk holds a window's worth of arrays at a
+time. `find_channel` keeps every channel's spectrum for its prefix (about
+10 MB a channel for 600 s), since every family searches them all.
 
 Pure numeric: no DataJoint, no file I/O, no `wl_preproc.synth`, as `fit.py`.
 """
@@ -65,6 +82,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import scipy.fft
+import scipy.linalg
 
 from wl_preproc.timebase.fit import fit_pairs_across
 
@@ -88,9 +106,10 @@ STEP_S = 10.0
 #: tell a channel by, without reading a 12 h file whole for each. Set on
 #: synthetic data; revisited on real traces (hardware check 17).
 SEARCH_PREFIX_S = 600.0
-#: A window's best shift must correlate at least this well. The synthetic copy,
-#: a mix of two columns through `tanh`, correlates about 0.93-0.95 with the
-#: best single one. Set on synthetic data; revisited on real traces (hardware check 17).
+#: A window's best shift must reach at least this multiple correlation `R`. The
+#: synthetic copy, a mix of P1-P4 X and Y through `tanh`, reaches about 0.96
+#: against the family jointly. Set on synthetic data; revisited on real traces
+#: (hardware check 17).
 MIN_CORRELATION = 0.9
 #: ... and beat the best rival (a local maximum) outside `RUNNER_UP_EXCLUSION_S`
 #: of it by this. Set on synthetic data; revisited on real traces (hardware check 17).
@@ -125,9 +144,14 @@ _MAX_GAP_FRAMES = 1.5
 # of two rounding errors. A thousand times above float64 rounding of the
 # chunked sums below, and below any real signal (the NI's own 16-bit step).
 _FLAT_SPREAD_FRACTION = 1e-4
-# A trace window whose spread is below this fraction of its largest value is
-# constant (an untracked eye's zeros): skipped, never divided by.
+# A trace window's column whose spread is below this fraction of its largest
+# value is constant (an untracked eye's zeros): dropped, never divided by.
 _CONSTANT_SPREAD_FRACTION = 1e-12
+# A window's column is dependent on the others (collinear with them) when, at
+# unit length, less than this of it lies outside their span: dropped, since its
+# direction there is rounding. Far above float64 rounding, far below any
+# independent signal.
+_DEPENDENT_FRACTION = 1e-9
 # The channel's moving spread is computed over chunks of this many shifts, each
 # from its own centred cumulative sums, so rounding stays local to a chunk
 # rather than growing over a 12 h channel.
@@ -155,8 +179,8 @@ class CopyMatch:
     `pairs` are `(ni_s, device_s)`, one per kept window at its centre, in
     device order, every one within `RESIDUAL_BOUND_US` of their line.
     `channel` and `signal` are the caller's to fill (`dataclasses.replace`):
-    `match_copy` is given one channel and one trace and knows neither's name,
-    so it returns -1 and ''. `n_windows` counts the windows tried, `n_dropped`
+    `match_copy` is given one channel and one family's columns and knows
+    neither's name, so it returns -1 and ''. `n_windows` counts the windows tried, `n_dropped`
     the pairs the refit dropped, and `dropped_stretches` the device-time extents
     of those pairs' windows, adjacent ones merged.
     """
@@ -174,9 +198,10 @@ def find_channel(
 ) -> tuple[int, str]:
     """The `(channel, signal)` that carries the copy: the most distinct windows
     over the eye's first `SEARCH_PREFIX_S`, against the channels' prefixes as
-    given. A tie (the two eyes' X both follow the gaze) goes to the higher
-    summed peak correlation. A constant candidate (an untracked eye) gives no
-    window, and so no score.
+    given. `candidates` maps a family's name (`"Left P1-P4 (X, Y)"`) to its
+    columns, `(n_samples, k)`; a 1-D array is one column. A tie (the two eyes
+    both follow the gaze) goes to the higher summed peak `R`. A constant
+    family (an untracked eye) gives no window, and so no score.
 
     Raises `NoCopy` when the best gives fewer than `MIN_PAIRS`.
     """
@@ -187,7 +212,8 @@ def find_channel(
     references = [_Reference(channel, fs_hz) for channel in channels]
     best: tuple[int, float] = (-1, -math.inf)
     choice: tuple[int, str] | None = None
-    for signal, trace in candidates.items():
+    for signal, family in candidates.items():
+        trace = _columns(family)
         _check_lengths(eye_time_s, trace)
         walks = [_Walk(reference, release_on_anchor=False) for reference in references]
         for start in starts:
@@ -214,12 +240,15 @@ def find_channel(
 def match_copy(eye_time_s: np.ndarray, trace: np.ndarray, channel: np.ndarray, fs_hz: float) -> CopyMatch:
     """Every window of `trace` (on `eye_time_s`, the eye's own seconds; NaN
     is missing) placed on `channel` (decimated to `fs_hz`), dropped to its line.
+    `trace` is one family's columns, `(n_samples, k)`, fitted jointly; a 1-D
+    array is one column.
 
     Raises `NoCopy` below `MIN_PAIRS` distinct windows, and `CopyRefused` when
     the drop and refit cannot meet `RESIDUAL_BOUND_US` within
     `MAX_DROPPED_FRACTION`, or leaves fewer than `MIN_PAIRS`.
     """
     eye_time_s = np.asarray(eye_time_s, dtype=np.float64)
+    trace = _columns(trace)
     _check_lengths(eye_time_s, trace)
     starts = _window_starts(eye_time_s)
     walk = _Walk(_Reference(channel, fs_hz), release_on_anchor=True)
@@ -252,20 +281,22 @@ class _Hit:
 
 
 class _Window:
-    """One window of the eye's trace on the channel's grid, centred and scaled so
-    that its dot product with a channel stretch, over that stretch's spread, is
-    their Pearson correlation."""
+    """One window of a family's columns on the channel's grid, as an orthonormal
+    basis of their centred span (`units`, one row each), scaled so that each
+    row's dot product with a channel stretch, over that stretch's spread, is
+    its correlation; their squares sum to the joint fit's `R^2`."""
 
-    def __init__(self, start_s: float, unit: np.ndarray, device_step_s: float) -> None:
+    def __init__(self, start_s: float, units: np.ndarray, device_step_s: float) -> None:
         self.start_s = start_s
-        self.unit = unit
-        self.centre_s = start_s + (unit.size - 1) / 2 * device_step_s
+        self.units = units
+        self.centre_s = start_s + (units.shape[1] - 1) / 2 * device_step_s
         self._spectrum: tuple[int, np.ndarray] | None = None
 
     def spectrum(self, length: int) -> np.ndarray:
-        """`conj(rfft(unit, length))`, kept for the next channel of the same length."""
+        """`conj(rfft(units, length))` per row, kept for the next channel of the
+        same length."""
         if self._spectrum is None or self._spectrum[0] != length:
-            self._spectrum = (length, np.conj(scipy.fft.rfft(self.unit, length, workers=-1)))
+            self._spectrum = (length, np.conj(scipy.fft.rfft(self.units, length, axis=-1, workers=-1)))
         return self._spectrum[1]
 
 
@@ -293,21 +324,31 @@ class _Reference:
         return scipy.fft.next_fast_len(self.values.size, real=True)
 
     def correlations(self, window: _Window) -> np.ndarray:
-        """The window's correlation at every shift that lies wholly inside the
-        channel, by FFT; 0 where the channel is flat."""
+        """The window's multiple correlation `R` at every shift that lies wholly
+        inside the channel, by FFT, one basis row at a time; 0 where the
+        channel is flat."""
         length = self.fft_length
         if self._spectrum is None:
             self._spectrum = scipy.fft.rfft(self.values, length, workers=-1)
             self._spread = _moving_spread(self.values, self.n, self.flat_variance)
-        product = self._spectrum * window.spectrum(length)
-        dot = scipy.fft.irfft(product, length, workers=-1)[: self.n_shifts]
-        return _divide(dot, self._spread)
+        squares = np.zeros(self.n_shifts)
+        product = np.empty_like(self._spectrum)
+        for spectrum in window.spectrum(length):
+            np.multiply(self._spectrum, spectrum, out=product)
+            dot = scipy.fft.irfft(product, length, workers=-1)[: self.n_shifts]
+            np.multiply(dot, dot, out=dot)
+            squares += dot
+        return _multiple(squares, self._spread)
 
     def local_correlations(self, window: _Window, lo: int, hi: int) -> np.ndarray:
-        """The window's correlation at shifts `lo..hi` inclusive, directly."""
+        """The window's multiple correlation `R` at shifts `lo..hi` inclusive,
+        directly."""
         stretch = self.values[lo : hi + self.n]
-        dot = np.correlate(stretch, window.unit, mode="valid")
-        return _divide(dot, _moving_spread(stretch, self.n, self.flat_variance))
+        squares = np.zeros(hi - lo + 1)
+        for unit in window.units:
+            dot = np.correlate(stretch, unit, mode="valid")
+            squares += dot * dot
+        return _multiple(squares, _moving_spread(stretch, self.n, self.flat_variance))
 
     def release(self) -> None:
         """Drop the anchor's whole-channel arrays; made again if asked for."""
@@ -326,13 +367,13 @@ class _Reference:
 
 
 class _Walk:
-    """One trace's search along one channel: the anchor, then the walk."""
+    """One family's search along one channel: the anchor, then the walk."""
 
     def __init__(self, reference: _Reference, *, release_on_anchor: bool) -> None:
         self.reference = reference
         # `match_copy`'s channel is whole and walked once, so its anchor's arrays
         # go as soon as it is found; `find_channel`'s are prefixes, shared by
-        # every candidate's walk.
+        # every family's walk.
         self._release_on_anchor = release_on_anchor
         self.found: list[_Hit] = []
         # The line so far: ni_s = ni_mean + (device_s - device_mean) / scale.
@@ -408,7 +449,7 @@ class _Walk:
 
 
 def _distinct(correlation: np.ndarray, peak: int, exclusion: int) -> bool:
-    """Whether the peak correlates at least `MIN_CORRELATION` and beats the best
+    """Whether the peak's `R` is at least `MIN_CORRELATION` and beats the best
     rival shift, more than `exclusion` samples from it, by `MIN_PEAK_MARGIN`.
 
     A rival is a local maximum: a shift at least as good as its neighbours (an
@@ -498,8 +539,10 @@ def _window_starts(eye_time_s: np.ndarray, limit_s: float | None = None) -> list
 def _window(
     eye_time_s: np.ndarray, trace: np.ndarray, start_s: float, fs_hz: float, scale: float
 ) -> _Window | None:
-    """The trace from `start_s` for `WINDOW_S`, on the channel's grid; None when
-    too much of it is missing, or it is constant.
+    """The family's columns (`trace`, `(n_samples, k)`) from `start_s` for
+    `WINDOW_S`, on the channel's grid, as `_basis` of them; None when too much
+    of it is missing (a sample missing in any column is missing), or every
+    column is constant.
 
     The grid is the channel's, carried into device time by `scale` (device
     seconds per NI second, from the line so far): at 100 ppm a window on the
@@ -512,7 +555,7 @@ def _window(
     hi = min(int(np.searchsorted(eye_time_s, grid[-1], side="left")) + 1, eye_time_s.size)
     times = eye_time_s[lo:hi]
     values = np.asarray(trace[lo:hi], dtype=np.float64)
-    finite = np.isfinite(values)
+    finite = np.all(np.isfinite(values), axis=1)
     if times.size < 2 or np.count_nonzero(finite) < 2:
         return None
     # A grid point is missing unless both samples bracketing it are present and
@@ -523,12 +566,28 @@ def _window(
     present = bracketed & finite[left] & finite[left + 1] & (times[left + 1] - times[left] <= _MAX_GAP_FRAMES * period)
     if np.count_nonzero(present) < (1.0 - _MAX_MISSING_FRACTION) * n:
         return None
-    on_grid = np.interp(grid, times[finite], values[finite])
-    centred = on_grid - np.mean(on_grid)
-    spread = float(np.sqrt(np.mean(centred * centred)))
-    if not spread > _CONSTANT_SPREAD_FRACTION * float(np.max(np.abs(on_grid))):
+    on_grid = np.column_stack([np.interp(grid, times[finite], column[finite]) for column in values.T])
+    basis = _basis(on_grid)
+    if basis is None:
         return None
-    return _Window(start_s, centred / (n * spread), device_step_s)
+    return _Window(start_s, basis.T / math.sqrt(n), device_step_s)
+
+
+def _basis(on_grid: np.ndarray) -> np.ndarray | None:
+    """An orthonormal basis, `(n, r)`, of the span of `on_grid`'s centred
+    columns, whose projection of a centred stretch is the least-squares fit on
+    `[columns, 1]`. A constant column is dropped, and so is one dependent on
+    the others (pivoted QR on unit columns, `_DEPENDENT_FRACTION`); None when
+    none is left."""
+    centred = on_grid - np.mean(on_grid, axis=0)
+    spread = np.sqrt(np.mean(centred * centred, axis=0))
+    varies = spread > _CONSTANT_SPREAD_FRACTION * np.max(np.abs(on_grid), axis=0)
+    if not varies.any():
+        return None
+    columns = centred[:, varies] / (spread[varies] * math.sqrt(on_grid.shape[0]))
+    q, r, _ = scipy.linalg.qr(columns, mode="economic", pivoting=True)
+    rank = int(np.count_nonzero(np.abs(np.diag(r)) > _DEPENDENT_FRACTION))
+    return q[:, :rank]
 
 
 def _moving_spread(values: np.ndarray, n: int, flat_variance: float) -> np.ndarray:
@@ -548,9 +607,19 @@ def _moving_spread(values: np.ndarray, n: int, flat_variance: float) -> np.ndarr
     return spread
 
 
-def _divide(dot: np.ndarray, spread: np.ndarray) -> np.ndarray:
-    """`dot / spread`, 0 where the spread is (flat channel)."""
-    return np.divide(dot, spread, out=np.zeros_like(dot), where=spread > 0.0)
+def _multiple(squares: np.ndarray, spread: np.ndarray) -> np.ndarray:
+    """`R`, `sqrt(squares) / spread`, 0 where the spread is (flat channel)."""
+    return np.divide(np.sqrt(squares), spread, out=np.zeros_like(squares), where=spread > 0.0)
+
+
+def _columns(trace: np.ndarray) -> np.ndarray:
+    """A family's columns as `(n_samples, k)`; a 1-D trace is one column."""
+    trace = np.asarray(trace)
+    if trace.ndim == 1:
+        return trace[:, None]
+    if trace.ndim != 2 or trace.shape[1] < 1:
+        raise ValueError(f"a family's columns are (n_samples, k), not {trace.shape}")
+    return trace
 
 
 def _check_lengths(eye_time_s: np.ndarray, trace: np.ndarray) -> None:

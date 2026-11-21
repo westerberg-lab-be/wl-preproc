@@ -5,7 +5,8 @@ amendments 78, 78a and 84).
 Every array is built here: an eye trace of fixations and saccades at 500 Hz on
 the eye's own clock, and its copy on an NI channel at `DECIMATED_RATE_HZ`, on
 the NI's clock, 100 ppm faster, 5 ms late, scaled by 0.004 V per pixel, offset
-and noisy. The truth is that map, so each pair is checked against it, not
+and noisy. A copy may mix a family's columns (X and Y), which the matcher fits
+jointly; a 1-D trace is a family of one column. The truth is that map, so each pair is checked against it, not
 against a line fitted to the pairs themselves. A wrong match is silent: it
 mistimes the eye by a fixation or a period with residuals as small as a right
 one's, so a refusal is always preferred to it.
@@ -33,6 +34,12 @@ from wl_preproc.timebase.analog_copy import (
     _window_starts,
     find_channel,
     match_copy,
+)
+
+#: The families `find_channel` is given (Task 3 builds them from the eye file),
+#: each at most 32 characters, the width of Task 4's `signal` column.
+FAMILY_NAMES = tuple(
+    f"{eye} {family}" for eye in ("Left", "Right") for family in ("P1-P4 (X, Y)", "P1 (X, Y)", "PupilWidth")
 )
 
 EYE_FS_HZ = 500.0
@@ -128,62 +135,113 @@ def test_a_copy_is_matched_to_within_a_tenth_of_a_frame():
     assert np.max(np.abs(_offsets(match, -3.0))) <= ON_THE_LINE_S
 
 
-def test_a_mixed_and_limited_copy_still_clears_the_correlation_floor():
-    """Task 1's synthetic copy is `tanh` of 0.7 X + 0.3 Y, so it correlates with
-    X alone about 0.93-0.95, close to `MIN_CORRELATION`. Window by window, at
-    the anchor's view of every shift, the margin is pinned: the median window
-    clears the floor by 0.03 and nine in ten clear it (about one in thirty does
-    not, where Y happens to move more than X).
+def _mixed(x: np.ndarray, y: np.ndarray, shape: str) -> np.ndarray:
+    """A copy of 0.7 X + 0.3 Y, as Task 1's generator mixes it: linear, or
+    soft-limited by `tanh` at 3 standard deviations."""
+    mixed = 0.7 * x + 0.3 * y
+    if shape == "linear":
+        return mixed
+    limit = 3.0 * float(np.std(mixed))
+    return limit * np.tanh(mixed / limit)
 
-    Only the correlation: a mixed copy's peak is pulled by Y's saccades, which
-    X does not carry, by about a millisecond a window, so its pairs are not
-    held to `ON_THE_LINE_S` (the task's report names it)."""
+
+def test_a_mixed_and_limited_copy_still_clears_the_correlation_floor():
+    """A copy of `tanh` of 0.7 X + 0.3 Y, window by window at the anchor's view
+    of every shift, fitted on X and Y jointly: every window's `R` clears
+    `MIN_CORRELATION` by 0.05 (measured: at least 0.994; against X alone, the
+    median was 0.951 and one window in thirty fell below the floor)."""
     rng = np.random.default_rng(2)
     eye_time = _eye_time(300.0)
     x, y = _gaze_xy(rng, eye_time.size)
-    mixed = 0.7 * x + 0.3 * y
-    limit = 3.0 * float(np.std(mixed))
-    channel = _copy(eye_time, limit * np.tanh(mixed / limit), rng, ni_duration_s=310.0)
+    channel = _copy(eye_time, _mixed(x, y, "tanh"), rng, ni_duration_s=310.0)
     reference = _Reference(channel, FS)
+    family = np.column_stack((x, y))
 
     peaks = [
-        float(np.max(reference.correlations(_window(eye_time, x, start, FS, 1.0))))
+        float(np.max(reference.correlations(_window(eye_time, family, start, FS, 1.0))))
         for start in _window_starts(eye_time)
     ]
 
     assert len(peaks) == 29
-    assert np.median(peaks) >= MIN_CORRELATION + 0.03
-    assert np.mean(np.array(peaks) >= MIN_CORRELATION) >= 0.9
+    assert min(peaks) >= MIN_CORRELATION + 0.05
+
+
+@pytest.mark.parametrize("shape", ["linear", "tanh"])
+def test_a_mixed_copy_is_placed_by_the_joint_fit(shape):
+    """A copy that mixes the axes: against X alone, Y's saccades tilt each
+    window's peak by about a millisecond, past `RESIDUAL_BOUND_US`, and the
+    copy is refused (the task's report, concern 2). Fitted on the family's X
+    and Y jointly, every pair is on the line."""
+    rng = np.random.default_rng(2)
+    eye_time = _eye_time(300.0)
+    x, y = _gaze_xy(rng, eye_time.size)
+    channel = _copy(eye_time, _mixed(x, y, shape), rng, ni_duration_s=310.0)
+
+    match = match_copy(eye_time, np.column_stack((x, y)), channel, FS)
+
+    assert match.n_dropped == 0
+    assert len(match.pairs) >= 0.9 * match.n_windows >= 0.9 * 29
+    assert np.max(np.abs(_offsets(match, -3.0))) <= ON_THE_LINE_S
+
+
+def test_a_family_with_a_constant_or_collinear_column_is_fitted_on_the_rest():
+    """A family whose Y is constant (one axis untracked), or a multiple of X:
+    the dependent column is dropped from the fit, with no warning, and the
+    copy is placed on the column left. A family whose every column is
+    constant gives no window."""
+    rng = np.random.default_rng(13)
+    eye_time = _eye_time(220.0)
+    x = _gaze(rng, eye_time.size)
+    channel = _copy(eye_time, x, rng, ni_duration_s=225.0)
+    constant = np.column_stack((x, np.full(eye_time.size, 7.0)))
+    collinear = np.column_stack((x, 2.0 * x + 1.0))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for family in (constant, collinear):
+            assert _window(eye_time, family, 50.0, FS, 1.0).units.shape[0] == 1
+            match = match_copy(eye_time, family, channel, FS)
+            assert np.max(np.abs(_offsets(match, -3.0))) <= ON_THE_LINE_S
+        assert _window(eye_time, np.zeros((eye_time.size, 2)), 50.0, FS, 1.0) is None
+
+
+def test_family_names_fit_the_signal_column():
+    assert all(len(name) <= 32 for name in FAMILY_NAMES)
 
 
 def test_the_channel_and_signal_are_found_among_noise():
-    """Sixteen channels, the copy on channel 11. The right eye's X follows the
-    left's (two eyes look at one target), so it matches too, only less well:
-    the count ties, and the closer match must win it."""
+    """Sixteen channels, the copy (of the left eye's X and Y, mixed) on channel
+    11. The right eye's gaze follows the left's (two eyes look at one target),
+    so it matches too, only less well: the count ties, and the closer match
+    must win it."""
     rng = np.random.default_rng(3)
     eye_time = _eye_time(220.0)
     left_x, left_y = _gaze_xy(rng, eye_time.size)
+    p1_x, p1_y = _gaze_xy(rng, eye_time.size, sd_px=(15.0, 11.0))
     # The right eye first, so that the tie is not won by order.
     candidates = {
-        "Right P1-P4 X": left_x + rng.normal(0.0, 20.0, eye_time.size),
-        "Left P1-P4 X": left_x,
-        "Left P1-P4 Y": left_y,
+        "Right P1-P4 (X, Y)": np.column_stack((left_x, left_y)) + rng.normal(0.0, 20.0, (eye_time.size, 2)),
+        "Right P1 (X, Y)": np.column_stack((p1_x, p1_y)) + rng.normal(0.0, 2.0, (eye_time.size, 2)),
+        "Right PupilWidth": 41.0 + np.cumsum(rng.normal(0.0, 0.2, eye_time.size)),
+        "Left P1-P4 (X, Y)": np.column_stack((left_x, left_y)),
+        "Left P1 (X, Y)": np.column_stack((p1_x, p1_y)),
         "Left PupilWidth": 40.0 + np.cumsum(rng.normal(0.0, 0.2, eye_time.size)),
     }
+    assert sorted(candidates) == sorted(FAMILY_NAMES)
     channels = [_noise_channel(rng, 225.0) for _ in range(16)]
-    channels[11] = _copy(eye_time, left_x, rng, ni_duration_s=225.0)
+    channels[11] = _copy(eye_time, _mixed(left_x, left_y, "tanh"), rng, ni_duration_s=225.0)
 
-    assert find_channel(eye_time, candidates, channels, FS) == (11, "Left P1-P4 X")
+    assert find_channel(eye_time, candidates, channels, FS) == (11, "Left P1-P4 (X, Y)")
 
 
 def test_noise_alone_is_no_copy():
     rng = np.random.default_rng(4)
     eye_time = _eye_time(220.0)
-    trace = _gaze(rng, eye_time.size)
+    trace = _gaze_xy(rng, eye_time.size).T
     channels = [_noise_channel(rng, 225.0) for _ in range(3)]
 
     with pytest.raises(NoCopy):
-        find_channel(eye_time, {"Left P1-P4 X": trace}, channels, FS)
+        find_channel(eye_time, {"Left P1-P4 (X, Y)": trace}, channels, FS)
     with pytest.raises(NoCopy):
         match_copy(eye_time, trace, channels[0], FS)
 
@@ -193,13 +251,13 @@ def test_a_flat_channel_is_no_copy():
     so no warning either."""
     rng = np.random.default_rng(5)
     eye_time = _eye_time(220.0)
-    trace = _gaze(rng, eye_time.size)
+    trace = _gaze_xy(rng, eye_time.size).T
     flat = np.full(int(225.0 * FS), OFFSET_V, dtype=np.float32)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         with pytest.raises(NoCopy):
-            find_channel(eye_time, {"Left P1-P4 X": trace}, [flat], FS)
+            find_channel(eye_time, {"Left P1-P4 (X, Y)": trace}, [flat], FS)
         with pytest.raises(NoCopy):
             match_copy(eye_time, trace, flat, FS)
 
@@ -283,14 +341,14 @@ def test_a_constant_candidate_is_skipped():
     division by zero, no warning and no NaN pair."""
     rng = np.random.default_rng(10)
     eye_time = _eye_time(220.0)
-    trace = _gaze(rng, eye_time.size)
-    zeros = np.zeros(eye_time.size)
-    channels = [_noise_channel(rng, 225.0), _copy(eye_time, trace, rng, ni_duration_s=225.0)]
-    candidates = {"Right P1-P4 X": zeros, "Left P1-P4 X": trace, "Right P1-P4 Y": zeros}
+    trace = _gaze_xy(rng, eye_time.size).T
+    zeros = np.zeros((eye_time.size, 2))
+    channels = [_noise_channel(rng, 225.0), _copy(eye_time, _mixed(*trace.T, "linear"), rng, ni_duration_s=225.0)]
+    candidates = {"Right P1-P4 (X, Y)": zeros, "Left P1-P4 (X, Y)": trace, "Right PupilWidth": zeros[:, 0]}
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert find_channel(eye_time, candidates, channels, FS) == (1, "Left P1-P4 X")
+        assert find_channel(eye_time, candidates, channels, FS) == (1, "Left P1-P4 (X, Y)")
         with pytest.raises(NoCopy):
             match_copy(eye_time, zeros, channels[1], FS)
         match = match_copy(eye_time, trace, channels[1], FS)
@@ -329,4 +387,37 @@ def test_missing_samples_give_no_pair_where_they_dominate():
     assert np.all(np.isfinite(np.array(match.pairs)))
     assert not np.any((device > 100.0) & (device < 110.0))
     assert np.any((device > 150.0) & (device < 160.0))
+    assert np.max(np.abs(_offsets(match, -3.0))) <= ON_THE_LINE_S
+
+
+def test_a_copy_buried_in_noise_is_no_copy():
+    """Noise as large as the copy itself: each window's peak is still distinct
+    (R 0.58-0.77 against rivals of 0.36-0.44, measured), but below
+    `MIN_CORRELATION`, so no window gives a pair."""
+    rng = np.random.default_rng(14)
+    eye_time = _eye_time(300.0)
+    trace = _gaze(rng, eye_time.size)
+    channel = _copy(eye_time, trace, rng, ni_duration_s=310.0)
+    channel = channel + rng.normal(0.0, SCALE_V_PER_PX * float(np.std(trace)), channel.size).astype(np.float32)
+
+    with pytest.raises(NoCopy):
+        match_copy(eye_time, trace, channel, FS)
+
+
+def test_a_sample_missing_in_one_column_is_missing():
+    """A family's Y lost for 8 s while X is not: the sample is missing for the
+    family, so that window gives no pair, with no warning and no NaN."""
+    rng = np.random.default_rng(15)
+    eye_time = _eye_time(300.0)
+    x, y = _gaze_xy(rng, eye_time.size)
+    channel = _copy(eye_time, _mixed(x, y, "linear"), rng, ni_duration_s=310.0)
+    y[(eye_time >= 100.0) & (eye_time < 108.0)] = np.nan
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        match = match_copy(eye_time, np.column_stack((x, y)), channel, FS)
+
+    _, device = np.array(match.pairs).T
+    assert np.all(np.isfinite(np.array(match.pairs)))
+    assert not np.any((device > 100.0) & (device < 110.0))
     assert np.max(np.abs(_offsets(match, -3.0))) <= ON_THE_LINE_S
