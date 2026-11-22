@@ -12,6 +12,7 @@ segments and a segment can span runs, so neither is derivable from the other.
 
 from __future__ import annotations
 
+import logging
 import pathlib
 
 import datajoint as dj
@@ -20,6 +21,7 @@ from wl_preproc.contracts.paths import SYSTEMS
 from wl_preproc.schema import DEFAULT_PREFIX, pipeline
 
 schema = dj.Schema()
+logger = logging.getLogger(__name__)
 
 _SYSTEM_ENUM = "enum(" + ",".join(f"'{s}'" for s in SYSTEMS) + ")"
 
@@ -544,7 +546,8 @@ class Segment(dj.Computed):
                 # SpikeGLX's identity map below, which `by_the_nis_barcodes`
                 # being false would otherwise send it to.
                 copy = (timebase.SystemTimebase.Copy & key).fetch1() if rate is not None else None
-                placed, row = self._place_by_copy(key, file_path, scan, clock.barcode_reference(), rate, copy)
+                placed, row = self._place_by_copy(key, file_path, scan, clock.barcode_reference(), rate, copy,
+                                                  timebase.copy_identity(scan, session_dir))
                 (accepted if placed else rejected).append(row)
                 continue
             if on_the_ni and not by_the_nis_barcodes:
@@ -660,19 +663,26 @@ class Segment(dj.Computed):
         RejectedSegment.insert(rejected, skip_duplicates=True)
 
     @staticmethod
-    def _place_by_copy(key: dict, file_path: str, scan, reference: dict, rate, copy: dict | None
-                       ) -> tuple[bool, dict]:
+    def _place_by_copy(key: dict, file_path: str, scan, reference: dict, rate, copy: dict | None,
+                       identity: tuple[str, int, int]) -> tuple[bool, dict]:
         """`(True, row)`, the eye file's `Segment` row, placed as
         `SystemTimebase._make_by_copy` placed it: the offset, residual and
         first sample its `Copy` row stored, the rate `rate`, the extent
         `scan`'s; or `(False, row)`, its `RejectedSegment` row. The copy is
         not matched again (fix round 1, finding 1): on a 12 h file that is a
-        channel search and a read of the whole NI file. A file changed since
-        its placement keeps it, as any placed file keeps its clock, until its
-        rows are deleted (amendment 28).
+        channel search and a read of the whole NI file.
 
         - With no rate, the copy was refused and no barcode places the file:
           `no_analog_match`.
+        - **The placement is the placed file's alone** (fix round 2): a file
+          whose `identity` (`timebase.copy_identity`) is not the one the
+          `Copy` row records, another eye file landed since, or the same
+          path changed since, is `no_analog_match`, and the log says it is
+          not the file the copy placed and names that one. The reason is a
+          fixed word, as `RejectedSegment.reason` holds only those
+          (`segments.REJECTION_REASONS`), and its detail is the log's, as
+          `no_strobe_anchor`'s is. Deleting the session's timing rows places
+          it again, matched afresh.
         - A file whose barcodes the NI's `reference` holds none of, though
           they lie between its first and last, is `no_shared_barcode` and
           fails, whatever the copy says (amendment 77, after amendment 76): a
@@ -680,8 +690,15 @@ class Segment(dj.Computed):
         """
         from wl_preproc.timebase import segments
 
+        refused = {**key, "file_path": file_path, "reason": segments.NO_ANALOG_MATCH}
         if rate is None:
-            return False, {**key, "file_path": file_path, "reason": segments.NO_ANALOG_MATCH}
+            return False, refused
+        placed = (copy["placed_file"], copy["placed_rows"], copy["placed_bytes"])
+        if tuple(identity) != placed:
+            logger.warning(
+                "%s (%s rows, %s bytes) is not the file the copy placed (%s, %s rows, %s bytes); delete the "
+                "session's timing rows to place it again", *identity, *placed)
+            return False, refused
         values = [barcode.value for barcode in scan.barcodes]
         if reference and values and not set(values) & reference.keys():
             reason = segments.unshared_reason(values, reference, True)

@@ -372,7 +372,8 @@ class SystemTimebase(dj.Computed):
         # the distinct windows but the fit was refused; or absent, none did.
         # The lag is removed from every pair's NI time before the fit. Placed,
         # the file's offset, residual and first sample are kept here for
-        # `Segment.make`, which writes them without matching the copy again.
+        # `Segment.make`, which writes them without matching the copy again,
+        # for that file alone: the one `placed_*` names (`copy_identity`).
         # Key: (subject, session_datetime, system).
         -> master
         ---
@@ -389,6 +390,9 @@ class SystemTimebase(dj.Computed):
         offset_s=null            : double        # placed: the file's, session_s = device_s / scale + offset_s
         residual_us=null         : double        # placed: the corrected pairs' RMS about that offset
         first_sample=null        : bigint        # placed: the eye row at the first pair, as Segment's first_sample
+        placed_file=null         : varchar(255)  # placed: the file it placed, relative to the session's folder
+        placed_rows=null         : int unsigned  # placed: that file's rows
+        placed_bytes=null        : bigint unsigned  # placed: that file's size
         rig                      : varchar(64)   # the manifest's
         """
 
@@ -639,6 +643,7 @@ class SystemTimebase(dj.Computed):
             "lag_measured": source_datetime is not None, "lag_source_datetime": source_datetime,
             "agreement_us": agreement_us, "offset_s": offset.offset_s, "residual_us": offset.residual_us,
             "first_sample": placement.first_sample,
+            **dict(zip(("placed_file", "placed_rows", "placed_bytes"), copy_identity(scan, session_dir), strict=True)),
         })
 
     def _make_by_strobes(self, row: dict, scans: list, session_dir: Path, nominal_rate_hz: float) -> None:
@@ -676,6 +681,18 @@ class SystemTimebase(dj.Computed):
                 "residual_us_max": fit.residual_us_max,
             }
         )
+
+
+def copy_identity(scan, session_dir: Path) -> tuple[str, int, int]:
+    """The eye file a copy's placement belongs to, as `SystemTimebase.Copy`
+    records it and `Segment.make` checks it (fix round 2): its path within the
+    session's folder, its rows (frames less those missing) and its size in
+    bytes. The path and the size are what `timebase/clock.py::choice_inputs`
+    already holds a file by; its modification time is left out, since a copy
+    of the session, or the archive's rehydration, resets it (as ruling R14
+    leaves it out of the eye's start)."""
+    return (str(scan.path.relative_to(session_dir)), int(scan.stream.n_samples - scan.n_frames_missing),
+            int(scan.path.stat().st_size))
 
 
 def _manifest_rig(session_dir: Path) -> str:

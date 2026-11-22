@@ -565,7 +565,10 @@ _KEY = {"subject": "zz-stub", "session_datetime": "2024-01-01 09:00:00", "system
 #: The NI's barcodes with a hole in its decode, values 3 to 6 (as
 #: `test_partial_sync_box.py`'s `holey_ni`).
 _HOLEY_REFERENCE = {value: 0.7 + value for value in (0, 1, 2, 7, 8)}
-_PLACED = {"offset_s": 0.1, "residual_us": 12.0, "first_sample": 2499}
+#: The file the copy placed, as `SystemTimebase.Copy` records it.
+_PLACED_FILE = ("ohdpi/eye.txt", 125_990, 41_000_000)
+_PLACED = {"offset_s": 0.1, "residual_us": 12.0, "first_sample": 2499, "placed_file": _PLACED_FILE[0],
+           "placed_rows": _PLACED_FILE[1], "placed_bytes": _PLACED_FILE[2]}
 
 
 def test_a_file_in_a_hole_in_the_nis_barcodes_fails_whatever_the_copy_says():
@@ -576,19 +579,70 @@ def test_a_file_in_a_hole_in_the_nis_barcodes_fails_whatever_the_copy_says():
     all lie outside the NI's ran outside the box's span, and the copy places
     it; so does one sharing a barcode. With no rate the copy was refused."""
     from wl_preproc.schema.core import Segment
-    from wl_preproc.timebase.fit import RateFit
 
-    rate = RateFit(fitted_rate_hz=500.015, drift_ppm=30.0, n_matched=0, residual_us_rms=1.0, residual_us_max=2.0)
-    hole = Segment._place_by_copy(_KEY, "eye.txt", _scan((3, 4, 5)), _HOLEY_REFERENCE, rate, _PLACED)
+    rate = _RATE
+    hole = Segment._place_by_copy(_KEY, "eye.txt", _scan((3, 4, 5)), _HOLEY_REFERENCE, rate, _PLACED, _PLACED_FILE)
     assert hole == (False, {**_KEY, "file_path": "eye.txt", "reason": "no_shared_barcode"})
     for values in ((9, 10), (), (2, 3)):
-        placed, row = Segment._place_by_copy(_KEY, "eye.txt", _scan(values), _HOLEY_REFERENCE, rate, _PLACED)
+        placed, row = Segment._place_by_copy(_KEY, "eye.txt", _scan(values), _HOLEY_REFERENCE, rate, _PLACED,
+                                             _PLACED_FILE)
         assert placed, values
         assert (row["start_s"], row["offset_s"], row["residual_us"], row["first_sample"]) == (0.1, 0.1, 12.0, 2499)
         assert row["end_s"] == pytest.approx(252.0 / rate.scale + 0.1, abs=1e-12)
         assert row["n_barcodes"] == 0
-    refused = Segment._place_by_copy(_KEY, "eye.txt", _scan((3, 4, 5)), _HOLEY_REFERENCE, None, None)
+    refused = Segment._place_by_copy(_KEY, "eye.txt", _scan((3, 4, 5)), _HOLEY_REFERENCE, None, None, _PLACED_FILE)
     assert refused == (False, {**_KEY, "file_path": "eye.txt", "reason": "no_analog_match"})
+
+
+def _rate():
+    from wl_preproc.timebase.fit import RateFit
+
+    return RateFit(fitted_rate_hz=500.015, drift_ppm=30.0, n_matched=0, residual_us_rms=1.0, residual_us_max=2.0)
+
+
+_RATE = _rate()
+
+
+@pytest.mark.parametrize("identity, why", [
+    (("ohdpi/eye-2.txt", *_PLACED_FILE[1:]), "a second eye file"),
+    ((_PLACED_FILE[0], _PLACED_FILE[1] + 500, _PLACED_FILE[2]), "the placed file, rows added"),
+    ((_PLACED_FILE[0], _PLACED_FILE[1], _PLACED_FILE[2] + 1), "the placed file, rewritten"),
+])
+def test_only_the_file_the_copy_placed_takes_its_placement(caplog, identity, why):
+    """Fix round 2: the stored placement is the placed file's alone. Another
+    eye file under the analog row, one landed since, or the same path changed
+    since, is `no_analog_match`, and the log names both files and how to place
+    it again; the placed file itself is still placed. Neither borrows the
+    first file's offset and first sample, nor mixes them with its own
+    extent."""
+    import logging
+
+    from wl_preproc.schema import core
+
+    with caplog.at_level(logging.WARNING, logger=core.__name__):
+        rejected = core.Segment._place_by_copy(_KEY, "eye-2.txt", _scan(()), _BOX, _RATE, _PLACED, identity)
+    assert rejected == (False, {**_KEY, "file_path": "eye-2.txt", "reason": "no_analog_match"}), why
+    (warning,) = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert "is not the file the copy placed" in warning and _PLACED_FILE[0] in warning, warning
+    assert "delete the session's timing rows" in warning, warning
+    placed, row = core.Segment._place_by_copy(_KEY, "eye.txt", _scan(()), _BOX, _RATE, _PLACED, _PLACED_FILE)
+    assert placed and row["offset_s"] == 0.1
+
+
+def test_the_copy_records_the_file_it_placed(landed):
+    """Fix round 2: each placement names its file, as the identity
+    `Segment` checks it by: the path within the session, its rows and its
+    bytes."""
+    from wl_preproc.schema.timebase import copy_identity
+    from wl_preproc.timebase import segments
+
+    for name in ("copy_only", "copy_partial", "copy_carried"):
+        session_dir = landed.session_dir(name)
+        (scan,) = segments.scan_system("ohdpi", session_dir / "ohdpi")
+        copy = _copy(landed.key(name))
+        assert (copy["placed_file"], copy["placed_rows"], copy["placed_bytes"]) == copy_identity(scan, session_dir)
+        assert copy["placed_file"] == "ohdpi/OpenIris-synthetic.txt"
+        assert copy["placed_rows"] == scan.stream.n_samples and copy["placed_bytes"] == scan.path.stat().st_size
 
 
 #: The cross-check's unit cases (fix round 1, finding 4): a box whose
