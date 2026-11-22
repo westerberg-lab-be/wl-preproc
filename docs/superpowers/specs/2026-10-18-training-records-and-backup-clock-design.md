@@ -1341,3 +1341,88 @@ whole file on the NI's clock with no barcode. This is amendment 65's eye half, "
       paper's typical delays (roughly 4-5 ms) plus the filter's, where barcodes place it within one 2 ms frame.
       The file says so (80).
     - Barcodes stay the eye tracker's sync path wherever they exist (77); §2.1 stands for every other use.
+
+## Amendments, 2026-11-21, made while planning and building the analog copy
+
+The plan (`docs/superpowers/plans/2026-11-21-eye-by-analog-copy.md`) builds amendments 77-84. While it was built
+the requester chose how the channel search is aimed (85), and the build's rulings changed what 77-79 say (86).
+Where these differ from 77-84, they bind. The ledger, `.superpowers/sdd/2026-11-21-eye-by-analog-copy/progress.md`,
+holds the full wording of every ruling; the handoff (`docs/handoffs/2026-11-21-eye-by-analog-copy.md`) lists them
+all, with their costs.
+
+85. **The channel search is aimed by the two files' clocks** (the requester, 2026-11-21). Task 3's review found
+    that a search over the NI's first `SEARCH_PREFIX_S` limits both directions: an eye file that started some
+    400 s before or after the NI shares too few windows with what is read, and is reported absent. The requester
+    was asked, in plain terms, how far apart the eye tracker and SpikeGLX start, and chose "It varies; aim by
+    clocks".
+    - **The estimate.** The eye file's start on the NI is `d = (eye wall start) - (NI fileCreateTime)`, both the
+      lab PCs' local time, to the second, read in `NIDQ_TIMEZONE` where it is set, so that a change of
+      daylight-saving time between them counts (`analog_copy.py::clock_offset_s`). Positive: the eye file
+      started after the NI.
+    - **The eye's wall start** is the stamp in OpenIris's default file name, `OpenIris-YYYYMonDD-HHMMSS`
+      (`parse_openiris_stamp`; the pattern is the reference recording's, `OpenIris-2024Jul31-114628`). The file
+      holds no wall time of its own: its seconds are the device's. It is never the file's mtime, which marks the
+      end of writing and which a copy resets (ruling R14).
+    - **What is read.** Each XA channel over `[max(0, max(d,0) - CLOCK_SLACK_S), max(d,0) + SEARCH_PREFIX_S +
+      CLOCK_SLACK_S]` of the NI, clipped to the file (rulings R15 and R16). The eye's windows lie over
+      `[max(0,-d), max(0,-d) + SEARCH_PREFIX_S]` of its own time. R15 corrects the draft, which centred the NI's
+      interval on `d` and read nothing for an eye file 100 s early.
+    - **The fallback is `d = 0`,** with one INFO line naming the eye file and the reason: no stamp, one that is
+      no time, or no `fileCreateTime`. By R16 it is the same rule at `d = 0`: the NI from 0 to
+      `SEARCH_PREFIX_S + CLOCK_SLACK_S`.
+    - **`CLOCK_SLACK_S = 120`**, set on synthetic data and revisited on real sessions
+      (`docs/hardware-checks.md` 17 and 18b).
+    - **Matching stays clock-free.** The clocks only aim the search. The chosen channel is then matched whole,
+      and its pairs are the copy's alone.
+    - **Effect:** a clock error beyond the slack gives absent, never a wrong match. In practice the copy is still
+      found up to about `CLOCK_SLACK_S` plus 400 s, since the search needs only `MIN_PAIRS` of its windows
+      (Task 3's deferred minor).
+86. **The builder's decisions that change the design as written.**
+    - **A joint fit per candidate family** (ruling R7). This supersedes 78a's ten single traces. A copy that mixes
+      the axes, as OpenIris's calibrated gaze would, biases a one-column match by about a millisecond a window,
+      past `RESIDUAL_BOUND_US`. So each NI channel is regressed on a family's columns jointly, at each shift (least
+      squares on `[columns, 1]`), and scored by the multiple correlation. There are six families
+      (`analog_copy.FAMILIES`): `Left P1-P4 (X, Y)`, `Left P1 (X, Y)`, `Left PupilWidth`, `Right P1-P4 (X, Y)`,
+      `Right P1 (X, Y)` and `Right PupilWidth`. `SystemTimebase.Copy.signal` stores the name (ruling R12). Cost
+      if wrong: more compute per shift (`find_channel` about 40 s on 600 s of 16 channels), and joint rivals'
+      `R` lifted (`docs/hardware-checks.md` 17a).
+    - **A NoCopy after the channel is found is `failed`** (ruling R13). The search found `MIN_PAIRS` distinct
+      windows on the channel, so a copy is there, and too few over the whole channel is a refusal. That is 77's
+      definition of failed. Cost if wrong: a rare absent copy is reported as failed in the daily report.
+    - **A lag is carried by the copy's own checks, not by tier** (ruling P2). This supersedes 79's "whose tier is
+      not D". `SystemTimebase` fits every session before any `TimingProvenance` row exists, so a tier condition
+      would find nothing in one pass. A lag is carried from a placed `Copy` row on the same rig, at or before the
+      session, whose lag was measured there (`agreement_us` set: a carried lag is never itself a source), lies
+      within `[0, LAG_CEILING_S]`, and agrees within one frame (`schema/timebase.py::_carried_lag`). Cost if wrong: a
+      lag from a session that is D for an unrelated reason (code decode errors, say) is reused, though its own
+      measurement passed.
+    - **The order in which sessions are processed is accepted** (ruling P3). A session placed before its rig's
+      earlier measuring session is processed keeps lag 0, unmeasured and labelled so, and is not placed again
+      (amendment 28). Cost if wrong: within one daemon pass, a later session may publish with the unmeasured
+      label though a measurement exists. Deleting its timing rows places it again.
+    - **The stored placement is tied to its file** (ruling R17, with R2-1 and R2-2). The copy is matched once a
+      session, in `SystemTimebase`, and `Copy` keeps the file's `offset_s`, `residual_us` and `first_sample`
+      for `Segment.make`. It also records the file it placed: `placed_file` (its path within the session's
+      folder), `placed_rows` and `placed_bytes`, never its mtime, which copies and rehydration reset (R2-1).
+      `Segment.make` applies the placement to that file alone. Any other or changed eye file under an `analog`
+      row is rejected `no_analog_match`, and the note naming both files goes to the log, not to
+      `RejectedSegment.reason`, which keeps fixed reason words as `no_strobe_anchor` does (R2-2). Barcode and
+      Intan paths refit each file. Amendment 28 governs the session's clock, not one file's offset. Cost if
+      wrong: a replaced eye file needs its timing rows deleted to be placed again.
+    - **The measured lag is the whole delay** (ruling P1, amended at Task 4). The lag 79 measures includes the
+      eye tracker's processing, the DAC's zero-order hold and any smoothing, not only a set delay. On the
+      synthetic copy it is about 7.1 ms for a 5 ms set lag: 5 ms, plus the 1.1 ms processing median, plus half a
+      2 ms frame of hold, plus a few hundredths of a millisecond from the hold's rounding and the smoothing.
+      `copy_partial` measured 6.97 ms. Cost if wrong: test bounds only.
+    - **Agreement is held over the eye file's own barcodes** (ruling F4). This supersedes 79's "over the span".
+      The lag's pairs and the cross-check are taken between the session times of the eye file's first and last
+      shared barcode, within the span. `agreement_us` is the largest of the two lines' difference at those ends
+      and each corrected pair's departure from the barcodes inside them (`schema/timebase.py::_cross_check`). An eye
+      file that starts or stops inside the box's span has no barcode past those ends, and the barcodes' line
+      there is extrapolated, so over the whole span a sound session could be called D. Task 4's review re-graded
+      this from Minor to Important.
+    - **No box, and no copy found, is `unfitted_system`** (Task 4's ruling R4-2). 77 says "amendment 57's
+      `no_barcode` where there are none". That holds where the NI decoded barcodes. With no box at all the NI
+      decoded none, and 3b-3, unchanged, makes the eye tracker `unfittable` with `time_source` `none`, its file
+      `unfitted_system` (66, decision 2), as `copy_noise` and `copy_flat` show. Cost if wrong: none; the outcome
+      table's "absent: 3b-3 unchanged" governs.

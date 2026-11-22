@@ -590,13 +590,18 @@ Authorization: Bearer <token>
     every run and nothing failed; `D` quarantined), or `null` until computed (under the NI, Intan is placed
     by its strobes, so a session with Intan can be `N`; where a sync box recorded part of the session, the
     NI's own barcodes place the box, the eye tracker and the cameras over that part, and the box's codes there
-    are checked against the NI's, so such a session can be `N` too; a session with the eye tracker or the
-    cameras under the NI where the NI recorded no barcode, or with an eye or camera file that decoded none, is
-    still `D`);
+    are checked against the NI's, so such a session can be `N` too; under the NI the eye tracker may also be
+    placed by its analog copy on one of the NI's analog inputs, over its whole recording, so a session whose
+    eye file holds no barcode can be `N`, while one whose copy's lag, measured against the eye file's
+    barcodes, is out of bounds or disagrees with them is `D`; a session with the cameras under the NI where
+    the NI recorded no barcode, or with a camera file that decoded none, or with an eye file that neither its
+    barcodes nor its copy placed, is still `D`);
     and
     `rejected_segments`, each file this host could not use, with its reason (under the NI,
     `outside_covered_span` is a file none of whose barcodes the NI recorded, so it lies outside the part the
-    sync box covered: it is left out and named, and does not make the session `D`);
+    sync box covered: it is left out and named, and does not make the session `D`; `no_analog_match` is an
+    eye-tracker file whose analog copy on the NI was found but refused and which no barcode placed, or an eye
+    file that is not the one its copy placed (another, or one changed since): it makes the session `D`);
   - `runs`, measured from the recording's `RUN_START` (`0x8006`) and `RUN_END` (4): `run_number`
     (wl-xcon's `run_in_session`), `task_code`, `task` (wl-xcon's name for it), `start_s` and
     `end_s` on the recording's clock, `closed`, wl-xcon's `stopped_because` and `stop_kind`,
