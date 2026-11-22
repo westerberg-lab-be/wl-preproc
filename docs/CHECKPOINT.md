@@ -1,10 +1,23 @@
 # Where this build actually is
 
-**Last updated 2026-11-21**, describing `main` at `291bbea`: the merge of `feat/part-3b-3`, a sync box that recorded
-part of an NI-timed session (`handoffs/2026-11-20-part-3b-3.md`). CI read off `291bbea` is green on both
-interpreters, 3323 passed on each with 37 skipped and 1 xfailed, and the manifest check is green
-(`gh run view 44906246212`).
-- **Part 3b-3, a partial sync box:**
+**Last updated 2026-11-22**, describing `main` at `8fd6f26`: the merge of `feat/eye-analog-copy`, the eye tracker
+placed by its analog copy on the NI (`handoffs/2026-11-21-eye-by-analog-copy.md`). CI read off `8fd6f26` is green on
+both interpreters, 3405 passed on each with 39 skipped and 1 xfailed, and the manifest check is green
+(`gh run view 45028287108`, `45028287074`). Since the move to `westerberg-lab-be`, CI's jobs wait for one another.
+- **The eye placed by its analog copy (spec amendments 77-86):**
+  - Under the NI, an OpenIrisDPI file whose copy is on one of the NI's analog inputs is placed over its whole
+    recording by that copy (`time_source` `analog`), so a session whose eye file holds no barcode can be tier N.
+  - The copy's lag is measured against the barcodes where the box covered the file, carried from the rig's last
+    good measurement otherwise, and labelled unmeasured where neither exists.
+  - A copy found but refused, or an eye file that is not the one its copy placed, is `no_analog_match` and makes
+    the session D. The daily report gains "Eye placed by its analog copy (24 h)".
+  - Five of the NI's NWB column texts are reworded for every NI session.
+  - The full suite with every reference set passed 3441 on each interpreter at `170c5ed`.
+  - wl.works is told, and has confirmed that nothing in its 20b-1a reader breaks.
+  - Its camera half (amendment 83) waits on the camera package.
+- **Next:** wl-xcon's console-settings reader (XC-513, with XC-529's withdrawn rows), then the pop-out revision
+  reader (XC-543), then part 2's bridges, then the piece facing wl.works.
+- **Part 3b-3 (`291bbea`, CI green, run 44906246212, 3323 on each):**
   - Under the NI, the NI's own barcodes are the barcode reference. The sync box, the eye tracker and the cameras
     are placed by them over the part the box covered (its covered span, stored on `TimingProvenance`).
   - A file whose barcodes all lie outside that span is left out and named (`outside_covered_span`), not failed. A
@@ -15,8 +28,6 @@ interpreters, 3323 passed on each with 37 skipped and 1 xfailed, and the manifes
   - The full suite with every reference set passed 3357 on each interpreter at `bb532d1`.
   - wl.works and wl-xcon are told.
 - **What waits on hardware** is now one list, `hardware-checks.md` (the requester's choice, 2026-11-21).
-- **Next:** the eye tracker placed by its analog copy on the NI (spec amendments 77-84, approved 2026-11-21), being
-  built on `feat/eye-analog-copy`.
 - **wl-sync's notes 7 and 8 (`c31dd89`, CI green, run 44842081433, 3263 on each):**
   - Its timebases `rp1-pio-si` and `rp1-pio` share one rate, and under them a roll in place may step by 3 when
     its ticks agree.

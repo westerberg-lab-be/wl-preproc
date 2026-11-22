@@ -123,13 +123,19 @@ status:
     is merged (291bbea; docs/handoffs/2026-11-20-part-3b-3.md): under the
     NI, a sync box that recorded only part of a session is kept as a
     cross-check over its covered span, and its eye tracker and cameras are
-    placed over that span. Next, the eye tracker placed by its analog copy
-    on the NI, and cameras by clock time (amendment 65); then our reader of
+    placed over that span. The eye tracker placed by its analog copy on the
+    NI is merged (8fd6f26; docs/handoffs/2026-11-21-eye-by-analog-copy.md):
+    under the NI, an eye file whose copy sits on one of the NI's analog
+    inputs is placed over its whole recording by that copy, its lag measured
+    against the barcodes where the box covered it. Its camera half
+    (amendment 83) waits on the camera package writing each video file's
+    start and end wall times. Next, our reader of
     wl-xcon's console settings (XC-513, accepted 2026-11-18); then its
     pop-out revision (XC-543); then part 2, the bridges; then lab time,
     part 4, once wl-xcon writes its words and clock files.
     Fine-tuning U'n'Eye waits for hand-labelled lab data.
-    Done: part 3b-3, a partial sync box (291bbea). Before it, wl-sync's
+    Done: the eye placed by its analog copy (8fd6f26). Before it, part
+    3b-3, a partial sync box (291bbea). Before it, wl-sync's
     notes 7 and 8 (c31dd89). Before it, part 3b-2,
     Intan by strobes (2c35577). Before it, part 3b-1,
     the NI keeping time (36aac64). Before it, the
@@ -304,8 +310,9 @@ status:
   # Was `36aac64` until part 3b-2's merge `2c35577` on 2026-11-20.
   # Was `2c35577` until wl-sync's notes 7-8 merge `c31dd89` on 2026-11-20.
   # Was `c31dd89` until part 3b-3's merge `291bbea` on 2026-11-21.
+  # Was `291bbea` until the analog copy's merge `8fd6f26` on 2026-11-22.
   # Quoted: an all-digit SHA is otherwise read by YAML as an integer.
-  describes: "291bbea"
+  describes: "8fd6f26"
 
 runs_on: [serv]
 # The pipeline is deployed to the preprocessing server, but it is written and
