@@ -539,6 +539,13 @@ class Segment(dj.Computed):
                     "n_barcodes_dropped": scan.n_barcodes_dropped,
                 })
                 continue
+            if on_the_ni and fit["time_source"] == "analog":
+                # The eye tracker by its analog copy (amendments 77-80), before
+                # SpikeGLX's identity map below, which `by_the_nis_barcodes`
+                # being false would otherwise send it to.
+                placed, row = self._place_by_copy(key, file_path, scan, session_dir, clock, rate)
+                (accepted if placed else rejected).append(row)
+                continue
             if on_the_ni and not by_the_nis_barcodes:
                 if rate is None:
                     rejected.append({**key, "file_path": file_path, "reason": segments.UNFITTED_SYSTEM})
@@ -650,6 +657,52 @@ class Segment(dj.Computed):
                     "before writing it to RejectedSegment.reason"
                 )
         RejectedSegment.insert(rejected, skip_duplicates=True)
+
+    @staticmethod
+    def _place_by_copy(key: dict, file_path: str, scan, session_dir: pathlib.Path, clock, rate) -> tuple[bool, dict]:
+        """`(True, row)`, the eye file's `Segment` row, placed by its copy's
+        pairs less the lag `SystemTimebase.Copy` recorded, with the rate held
+        fixed (`fit_offset_to_pairs`), as Intan's by its strobes; or
+        `(False, row)`, its `RejectedSegment` row.
+
+        - With no rate, the copy was refused and no barcode places the file:
+          `no_analog_match`, and it is not searched again, as Intan's
+          unanchored recordings are not (`SystemTimebase._make_by_copy`).
+        - A file whose barcodes the NI holds none of, though they lie between
+          its ends, is `no_shared_barcode` and fails, whatever the copy says
+          (amendment 77, after amendment 76): a hole in the NI's own decode,
+          which the eye's copy cannot vouch for.
+        """
+        from wl_preproc.schema import timebase
+        from wl_preproc.timebase import segments
+        from wl_preproc.timebase.analog_copy import CopyRefused, NoCopy, place_eye_by_copy
+        from wl_preproc.timebase.fit import fit_offset_to_pairs
+
+        refused = {**key, "file_path": file_path, "reason": segments.NO_ANALOG_MATCH}
+        if rate is None:
+            return False, refused
+        reference = clock.barcode_reference()
+        values = [barcode.value for barcode in scan.barcodes]
+        if reference and values and not set(values) & reference.keys():
+            reason = segments.unshared_reason(values, reference, True)
+            if reason == segments.NO_SHARED_BARCODE:
+                return False, {**key, "file_path": file_path, "reason": reason}
+        try:
+            placement = place_eye_by_copy(session_dir, scan.path)
+        except (NoCopy, CopyRefused):
+            # `SystemTimebase` placed this same file, so only a file changed
+            # since reaches here.
+            return False, refused
+        lag_s = (timebase.SystemTimebase.Copy & key).fetch1("lag_s")
+        offset = fit_offset_to_pairs([(ni_s - lag_s, device_s) for ni_s, device_s in placement.match.pairs], rate)
+        return True, {
+            **key, "segment_id": file_path, "start_s": offset.offset_s,
+            "end_s": scan.duration_s / rate.scale + offset.offset_s,
+            "n_samples": scan.stream.n_samples, "first_sample": placement.first_sample,
+            "offset_s": offset.offset_s, "residual_us": offset.residual_us, "n_barcodes": 0,
+            "n_frame_gaps": scan.n_frame_gaps, "n_frames_missing": scan.n_frames_missing,
+            "n_barcodes_dropped": scan.n_barcodes_dropped,
+        }
 
 
 @schema
