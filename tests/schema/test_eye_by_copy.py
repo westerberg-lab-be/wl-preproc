@@ -1102,7 +1102,7 @@ def test_the_report_names_a_copy_whose_lag_fails_its_checks(landed, prefix, name
 def _row(**fields) -> dict:
     import datetime
 
-    return {"subject": "zz000001", "session_datetime": datetime.datetime(2026, 11, 1, 9), "session_dir": "/s/one",
+    return {"subject": "rpt01", "session_datetime": datetime.datetime(2026, 11, 1, 9), "session_dir": "/s/one",
             "rig": "rig-a", "outcome": "placed", "lag_s": 0.005, "lag_measured": 1, "agreement_us": 100.0,
             "nominal_rate_hz": 500.0, "refusal": "", "fit_status": "fitted", "time_source": "analog",
             "n_barcodes_matched": 9, "search_unaimed": None, **fields}
@@ -1115,7 +1115,7 @@ def test_a_copy_whose_lag_fails_its_checks_is_named():
     and the tier. 30 ms is within the bound (no line); 30.1 ms is past it."""
     from wl_preproc.cli.report import _copy_lines
 
-    head = "- `one` — `zz000001` @ 2026-11-01 09:00 — "
+    head = "- `one` — `rpt01` @ 2026-11-01 09:00 — "
     within = "the corrected copy is 0.10 ms from the eye file's barcodes at worst, within one frame, 2.00 ms"
     assert _copy_lines([_row(lag_s=0.0300)], []) == []
     assert _copy_lines([_row(lag_s=0.0, agreement_us=2000.0)], []) == []
@@ -1142,7 +1142,7 @@ def test_an_absent_copy_is_named_only_where_its_search_was_not_aimed():
 
     assert _copy_lines([_row(outcome="absent")], []) == []
     assert _copy_lines([_row(outcome="absent", search_unaimed="the NI file's .meta has no fileCreateTime")], []) == [
-        "- `one` — `zz000001` @ 2026-11-01 09:00 — no copy was found on the NI, but the search was not aimed by the "
+        "- `one` — `rpt01` @ 2026-11-01 09:00 — no copy was found on the NI, but the search was not aimed by the "
         "two files' clocks (the NI file's .meta has no fileCreateTime), so a copy in an eye file started more than "
         "about 400 s before the NI, or 520 s after it, would not have been found"]
     # Placed or failed, the aim is not named: the copy was found.

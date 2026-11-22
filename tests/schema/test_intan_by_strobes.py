@@ -219,22 +219,25 @@ def test_the_nwb_file_says_intan_was_placed_by_strobes(ni_intan_nwb):
     # Part 3b-3's texts (amendment 63): each names the barcodes where they
     # place, and holds where, as here, nothing was placed by one.
     assert text["time_source"] == (
-        "How the system was placed on the NI's clock where fit_status is fitted, and how placing it was "
-        "attempted where it is unfittable: clock, SpikeGLX on the identity map; strobes, Intan by its strobe "
-        "edges matched to the NI's; barcode, by the NI's own barcodes, over the part the sync box covered: "
-        "where fitted they placed it, where unfittable they placed none of it; none, by no mechanism, not "
-        "placed.")
+        "How the system was placed on the NI's clock where fit_status is fitted, and how placing it was attempted where"
+        " it is unfittable: clock, SpikeGLX on the identity map; strobes, Intan by its strobe edges matched to the "
+        "NI's; barcode, by the NI's own barcodes, over the part the sync box covered: where fitted they placed it, "
+        "where unfittable they placed none of it; analog, by its analog copy on the NI, matched over the whole "
+        "recording: where fitted it placed the whole file, where unfittable the copy was found but refused and none of "
+        "the file was placed; none, by no mechanism, not placed.")
     assert worst == (
         "Largest residual, microseconds: under the NI, 0 for SpikeGLX on the identity map, Intan's largest strobe "
-        "residual where it was fitted, and the largest barcode residual of a system the NI's barcodes placed.")
+        "residual where it was fitted, the largest barcode residual of a system the NI's barcodes placed, and the eye "
+        "tracker's largest residual about its analog copy where the copy placed it.")
     assert text["fitted_rate_hz"] == (
-        "The rate on the session's clock: SpikeGLX's nominal rate on the identity map; Intan's rate fitted "
-        "against the NI's strobes; a system the NI's barcodes placed, its rate fitted against them; NaN for a "
-        "system not placed on the NI's clock.")
+        "The rate on the session's clock: SpikeGLX's nominal rate on the identity map; Intan's rate fitted against the "
+        "NI's strobes; a system the NI's barcodes placed, its rate fitted against them; the eye tracker placed by its "
+        "analog copy, its rate fitted against the copy; NaN for a system not placed on the NI's clock.")
     assert text["residual_us_rms"] == (
-        "RMS residual, microseconds: 0 for SpikeGLX on the identity map; Intan's RMS strobe residual; a system the "
-        "NI's barcodes placed, its RMS barcode residual; NaN for a system not placed on the NI's clock.")
+        "RMS residual, microseconds: 0 for SpikeGLX on the identity map; Intan's RMS strobe residual; a system the NI's"
+        " barcodes placed, its RMS barcode residual; the eye tracker placed by its analog copy, its RMS residual about "
+        "the copy; NaN for a system not placed on the NI's clock.")
     assert first_sample == (
-        "Native index the segment's offset is anchored to: 0 for SpikeGLX, the NI's first file being session "
-        "time; for Intan, the first strobe edge matched to the NI's; for a system the NI's barcodes placed, the "
-        "segment's first barcode.")
+        "Native index the segment's offset is anchored to: 0 for SpikeGLX, the NI's first file being session time; for "
+        "Intan, the first strobe edge matched to the NI's; for a system the NI's barcodes placed, the segment's first "
+        "barcode; for the eye tracker placed by its analog copy, the eye row at the copy's first pair.")
