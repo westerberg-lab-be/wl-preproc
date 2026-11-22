@@ -27,6 +27,7 @@ vacuous.
 from __future__ import annotations
 
 import datetime
+import re
 
 import pytest
 
@@ -43,10 +44,17 @@ def _section(body: str, heading: str) -> str:
     CLAUDE.md), so test files do not import fixtures or helpers from one
     another -- inventing a shared conftest helper for five lines is more
     machinery than it is worth.
+
+    The heading is matched whole: `## ` and `heading`, then the line's end,
+    ` (` or ` —`, the report's own heading suffixes. A prefix alone let
+    `"Eye"` find `## Eye placed by its analog copy (24 h)`, which the report
+    puts first, and 13 tests about the Eye section read that one
+    instead (the analog copy's final fix wave, 2026-11-22). Kept identical in
+    every copy.
     """
-    marker = f"\n## {heading}"
-    assert marker in body, f"no section headed {heading!r} in:\n{body}"
-    return body.split(marker, 1)[1].split("\n## ", 1)[0]
+    found = re.search(rf"^## {re.escape(heading)}(?=$| \(| —)", body, flags=re.MULTILINE)
+    assert found is not None, f"no section headed {heading!r} in:\n{body}"
+    return body[found.end():].split("\n## ", 1)[0]
 
 
 def _subsection(section: str, heading: str) -> str:
@@ -62,10 +70,13 @@ def _subsection(section: str, heading: str) -> str:
     `test_report.py`'s own `_section` docstring gives for not searching the
     whole document: a mutation that moves a line from one subsection to
     another must be caught, not passed by accident.
+
+    The heading is matched whole, as `_section`'s is: `### ` and `heading`,
+    then the line's end, ` (` or ` —`. Kept identical in every copy.
     """
-    marker = f"\n### {heading}"
-    assert marker in section, f"no subsection headed {heading!r} in:\n{section}"
-    return section.split(marker, 1)[1].split("\n### ", 1)[0]
+    found = re.search(rf"^### {re.escape(heading)}(?=$| \(| —)", section, flags=re.MULTILINE)
+    assert found is not None, f"no subsection headed {heading!r} in:\n{section}"
+    return section[found.end():].split("\n### ", 1)[0]
 
 
 def _line_for(section: str, needle: str) -> str:

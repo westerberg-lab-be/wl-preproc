@@ -1367,9 +1367,12 @@ all, with their costs.
       CLOCK_SLACK_S]` of the NI, clipped to the file (rulings R15 and R16). The eye's windows lie over
       `[max(0,-d), max(0,-d) + SEARCH_PREFIX_S]` of its own time. R15 corrects the draft, which centred the NI's
       interval on `d` and read nothing for an eye file 100 s early.
-    - **The fallback is `d = 0`,** with one INFO line naming the eye file and the reason: no stamp, one that is
-      no time, or no `fileCreateTime`. By R16 it is the same rule at `d = 0`: the NI from 0 to
-      `SEARCH_PREFIX_S + CLOCK_SLACK_S`.
+    - **The fallback is `d = 0`,** with one WARNING naming the eye file and the reason: no stamp, one that is
+      no time, or no `fileCreateTime`. A WARNING, not INFO, since nothing in `wl_preproc` configures logging.
+      The reason is also recorded in `SystemTimebase.Copy.search_unaimed`, null where the clocks aimed the
+      search. The daily report names each absent copy whose search was not aimed, since an eye file started more
+      than about 400 s before the NI, or 520 s after it, is then reported absent though its copy is there. By R16
+      it is the same rule at `d = 0`: the NI from 0 to `SEARCH_PREFIX_S + CLOCK_SLACK_S`.
     - **`CLOCK_SLACK_S = 120`**, set on synthetic data and revisited on real sessions
       (`docs/hardware-checks.md` 17 and 18b).
     - **Matching stays clock-free.** The clocks only aim the search. The chosen channel is then matched whole,

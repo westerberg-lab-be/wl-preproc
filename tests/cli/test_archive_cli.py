@@ -100,10 +100,17 @@ def _section(body: str, heading: str) -> str:
     `__init__.py`-free (see this project's own CLAUDE.md), so test files do
     not import fixtures or helpers from one another, and inventing a shared
     conftest helper for five lines is more machinery than it is worth.
+
+    The heading is matched whole: `## ` and `heading`, then the line's end,
+    ` (` or ` —`, the report's own heading suffixes. A prefix alone let
+    `"Eye"` find `## Eye placed by its analog copy (24 h)`, which the report
+    puts first, and 13 tests about the Eye section read that one
+    instead (the analog copy's final fix wave, 2026-11-22). Kept identical in
+    every copy.
     """
-    marker = f"\n## {heading}"
-    assert marker in body, f"no section headed {heading!r} in:\n{body}"
-    return body.split(marker, 1)[1].split("\n## ", 1)[0]
+    found = re.search(rf"^## {re.escape(heading)}(?=$| \(| —)", body, flags=re.MULTILINE)
+    assert found is not None, f"no section headed {heading!r} in:\n{body}"
+    return body[found.end():].split("\n## ", 1)[0]
 
 
 def _nas(parent):

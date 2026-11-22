@@ -29,6 +29,7 @@ Detection-refused subsection exists to make sure never goes vacuous.
 from __future__ import annotations
 
 import datetime
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -45,20 +46,31 @@ def _section(body: str, heading: str) -> str:
     test layout is deliberately `__init__.py`-free (this project's own
     CLAUDE.md), so test files do not import fixtures or helpers from one
     another.
+
+    The heading is matched whole: `## ` and `heading`, then the line's end,
+    ` (` or ` —`, the report's own heading suffixes. A prefix alone let
+    `"Eye"` find `## Eye placed by its analog copy (24 h)`, which the report
+    puts first, and 13 tests about the Eye section read that one
+    instead (the analog copy's final fix wave, 2026-11-22). Kept identical in
+    every copy.
     """
-    marker = f"\n## {heading}"
-    assert marker in body, f"no section headed {heading!r} in:\n{body}"
-    return body.split(marker, 1)[1].split("\n## ", 1)[0]
+    found = re.search(rf"^## {re.escape(heading)}(?=$| \(| —)", body, flags=re.MULTILINE)
+    assert found is not None, f"no section headed {heading!r} in:\n{body}"
+    return body[found.end():].split("\n## ", 1)[0]
 
 
 def _subsection(section: str, heading: str) -> str:
     """The slice of a `##` section under one of ITS OWN `###` subheadings.
     Mirrors `test_eye_report.py`'s own copy exactly -- see that file's own
     docstring for why an assertion needs this rather than a bare substring
-    search of the whole section."""
-    marker = f"\n### {heading}"
-    assert marker in section, f"no subsection headed {heading!r} in:\n{section}"
-    return section.split(marker, 1)[1].split("\n### ", 1)[0]
+    search of the whole section.
+
+    The heading is matched whole, as `_section`'s is: `### ` and `heading`,
+    then the line's end, ` (` or ` —`. Kept identical in every copy.
+    """
+    found = re.search(rf"^### {re.escape(heading)}(?=$| \(| —)", section, flags=re.MULTILINE)
+    assert found is not None, f"no subsection headed {heading!r} in:\n{section}"
+    return section[found.end():].split("\n### ", 1)[0]
 
 
 def _line_for(section: str, needle: str) -> str:
@@ -479,7 +491,7 @@ def test_the_invalid_and_blink_fractions_are_shown(detect_schema, tmp_path, pref
                     "invalid": counts_before["invalid"] + 230}
 
     section = _section(build_report(root, prefix=prefix), "Detection")
-    unusable = _subsection(section, "Unusable samples, running total")
+    unusable = _subsection(section, "Unusable samples, running total across every session")
 
     assert "invalid" in unusable and "blink" in unusable
     assert "lower bound" in section
@@ -778,7 +790,7 @@ def test_a_mostly_blink_session_is_visible_per_session_rather_than_only_in_the_t
         "the fixture failed to dilute -- with the running total equal to the "
         "bad session's own fraction this test would pass on the pre-M7 code"
     )
-    running = _subsection(section, "Unusable samples, running total")
+    running = _subsection(section, "Unusable samples, running total across every session")
     assert _fraction_for(running, "blink") == pytest.approx(diluted, abs=1e-3)
 
 
@@ -810,7 +822,7 @@ def test_the_per_session_unusable_list_windows_to_24_hours(detect_schema, tmp_pa
     assert fresh in per_session, "a session ingested moments ago is missing from the 24 h list"
     assert old not in per_session, "a session ingested 3 days ago still appears in the 24 h list"
     # The running total is the unwindowed one, and still sees both.
-    running = _subsection(section, "Unusable samples, running total")
+    running = _subsection(section, "Unusable samples, running total across every session")
     assert _fraction_for(running, "invalid") > 0.0
 
 
