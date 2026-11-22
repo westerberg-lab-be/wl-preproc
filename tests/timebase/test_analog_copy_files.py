@@ -281,9 +281,11 @@ def test_a_stalled_copy_is_refused_with_a_warning(tmp_path, caplog):
     stalled = EyeCopy(channel=COPY.channel, n_channels=COPY.n_channels, stall=(100.0, 150.0, 0.02))
     session_dir, eye_path = _generate(tmp_path, _recipe(eye_copy=stalled))
 
-    with caplog.at_level(logging.WARNING, logger=analog_copy.__name__), pytest.raises(CopyRefused):
+    with caplog.at_level(logging.WARNING, logger=analog_copy.__name__), pytest.raises(CopyRefused) as refused:
         place_eye_by_copy(session_dir, eye_path)
     assert _warned_about(caplog, eye_path)
+    # Named by its channel and signal, as a match too short whole is.
+    assert str(refused.value).startswith(f"channel XA{COPY.channel}'s 'Left P1-P4 (X, Y)': "), refused.value
 
 
 def test_too_few_windows_over_the_whole_channel_is_a_refusal(session, monkeypatch, caplog):

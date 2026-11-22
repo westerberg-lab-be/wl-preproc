@@ -19,6 +19,10 @@ for a 5 ms `lag_s`, ruling P1), never read back from the code under test.
 
 from __future__ import annotations
 
+import collections
+import re
+from types import SimpleNamespace
+
 import pytest
 
 from tests.identities import new_animal, new_serial
@@ -64,8 +68,9 @@ PLACED_BOUND_S = 1e-3
 
 
 class _Landed(dict):
-    report: dict
     reports: list
+    #: How often each eye file was matched to its copy over both passes.
+    placements: collections.Counter
 
     def key(self, name):
         return self[name][2]
@@ -169,6 +174,7 @@ def landed(dj_conn, prefix, tmp_path_factory):
     from wl_preproc.schema import pipeline
     from wl_preproc.synth.recipe import NI_CLOCK_RECIPE, BlockSpec, EyeCopy, MontageSpec
     from wl_preproc.synth.session import generate_session
+    from wl_preproc.timebase import analog_copy
 
     from tests.schema.test_eye_populate import _land
 
@@ -227,10 +233,19 @@ def landed(dj_conn, prefix, tmp_path_factory):
     land("copy_negative", box=True, session=negative, rig="rig-copy-bad",
          eye_copy=copy.model_copy(update={"lag_s": 0.0}))
     land("copy_two_files", box=True)
-    first = daemon.run_once(prefix=prefix)
-    land("copy_carried", box=False, session=carried, rig="rig-copy-carry")
-    land("copy_after_bad", box=False, session=after_bad, rig="rig-copy-bad")
-    second = daemon.run_once(prefix=prefix)
+    sessions.placements = collections.Counter()
+    place = analog_copy.place_eye_by_copy
+
+    def counted(session_dir, eye_path):
+        sessions.placements[eye_path] += 1
+        return place(session_dir, eye_path)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(analog_copy, "place_eye_by_copy", counted)
+        first = daemon.run_once(prefix=prefix)
+        land("copy_carried", box=False, session=carried, rig="rig-copy-carry")
+        land("copy_after_bad", box=False, session=after_bad, rig="rig-copy-bad")
+        second = daemon.run_once(prefix=prefix)
     sessions.reports = [first, second]
     yield sessions
     for _recipe, _truth, key, _session_dir in sessions.values():
@@ -408,9 +423,22 @@ def test_a_failed_copy_with_no_barcodes_is_no_analog_match(landed):
     line, too many to drop, so it is refused; with no barcode to fall back on
     the file is `no_analog_match`, by the analog mechanism, and the session
     is D."""
+    from wl_preproc.synth.ohdpi import OHDPI_PRE_ROLL_S
+    from wl_preproc.timebase.analog_copy import WINDOW_S
+
     key = landed.key("copy_stall")
     copy = _copy(key)
-    assert copy["outcome"] == "failed" and copy["refusal"]
+    assert copy["outcome"] == "failed"
+    # Named as the stall it is (fix round 1, finding 3): the channel and the
+    # signal, about a quarter of the pairs off the line the rest lie on, not
+    # all of them, and the stretch they lie in, in the eye's own seconds.
+    refusal = copy["refusal"]
+    assert refusal.startswith(f"channel XA{COPY_CHANNEL}'s 'Left P1-P4 (X, Y)': "), refusal
+    percent = re.search(r"(\d+)% of the pairs", refusal)
+    assert percent is not None and 15 <= int(percent.group(1)) <= 35, refusal
+    stall_s = [time_s + OHDPI_PRE_ROLL_S for time_s in LONG_STALL[:2]]
+    stretches = [(float(start), float(stop)) for start, stop in re.findall(r"(\d+\.\d)-(\d+\.\d) s", refusal)]
+    assert any(start <= stall_s[0] + WINDOW_S and stall_s[1] - WINDOW_S <= stop for start, stop in stretches), refusal
     assert copy["lag_s"] is None and copy["n_pairs"] is None
     fit = _fit(key)
     assert (fit["fit_status"], fit["time_source"]) == ("unfittable", "analog")
@@ -505,6 +533,128 @@ def test_a_disagreeing_sessions_lag_is_not_carried(landed):
     assert copy["outcome"] == "placed"
     assert (copy["lag_s"], bool(copy["lag_measured"]), copy["lag_source_datetime"]) == (0.0, False, None)
     assert _tier(key) == "N"
+
+
+def test_each_eye_file_is_matched_to_its_copy_once(landed):
+    """Fix round 1, finding 1: `Segment` places the file from what
+    `SystemTimebase.Copy` stored of the placement, so the copy, a 12 h
+    file's channel search and whole read, is matched once, never again; and
+    the segment carries the stored offset, residual and first sample."""
+    from wl_preproc.timebase.analog_copy import FAMILIES
+
+    for name in ("copy_only", "copy_partial", "copy_carried", "copy_short_stall", "copy_stall"):
+        (eye_path,) = (landed.session_dir(name) / "ohdpi").glob("*.txt")
+        assert landed.placements[eye_path] == 1, name
+    for name in ("copy_only", "copy_partial", "copy_carried"):
+        copy, segment = _copy(landed.key(name)), _segment(landed.key(name))
+        assert copy["signal"] in FAMILIES
+        assert (segment["offset_s"], segment["residual_us"], segment["first_sample"]) == (
+            copy["offset_s"], copy["residual_us"], copy["first_sample"]), name
+        assert segment["start_s"] == segment["offset_s"]
+
+
+def _scan(values, duration_s=252.0):
+    """A stand-in for `segments.scan_system`'s scan of an eye file: its
+    barcodes' values, and what the segment row reads."""
+    return SimpleNamespace(barcodes=[SimpleNamespace(value=value) for value in values], duration_s=duration_s,
+                           stream=SimpleNamespace(n_samples=126_000), n_frame_gaps=0, n_frames_missing=0,
+                           n_barcodes_dropped=0)
+
+
+_KEY = {"subject": "zz-stub", "session_datetime": "2024-01-01 09:00:00", "system": "ohdpi"}
+#: The NI's barcodes with a hole in its decode, values 3 to 6 (as
+#: `test_partial_sync_box.py`'s `holey_ni`).
+_HOLEY_REFERENCE = {value: 0.7 + value for value in (0, 1, 2, 7, 8)}
+_PLACED = {"offset_s": 0.1, "residual_us": 12.0, "first_sample": 2499}
+
+
+def test_a_file_in_a_hole_in_the_nis_barcodes_fails_whatever_the_copy_says():
+    """Amendment 77, after amendment 76 (fix round 1, finding 2): an eye file
+    whose barcodes the NI holds none of, though they lie between its first and
+    last, ran under a hole in the NI's own decode, which the copy cannot vouch
+    for: `no_shared_barcode`, though the copy placed it. One whose barcodes
+    all lie outside the NI's ran outside the box's span, and the copy places
+    it; so does one sharing a barcode. With no rate the copy was refused."""
+    from wl_preproc.schema.core import Segment
+    from wl_preproc.timebase.fit import RateFit
+
+    rate = RateFit(fitted_rate_hz=500.015, drift_ppm=30.0, n_matched=0, residual_us_rms=1.0, residual_us_max=2.0)
+    hole = Segment._place_by_copy(_KEY, "eye.txt", _scan((3, 4, 5)), _HOLEY_REFERENCE, rate, _PLACED)
+    assert hole == (False, {**_KEY, "file_path": "eye.txt", "reason": "no_shared_barcode"})
+    for values in ((9, 10), (), (2, 3)):
+        placed, row = Segment._place_by_copy(_KEY, "eye.txt", _scan(values), _HOLEY_REFERENCE, rate, _PLACED)
+        assert placed, values
+        assert (row["start_s"], row["offset_s"], row["residual_us"], row["first_sample"]) == (0.1, 0.1, 12.0, 2499)
+        assert row["end_s"] == pytest.approx(252.0 / rate.scale + 0.1, abs=1e-12)
+        assert row["n_barcodes"] == 0
+    refused = Segment._place_by_copy(_KEY, "eye.txt", _scan((3, 4, 5)), _HOLEY_REFERENCE, None, None)
+    assert refused == (False, {**_KEY, "file_path": "eye.txt", "reason": "no_analog_match"})
+
+
+#: The cross-check's unit cases (fix round 1, finding 4): a box whose
+#: barcodes cover NI 0.7 to 100.7 s, one a second, and an eye file that starts
+#: at NI 50 s, inside the span, its clock 30 ppm fast, so its own barcodes
+#: are those from 50.7 s. Its copy's pairs, one a window, are exact, 7 ms
+#: late. Its barcodes' line, fitted to its 50 s of them, has a rate 50 ppm off
+#: (2 ms frames over 50 s place a rate no better) and is right at their middle.
+_SPAN = (0.7, 100.7)
+_BOX = {value: 0.7 + value for value in range(101)}
+_EYE_SCALE, _EYE_STARTS_S, _COPY_DELAY_S = 1.0 + 30e-6, 50.0, 0.007
+
+
+def _eye_pairs(late_at: dict | None = None) -> list[tuple[float, float]]:
+    """The copy's pairs `(ni_s, device_s)` at each window's centre, each
+    `_COPY_DELAY_S` late, and later still by `late_at[device_s]`."""
+    late_at = late_at or {}
+    return [(device_s / _EYE_SCALE + _EYE_STARTS_S + _COPY_DELAY_S + late_at.get(device_s, 0.0), device_s)
+            for device_s in (5.0 + 10.0 * index for index in range(25))]
+
+
+def _barcode_line(rate_error_ppm: float) -> tuple[float, float]:
+    """`(scale, offset_s)` of the eye's barcodes' placement, right at their
+    middle, NI 75.7 s."""
+    scale = _EYE_SCALE * (1.0 + rate_error_ppm * 1e-6)
+    middle_s = 75.7
+    return scale, middle_s - (middle_s - _EYE_STARTS_S) * _EYE_SCALE / scale
+
+
+def test_agreement_is_held_over_the_eye_files_own_barcodes():
+    """The eye file starts inside the box's span, so before its first barcode
+    the barcodes' line is extrapolated: at the span's start, 75 s from where
+    it is right, it is 3.75 ms off, and held there a sound session would be
+    D. Held over the file's own first to last shared barcode it is 1.25 ms
+    off at each end, and agrees."""
+    from wl_preproc.schema.timebase import _cross_check
+
+    barcodes = [SimpleNamespace(value=value) for value in range(50, 101)]
+    lag_s, agreement_us = _cross_check(_eye_pairs(), barcodes, _BOX, _barcode_line(50.0), _SPAN, 500.0)
+    assert lag_s == pytest.approx(_COPY_DELAY_S, abs=50e-6)
+    assert agreement_us == pytest.approx(1250.0, abs=100.0)
+    assert agreement_us <= 2000.0
+
+
+def test_agreement_counts_a_corrected_pair_off_the_barcodes():
+    """The barcodes' line exact, one pair inside the span 3 ms later than the
+    rest: the line through all 25 barely moves, but that pair is 2.4 ms off
+    the barcodes once the lag (pulled 0.6 ms by it) is removed, and the
+    agreement says so."""
+    from wl_preproc.schema.timebase import _cross_check
+
+    barcodes = [SimpleNamespace(value=value) for value in range(50, 101)]
+    pairs = _eye_pairs(late_at={25.0: 0.003})
+    lag_s, agreement_us = _cross_check(pairs, barcodes, _BOX, _barcode_line(0.0), _SPAN, 500.0)
+    assert lag_s == pytest.approx(_COPY_DELAY_S + 0.003 / 5, abs=20e-6)
+    assert agreement_us == pytest.approx(2400.0, abs=100.0)
+
+
+def test_with_no_pair_over_the_eye_files_barcodes_nothing_is_measured():
+    """No pair's NI time lies between the eye file's first and last shared
+    barcode: the lag is not measured here (None), and so not held."""
+    from wl_preproc.schema.timebase import _cross_check
+
+    barcodes = [SimpleNamespace(value=value) for value in range(50, 54)]
+    assert _cross_check(_eye_pairs(), barcodes, _BOX, _barcode_line(0.0), _SPAN, 500.0) is None
+    assert _cross_check(_eye_pairs(), [], _BOX, _barcode_line(0.0), _SPAN, 500.0) is None
 
 
 def test_the_copy_sessions_report_no_error(landed):

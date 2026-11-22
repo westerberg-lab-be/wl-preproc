@@ -14,6 +14,7 @@ internal `~jobs` tables, which only exist once something populates.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import datajoint as dj
@@ -369,7 +370,9 @@ class SystemTimebase(dj.Computed):
         # `2026-10-18-training-records-and-backup-clock-design.md`, amendments
         # 77-80). `outcome` is amendment 77's: placed; failed, a channel gave
         # the distinct windows but the fit was refused; or absent, none did.
-        # The lag is removed from every pair's NI time before the fit.
+        # The lag is removed from every pair's NI time before the fit. Placed,
+        # the file's offset, residual and first sample are kept here for
+        # `Segment.make`, which writes them without matching the copy again.
         # Key: (subject, session_datetime, system).
         -> master
         ---
@@ -382,7 +385,10 @@ class SystemTimebase(dj.Computed):
         lag_s=null               : double        # removed from each pair's NI time; 0 where unmeasured
         lag_measured=null        : tinyint(1)    # 0: no lag measured on the rig, so 0
         lag_source_datetime=null : datetime      # the session it was measured in; this one's where measured here
-        agreement_us=null        : double        # the corrected copy against the barcodes over the span, at worst
+        agreement_us=null        : double        # the corrected copy against the file's barcodes in the span, at worst
+        offset_s=null            : double        # placed: the file's, session_s = device_s / scale + offset_s
+        residual_us=null         : double        # placed: the corrected pairs' RMS about that offset
+        first_sample=null        : bigint        # placed: the eye row at the first pair, as Segment's first_sample
         rig                      : varchar(64)   # the manifest's
         """
 
@@ -573,14 +579,20 @@ class SystemTimebase(dj.Computed):
           rejects the file as `no_analog_match`.
         - **Placed:** `fitted` by the analog mechanism, the rate fitted to the
           copy's pairs less the lag. Where barcodes also place the file, the
-          lag is measured over the covered span (`_measured_lag`), and the
-          corrected copy is held against them there; else it is carried
-          from the rig (`_carried_lag`), or is 0 and unmeasured. A lag once
-          used is kept (amendment 28): nothing here re-places a session.
+          lag is measured over the file's own barcodes in the covered span,
+          and the corrected copy is held against them there (`_cross_check`);
+          else it is carried from the rig (`_carried_lag`), or is 0 and
+          unmeasured. A lag once used is kept (amendment 28): nothing here
+          re-places a session.
+
+        Placed, the file's offset, its residual and its first sample are
+        stored on the `Copy` row too, and `Segment.make` writes them as they
+        are: the copy is matched once per session, here (fix round 1,
+        finding 1), never again for the segment.
         """
         from wl_preproc.timebase.analog_copy import CopyRefused, NoCopy, place_eye_by_copy
         from wl_preproc.timebase.clock import clipped
-        from wl_preproc.timebase.fit import fit_offset_to_pairs, fit_pairs_across
+        from wl_preproc.timebase.fit import fit_offset, fit_offset_to_pairs, fit_pairs_across
 
         by_barcodes, barcode_fit = self._by_barcodes(row, [scan], clock, reference, nominal_rate_hz)
         copy = {**key, "rig": _manifest_rig(session_dir)}
@@ -597,19 +609,19 @@ class SystemTimebase(dj.Computed):
             return
 
         pairs = placement.match.pairs
-        measured = None if barcode_fit is None else _measured_lag(pairs, scan, reference, barcode_fit,
-                                                                  clock.covered_span())
+        measured = None
+        if barcode_fit is not None:
+            barcode_line = (barcode_fit.scale, fit_offset(scan.barcodes, reference, barcode_fit).offset_s)
+            measured = _cross_check(pairs, scan.barcodes, reference, barcode_line, clock.covered_span(),
+                                    nominal_rate_hz)
         if measured is not None:
-            lag_s, source_datetime = measured[0], key["session_datetime"]
+            (lag_s, agreement_us), source_datetime = measured, key["session_datetime"]
         else:
+            agreement_us = None
             lag_s, source_datetime = _carried_lag(copy["rig"], key["session_datetime"]) or (0.0, None)
         corrected = [(ni_s - lag_s, device_s) for ni_s, device_s in pairs]
         fit = fit_pairs_across([corrected], nominal_rate_hz)
-        agreement_us = None
-        if measured is not None:
-            offset_s = fit_offset_to_pairs(corrected, fit).offset_s
-            agreement_us = max(abs(device_s / fit.scale + offset_s - session_s) * 1e6
-                               for session_s, device_s in measured[1])
+        offset = fit_offset_to_pairs(corrected, fit)
         self.insert1({
             **row,
             "time_source": "analog",
@@ -625,7 +637,8 @@ class SystemTimebase(dj.Computed):
             **copy, "outcome": "placed", "ni_channel": placement.match.channel, "signal": placement.match.signal,
             "n_pairs": len(pairs), "n_dropped": placement.match.n_dropped, "lag_s": lag_s,
             "lag_measured": source_datetime is not None, "lag_source_datetime": source_datetime,
-            "agreement_us": agreement_us,
+            "agreement_us": agreement_us, "offset_s": offset.offset_s, "residual_us": offset.residual_us,
+            "first_sample": placement.first_sample,
         })
 
     def _make_by_strobes(self, row: dict, scans: list, session_dir: Path, nominal_rate_hz: float) -> None:
@@ -678,28 +691,47 @@ def _manifest_rig(session_dir: Path) -> str:
         return ""
 
 
-def _measured_lag(pairs, scan, reference: dict, barcode_fit, span: tuple[float, float] | None) -> tuple | None:
-    """The copy's lag, as the barcodes measure it over the covered span
-    (amendment 79), and the span's two ends on the barcodes' placement,
-    `(session_s, device_s)`, to hold the corrected copy against. None where
-    no pair lies inside the span: then nothing here measures it.
+def _cross_check(pairs, barcodes, reference: dict, barcode_line: tuple[float, float],
+                 span: tuple[float, float] | None, nominal_rate_hz: float) -> tuple[float, float] | None:
+    """`(lag_s, agreement_us)`: the copy's lag as the file's barcodes measure
+    it, and how far, after it is removed, the copy then sits from them at
+    worst (amendment 79). None where nothing measures it: no span, or no pair
+    of the copy's over the file's own barcodes.
 
-    `lag_s = mean(ni_s - barcode_s(device_s))` over the copy's pairs whose NI
-    time lies inside the span, `barcode_s` 3b-3's placement of the file (its
-    barcodes' rate and offset). Both placements are lines in the eye's own
-    time, so they disagree most at one end of the span, and the ends are
-    where they are compared."""
-    from wl_preproc.timebase.fit import fit_offset
+    **Over the file's own barcodes in the span** (fix round 1, finding 4):
+    from the session time of its first barcode the NI holds to that of its
+    last, within the span. An eye file started or stopped inside the box's
+    span has no barcode past those ends, and the barcodes' line there is
+    extrapolated, its rate the worst-measured thing in it (2 ms frames over a
+    short stretch), so a sound session would be called D for it.
+
+    - `lag_s = mean(ni_s - barcode_s(device_s))` over the copy's pairs whose
+      NI time lies in that interval, `barcode_s` the file's placement by its
+      barcodes, `barcode_line`, `(scale, offset_s)`: 3b-3's rate and offset.
+    - `agreement_us` is the largest of the corrected copy's placement (its own
+      rate fit and offset through every corrected pair, as the file is
+      placed) less the barcodes', at the interval's two ends, where two lines
+      differ most, and of each corrected pair inside it less the barcodes'
+      placement of its device time."""
+    from wl_preproc.timebase.fit import fit_offset_to_pairs, fit_pairs_across
 
     if span is None:
         return None
-    low_s, high_s = span
-    offset_s = fit_offset(scan.barcodes, reference, barcode_fit).offset_s
-    inside = [ni_s - (device_s / barcode_fit.scale + offset_s) for ni_s, device_s in pairs if low_s <= ni_s <= high_s]
-    if not inside:
+    shared = [reference[barcode.value] for barcode in barcodes if barcode.value in reference]
+    low_s, high_s = max(min(shared, default=math.inf), span[0]), min(max(shared, default=-math.inf), span[1])
+    scale, offset_s = barcode_line
+    departures = [(ni_s, device_s, ni_s - (device_s / scale + offset_s)) for ni_s, device_s in pairs
+                  if low_s <= ni_s <= high_s]
+    if not departures:
         return None
-    ends = [(session_s, (session_s - offset_s) * barcode_fit.scale) for session_s in span]
-    return sum(inside) / len(inside), ends
+    lag_s = sum(departure for _ni_s, _device_s, departure in departures) / len(departures)
+    corrected = [(ni_s - lag_s, device_s) for ni_s, device_s in pairs]
+    fit = fit_pairs_across([corrected], nominal_rate_hz)
+    copy_offset_s = fit_offset_to_pairs(corrected, fit).offset_s
+    at_ends = [abs((session_s - offset_s) * scale / fit.scale + copy_offset_s - session_s)
+               for session_s in (low_s, high_s)]
+    at_pairs = [abs(departure - lag_s) for _ni_s, _device_s, departure in departures]
+    return lag_s, max(at_ends + at_pairs) * 1e6
 
 
 def _lag_in_bounds(lag_s: float) -> bool:
@@ -1240,8 +1272,6 @@ def _box_cross_check(session_dir: Path, reference: dict[int, float]
     its words are not in `codes()`, so it cuts nothing. None where the box
     holds no NI-reference value, holds no word over it, or its log cannot be
     read."""
-    import math
-
     from wl_preproc.timebase import segments
 
     try:

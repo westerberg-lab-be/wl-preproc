@@ -533,11 +533,12 @@ def _drop_and_refit(found: Sequence[_Hit]) -> tuple[list[_Hit], list[_Hit]]:
             break
         residuals = _residuals_us(pairs, fit.scale)
         if len(dropped) >= limit:
-            off = len(dropped) + int(np.sum(residuals > RESIDUAL_BOUND_US))
+            off = _off_the_line(found)
             raise CopyRefused(
-                f"{off} of {len(found)} pairs, {round(100 * off / len(found))}% of the pairs, lie further than "
-                f"{RESIDUAL_BOUND_US:g} us from the line, and at most {MAX_DROPPED_FRACTION:.0%} may be dropped; "
-                f"after dropping {len(dropped)}, the residual is still {fit.residual_us_max:.0f} us"
+                f"{len(off)} of {len(found)} pairs, {round(100 * len(off) / len(found))}% of the pairs, lie further "
+                f"than {RESIDUAL_BOUND_US:g} us from the line the rest lie on, over {_named(_stretches(off))}, and at "
+                f"most {MAX_DROPPED_FRACTION:.0%} may be dropped; after dropping {len(dropped)}, the residual is "
+                f"still {fit.residual_us_max:.0f} us"
             )
         dropped.append(kept.pop(int(np.argmax(residuals))))
     if len(kept) < MIN_PAIRS:
@@ -547,6 +548,46 @@ def _drop_and_refit(found: Sequence[_Hit]) -> tuple[list[_Hit], list[_Hit]]:
         )
     dropped.sort(key=lambda hit: hit.start_s)
     return kept, dropped
+
+
+def _off_the_line(found: Sequence[_Hit]) -> list[_Hit]:
+    """The pairs further than `RESIDUAL_BOUND_US` from the line the rest lie
+    on, in device order: what a refusal names. Not the least-squares line
+    through every pair, which `_drop_and_refit` fits: a stall pulls it toward
+    the late pairs, a quarter of them late by 20 ms pulls it 5 ms, and then
+    every pair is off it, so a stall would read as a copy that never matched.
+
+    The line is Theil-Sen's: the median of the pairwise slopes, which a stall
+    of up to about 29% of the pairs does not tilt, through the median of each
+    pair's intercept. Not `scipy.stats.theilslopes`' own intercept, the line
+    through the median device time and the median NI time: a stall in mid
+    file holds that median pair, and that line runs through the stall. It is
+    refitted by least squares to the pairs within `RESIDUAL_BOUND_US` of it,
+    so the bound is measured as the fit measures it (Task 4's fix round 1,
+    finding 3). Both sides are centred first: device times run to 12 h, and
+    the slope is resolved to a part per million."""
+    import scipy.stats
+
+    device = np.array([hit.device_s for hit in found], dtype=np.float64)
+    ni = np.array([hit.ni_s for hit in found], dtype=np.float64)
+    device, ni = device - device.mean(), ni - ni.mean()
+    slope = float(scipy.stats.theilslopes(ni, device)[0])
+    intercept = float(np.median(ni - slope * device))
+    near = np.abs(ni - (intercept + slope * device)) * 1e6 <= RESIDUAL_BOUND_US
+    if int(near.sum()) >= 2:
+        slope, intercept = np.polyfit(device[near], ni[near], 1)
+    off = np.abs(ni - (intercept + slope * device)) * 1e6 > RESIDUAL_BOUND_US
+    return sorted((hit for hit, is_off in zip(found, off, strict=True) if is_off), key=lambda hit: hit.start_s)
+
+
+def _named(stretches: Sequence[tuple[float, float]], most: int = 3) -> str:
+    """Stretches of the eye's own seconds as a refusal names them,
+    `100.0-170.0 s`, the first `most` and how many more."""
+    if not stretches:
+        return "no stretch"
+    named = ", ".join(f"{start:.1f}-{stop:.1f} s" for start, stop in stretches[:most])
+    more = len(stretches) - most
+    return f"the eye's {named}" + (f" and {more} more" if more > 0 else "")
 
 
 def _residuals_us(pairs: Sequence[tuple[float, float]], scale: float) -> np.ndarray:
@@ -757,6 +798,9 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
                 f"channel XA{channel}'s {signal!r} gave at least {MIN_PAIRS} distinct windows in the search, "
                 f"but matched whole: {short}"
             ) from short
+        except CopyRefused as refused:
+            # The matcher knows neither name; the daily report needs both.
+            raise CopyRefused(f"channel XA{channel}'s {signal!r}: {refused}") from refused
     except (NoCopy, CopyRefused) as refusal:
         logger.warning("%s: %s", eye_path, refusal)
         raise

@@ -292,6 +292,12 @@ def test_too_many_late_windows_refuse():
     assert fraction is not None, message
     assert int(fraction.group(1)) > 100 * MAX_DROPPED_FRACTION
     assert "dropped" in message
+    # Counted against the line the rest lie on, not one the late windows have
+    # pulled toward them (Task 4's fix round 1, finding 3): a quarter of the
+    # pairs, not all of them, and over the stretch that was late.
+    assert 15 <= int(fraction.group(1)) <= 35, message
+    stretches = [(float(start), float(stop)) for start, stop in re.findall(r"(\d+\.\d)-(\d+\.\d) s", message)]
+    assert any(start <= 150.0 + WINDOW_S and 250.0 - WINDOW_S <= stop for start, stop in stretches), message
 
 
 def test_an_eye_trace_that_starts_before_the_channel_is_anchored():
