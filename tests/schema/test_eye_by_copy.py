@@ -63,6 +63,69 @@ EARLIER_LAG_S, LATER_LAG_S = 0.008, 0.011
 SPLIT_S = 126.0
 #: The bound on a lag the box measured (ruling P1), and on a placement whose
 #: lag is right (measured here, or carried).
+#: The sessions that hold calibration windows and fixations: the one a copy
+#: places beyond its box's span, and the one whose copy is absent, which the
+#: span still cuts.
+WINDOWED = ("copy_partial", "copy_absent")
+#: `copy_partial`'s ten calibration targets, in pixels at `CAL_SCALE` degrees
+#: each, none repeated, held in windows from `WINDOWS_FROM_S` every 1.5 s, all
+#: after the box's span. A held gaze is smooth, so its windows match their copy
+#: over a wide peak and the matcher rightly gives them no pair
+#: (`timebase/analog_copy.py`): the holds start after the first window of
+#: `WINDOW_S`, which holds the span's one pair, and a repeating gaze would
+#: match a period off as well.
+WINDOWS_FROM_S = 10.1
+HOLDS_PX = ((0.0, 0.0), (500.0, 0.0), (500.0, 500.0), (0.0, 500.0), (250.0, 250.0),
+            (-300.0, 200.0), (150.0, -400.0), (-450.0, -250.0), (350.0, 300.0), (-100.0, 450.0))
+
+
+def _window_starts_s() -> tuple:
+    return tuple(WINDOWS_FROM_S + 1.5 * index for index in range(len(HOLDS_PX)))
+
+
+def _fixations() -> tuple:
+    """`copy_partial`'s gaze: held at `HOLDS_PX` in turn, one hold per
+    calibration window (`_window_starts_s`), joined by ramps, from the first
+    window's start; the generator's saccades before and after."""
+    from wl_preproc.synth.recipe import EyeFixationSpec
+
+    from tests.schema.test_detect_populate import _ramp_fixations
+    from tests.schema.test_partial_sync_box import _RAMP_AFTER_S, _RAMP_S, _RAMP_STEPS
+
+    starts = _window_starts_s()
+    fixations, held_from_s = [], starts[0]
+    for index, start_s in enumerate(starts):
+        here = HOLDS_PX[index]
+        if index == len(starts) - 1:
+            fixations.append(EyeFixationSpec(start_s=held_from_s, end_s=start_s + 1.4, x_px=here[0], y_px=here[1]))
+            break
+        ramp_s = start_s + _RAMP_AFTER_S
+        fixations.append(EyeFixationSpec(start_s=held_from_s, end_s=ramp_s, x_px=here[0], y_px=here[1]))
+        fixations.extend(_ramp_fixations(ramp_s, here, HOLDS_PX[index + 1], _RAMP_S, _RAMP_STEPS))
+        held_from_s = ramp_s + _RAMP_S
+    return tuple(fixations)
+
+
+def _write_windows(session_dir, recipe, truth) -> None:
+    """The session's code words with a calibration window at each hold
+    (`test_partial_sync_box.py::_write_calibration_windows`, at `_window_starts_s`),
+    in the NI's stream, which regenerates its analog channels as the recipe
+    says, and the box's log."""
+    import dataclasses
+
+    from wl_preproc.synth.spikeglx import write_nidq
+    from wl_preproc.synth.syncbox import write_syncbox_log
+
+    from tests.schema.test_eye_populate import _fixation_words
+    from tests.schema.test_partial_sync_box import CAL_SCALE
+
+    extra = []
+    for start_s, (x_px, y_px) in zip(_window_starts_s(), HOLDS_PX, strict=True):
+        extra.extend(_fixation_words(start_s, (CAL_SCALE * x_px, CAL_SCALE * y_px)))
+    words = tuple(sorted((*truth.code_words, *extra), key=lambda pair: pair[0]))
+    written = dataclasses.replace(truth, code_words=words)
+    write_syncbox_log(session_dir / "syncbox" / "seg-000.log", recipe, written)
+    write_nidq(session_dir / "spikeglx", recipe, written, drift_ppm=dict(recipe.system_drift_ppm)["spikeglx"])
 LAG_BOUND_S = 0.5e-3
 PLACED_BOUND_S = 1e-3
 
@@ -152,6 +215,10 @@ def landed(dj_conn, prefix, tmp_path_factory):
     - `copy_absent`: the box stopping at `STOP_S`, the NI's copy channel
       carrying noise alone, and `copy_absent_plain`, the same recipe with no
       copy at all (3b-3's partial);
+    - `copy_partial` and `copy_absent` also hold ten calibration windows and
+      fixations in the eye's gaze (`WINDOWED`): `copy_partial`'s all after the
+      box's span, `copy_absent`'s five inside it and five after it
+      (amendment 81);
     - `copy_noise` and `copy_flat`: no box, the channel noise alone or flat;
     - `copy_stall`: no box, a stall over 25% of the file (`LONG_STALL`);
       `copy_stall_box` the same with the box stopping at `STOP_S`;
@@ -177,6 +244,7 @@ def landed(dj_conn, prefix, tmp_path_factory):
     from wl_preproc.timebase import analog_copy
 
     from tests.schema.test_eye_populate import _land
+    from tests.schema.test_partial_sync_box import _eye_fixations, _write_calibration_windows
 
     daemon.activate_all(prefix=prefix)
     serial = new_serial()
@@ -201,7 +269,9 @@ def landed(dj_conn, prefix, tmp_path_factory):
             "blocks": (BlockSpec(task_type=TaskTypeCode.RF_MAP, n_trials=N_TRIALS, trial_duration_s=TRIAL_S),),
             "montages": (MontageSpec(start_s=0.0, end_s=N_TRIALS * TRIAL_S),),
             "eye_copy": copy, "system_drift_ppm": DRIFT_PPM,
-            **({"syncbox_stop_s": STOP_S} if box else {}), **update})
+            **({"syncbox_stop_s": STOP_S} if box else {}),
+            **({"eye_fixations": _fixations()} if name == "copy_partial" else {}),
+            **({"eye_fixations": _eye_fixations()} if name == "copy_absent" else {}), **update})
         root = tmp_path_factory.mktemp(name)
         truth = generate_session(root, recipe)
         session_dir = root / recipe.session_id
@@ -211,6 +281,10 @@ def landed(dj_conn, prefix, tmp_path_factory):
             _shift_the_copy_earlier(session_dir, NEGATIVE_SHIFT_S)
         if name == "copy_two_files":
             _split_the_eye_file(session_dir, SPLIT_S)
+        if name == "copy_partial":
+            _write_windows(session_dir, recipe, truth)
+        if name == "copy_absent":
+            _write_calibration_windows(session_dir, recipe, truth)
         key = _land(root, recipe, session.session_datetime, acquisition_systems=recipe.systems)
         sessions[name] = (recipe, truth, key, session_dir)
 
@@ -716,3 +790,140 @@ def test_the_copy_sessions_report_no_error(landed):
     for name in landed:
         for report in landed.reports:
             assert _errors_of(report, landed.key(name)) == [], name
+
+
+# -- Eye data past the span (amendment 81) --------------------------------------
+
+
+def _span(landed, name):
+    from wl_preproc.timebase.clock import clock_for
+
+    return clock_for(landed.key(name), landed.session_dir(name)).covered_span()
+
+
+def test_a_copy_placed_eye_is_calibrated_past_the_span(landed):
+    """Amendment 81: the copy places every frame of `copy_partial`'s eye file,
+    so its calibration uses all ten windows, every one after the box's span
+    (8.7 s). `copy_absent`, the same box with no copy, holds ten windows too,
+    five inside the span and five after it, and is calibrated from the five
+    inside alone (amendment 58, unchanged)."""
+    from wl_preproc.eye.span import eye_span
+    from wl_preproc.schema import eye
+
+    from tests.schema.test_partial_sync_box import _windows
+
+    partial, absent = landed.key("copy_partial"), landed.key("copy_absent")
+    _start_s, end_s = _span(landed, "copy_partial")
+    windows = _windows(landed, "copy_partial")
+    assert len(windows) == 10 and all(window[0] > end_s for window in windows)
+    assert sum(window[1] > end_s for window in _windows(landed, "copy_absent")) == 5
+    assert eye_span(partial, landed.session_dir("copy_partial")) is None
+    for row in (eye.EyeCalibration & partial).to_dicts():
+        assert row["calibration_source"] == "fitted", row
+        assert row["n_points"] == 10, row
+    for row in (eye.EyeCalibration & absent).to_dicts():
+        assert row["calibration_source"] == "fitted", row
+        assert row["n_points"] == 5, row
+
+
+def _saccade_starts_s(landed, name) -> list[float]:
+    """The session time of each stored saccade's first row, both eyes and
+    every detector, the rows' times re-derived as `test_partial_sync_box.py`
+    does."""
+    from wl_preproc.eye.detect.labels import Label
+    from wl_preproc.schema import detect
+
+    from tests.schema.test_partial_sync_box import _eye_recording
+
+    _segment, _path, times = _eye_recording(landed, name)
+    runs = (detect.EyeDetection.Run & landed.key(name) & {"label": Label.SACCADE.value}).to_dicts()
+    return [float(times[run["run_start"]]) for run in runs]
+
+
+def test_a_copy_placed_eyes_saccades_past_the_span_are_stored(landed):
+    """Amendment 81: detection reads every row of a copy-placed file, so
+    saccades are stored past the box's span (the ramps between the windows
+    after it); the validity mask names no span, since none cuts. The absent
+    copy's file is cut as before: no saccade past the span, and its mask's
+    span rows are the span's."""
+    from wl_preproc.schema import detect
+
+    for name, past in (("copy_partial", True), ("copy_absent", False)):
+        _start_s, end_s = _span(landed, name)
+        starts = _saccade_starts_s(landed, name)
+        assert starts, name
+        assert (max(starts) > end_s) == past, (name, end_s, sorted(starts)[-3:])
+        for row in (detect.EyeValidity & landed.key(name)).to_dicts():
+            assert row["status"] == "computed", (name, row["reason"])
+            assert (row["span_row_stop"] is None) == past, (name, row)
+
+
+@pytest.fixture(scope="module")
+def nwb_files(landed, prefix, tmp_path_factory):
+    """The canonical NWB file of `copy_partial` and `copy_absent`, built by
+    the daemon in one pass, as `test_partial_sync_box.py::nwb_files` builds
+    them: by name, its `NwbFile` row."""
+    from wl_preproc import daemon
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import core
+    from wl_preproc.schema import nwb as nwb_schema
+
+    from tests.schema.test_nwb_build import _montage, _request
+
+    keys = {}
+    for name in WINDOWED:
+        session_key = landed.key(name)
+        runs = [{"run_number": row["run_number"], "start_s": row["run_start_time"], "end_s": row["run_stop_time"],
+                 "works_run_id": f"wr-{row['run_number']}"}
+                for row in (core.Run & session_key).to_dicts(order_by="run_number")]
+        keys[name] = accept(_request(session_key, f"{session_key['subject']}-canonical", _montage(runs), runs),
+                            prefix=prefix)
+    report = daemon.run_once(prefix=prefix, nwb_root=tmp_path_factory.mktemp("copy-nwb"))
+    files = {}
+    for name, key in keys.items():
+        rows = (nwb_schema.NwbFile & key).to_dicts()
+        assert rows, (name, report["errors"])
+        assert rows[0]["status"] == "written", (name, rows[0]["reason"] or rows[0]["inspector_findings"])
+        files[name] = rows[0]
+    return files
+
+
+def test_a_copy_placed_eyes_nwb_samples_run_past_the_span(landed, nwb_files):
+    """Amendment 81: the file holds every eye sample of a copy-placed
+    recording, gaze and pupil alike, to its last frame, far past the box's
+    span; the absent copy's holds none past the span."""
+    from pynwb import NWBHDF5IO
+
+    from tests.schema.test_partial_sync_box import _eye_recording
+
+    for name, past in (("copy_partial", True), ("copy_absent", False)):
+        _start_s, end_s = _span(landed, name)
+        _segment, _path, raw = _eye_recording(landed, name)
+        with NWBHDF5IO(nwb_files[name]["path"], "r") as handle:
+            behavior = handle.read().processing["behavior"]
+            series = [*behavior["PupilTracking"].time_series.values(),
+                      *behavior["EyeTracking"].spatial_series.values()]
+            assert len(series) == 6, (name, [item.name for item in series])
+            for item in series:
+                times = item.timestamps[:]
+                assert len(times) == len(item.data) > 0, (name, item.name)
+                if past:
+                    assert times.max() == pytest.approx(raw.max(), abs=1e-6), (name, item.name)
+                    assert times.max() > end_s + 100.0, (name, item.name)
+                else:
+                    assert times.max() <= end_s, (name, item.name)
+
+
+def test_a_barcode_placed_eye_is_still_cut(landed):
+    """Amendment 81 lifts the cut for a file the copy placed, and only that:
+    one whose copy is absent (`copy_absent`) or failed (`copy_stall_box`) is
+    placed by barcodes and asks the clock's own span, as before. `copy_only`,
+    with no box, has no span to give either way."""
+    from wl_preproc.eye.span import eye_span
+
+    for name in ("copy_absent", "copy_stall_box"):
+        key = landed.key(name)
+        assert _fit(key)["time_source"] == "barcode", name
+        span = eye_span(key, landed.session_dir(name))
+        assert span is not None and span == _span(landed, name), name
+        assert span[1] < _segment(key)["end_s"] - 100.0, name

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from wl_preproc.eye.span import eye_span
 from wl_preproc.nwb.describe import task_name
 from wl_preproc.nwb.eye_events import MEASUREMENTS
 from wl_preproc.nwb.trim import BlockSet
@@ -809,7 +810,7 @@ def gather(activation_key: dict) -> Gathered:
     clock = session_clock.wall_reference(key["session_datetime"],
                                          rig_at_zero=rig_clock[0]["rig_at_zero"] if rig_clock else None)
     validity_idx, detection_idx = _paramsets()
-    eye = _eye(session_key, session_dir, extent, validity_idx, detection_idx, session_clock.covered_span())
+    eye = _eye(session_key, session_dir, extent, validity_idx, detection_idx, eye_span(session_key, session_dir))
     # Samples in these runs, but none inside the covered span: the notes say
     # so, and the description gains nothing (amendment 63).
     no_eye_samples = eye is not None and eye.get("no_samples", False) and not eye.get("outside_span", False)

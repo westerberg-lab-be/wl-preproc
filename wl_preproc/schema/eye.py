@@ -60,7 +60,7 @@ from wl_preproc.eye.calibration import (
 )
 from wl_preproc.eye.gaze import purkinje_vector
 from wl_preproc.eye.ohdpi import read_ohdpi, read_tracker_loss
-from wl_preproc.eye.span import Span, clip_to_span, inside_span, rows_inside
+from wl_preproc.eye.span import Span, clip_to_span, eye_span, inside_span, rows_inside
 from wl_preproc.contracts.paths import XCON_DIRNAME
 from wl_preproc.schema import DEFAULT_PREFIX, core, pipeline
 
@@ -562,7 +562,7 @@ class EyeCalibration(dj.Computed):
         # below does and for its reason: `resolve_calibration`'s own "no
         # fixation epoch named a target position" would be FALSE, pointing a
         # reader at the task code for a fault that is the sync box's.
-        span = clock.covered_span()
+        span = eye_span(session_key, session_dir)
         n_named = len(windows)
         windows = [window for window in windows if inside_span(np.array(window[:2]), span).all()]
         if n_named and not windows:
@@ -1225,12 +1225,11 @@ class EyeQuality(dj.Computed):
         of recording inside it. Under the sync box, the whole recording.
         """
         from wl_preproc.schema import ingest
-        from wl_preproc.timebase.clock import clock_for
 
         session_key = {k: key[k] for k in pipeline.Session.primary_key}
         session_dir = Path((ingest.Ingestion & session_key).fetch1("session_dir"))
         segments = (core.Segment & {**session_key, "system": "ohdpi"}).to_dicts()
-        span = clock_for(session_key, session_dir).covered_span()
+        span = eye_span(session_key, session_dir)
         frame_offsets: dict[Path, np.ndarray] = {}
 
         rows = []
