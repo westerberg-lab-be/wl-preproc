@@ -54,6 +54,23 @@ last run, SpikeGLX's NI keeps the time. **Shipped at 3b-1's merge**, not before.
   left out and named, and does not make the session `D`. `docs/schemas/session_listing.json` types a
   `RejectedFile`'s `reason` as a plain string, not a fixed set, so no vendored copy refuses it; a reader that
   names each reason needs the new one.
+- **Added by the eye tracker's analog copy (2026-11-21): under the NI, the eye tracker may be placed by its analog
+  copy** on one of the NI's analog inputs, over its whole recording, so a session whose eye file holds no barcode
+  can be tier N. **`GET /sessions`: a listed rejected segment's `reason` may now be `no_analog_match`**: an
+  eye-tracker file whose copy was found but refused and which no barcode placed, or an eye file that is not the
+  one its copy placed. It makes the session `D`. **The NWB file's `system_clocks.time_source` may read
+  `analog`.** Both are plain strings: `docs/schemas/session_listing.json` types a `RejectedFile`'s `reason` as a
+  plain string, not a fixed set, so no vendored copy refuses it, and `time_source` is in the file, not in the
+  description, so nothing needs vendoring. A reader that names each value needs the new ones.
+- **Added by the analog copy: reworded texts and a report section.** Under the NI, the NWB file's `system_clocks`
+  column texts `worst_residual`, `fitted_rate`, `residual_rms` and `first_sample` each now say what they hold for
+  the eye tracker placed by its copy, and `time_source`'s text gains `analog`. The description's `notes` say how
+  the eye was placed: the NI channel, the eye signal, the lag, and whether it was measured. The daily report
+  (`wlpp report`) gains the section "Eye placed by its analog copy (24 h)", naming each copy refused, each
+  measured lag more than one frame from the rig's previous one, each copy whose measured lag fails its checks
+  (out of bounds, or more than a frame from the barcodes), which makes the session D, and each absent copy whose
+  channel search the two files' clocks did not aim. Nothing in the listing's or the description's
+  shape changes.
 - **Every listed session is listed once more** when this ships: each segment's key changes, so each digest does.
 - **Every NWB file built before this stays as it is.** Nothing here asks for one to be rebuilt.
 

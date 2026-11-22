@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from wl_sync.barcode import Barcode
 
     from wl_preproc.timebase.extract import BitStream
+    from wl_preproc.timebase.fit import RateFit
 
 _INTERVAL_S = INTERVAL_US / 1_000_000.0
 
@@ -111,6 +112,15 @@ NO_STROBE_ANCHOR = "no_strobe_anchor"
 # ruling R14, amendment 76).
 OUTSIDE_COVERED_SPAN = "outside_covered_span"
 
+# Not a verdict `classify_segment` can reach either: under the NI's clock the
+# eye tracker's file is placed by its analog copy on an NI channel
+# (`timebase/analog_copy.py::place_eye_by_copy`), and one whose copy was found
+# but refused, with no barcode to place it instead, is not placed at all. It
+# fails the session, as an unplaced device does (design spec
+# `2026-10-18-training-records-and-backup-clock-design.md`, amendments 77 and
+# 78). Why it was refused is `timebase.SystemTimebase.Copy`'s `refusal`.
+NO_ANALOG_MATCH = "no_analog_match"
+
 #: Every reason `RejectedSegment.reason` can hold, and where each is
 #: decided. `TOO_SHORT` and `NO_BARCODE` come from `classify_segment`.
 #: `UNFITTED_SYSTEM` is decided per SYSTEM, above the file, when no rate fit
@@ -126,9 +136,12 @@ OUTSIDE_COVERED_SPAN = "outside_covered_span"
 #: `OUTSIDE_COVERED_SPAN` is decided per FILE, in `Segment.make`, under the
 #: NI's clock, against the range of the NI's barcode values, where
 #: `NO_SHARED_BARCODE` would be under the sync box's (`unshared_reason`).
+#: `NO_ANALOG_MATCH` is decided per SYSTEM, in `SystemTimebase.make`, under
+#: the NI's clock, for the eye tracker whose copy was refused and whose
+#: barcodes do not place it; `Segment.make` writes it for its file.
 REJECTION_REASONS: frozenset[str] = frozenset(
     {TOO_SHORT, NO_BARCODE, UNFITTED_SYSTEM, GAP_CORRUPTED, NO_SHARED_BARCODE, NI_RESTARTED,
-     NO_STROBE_ANCHOR, OUTSIDE_COVERED_SPAN}
+     NO_STROBE_ANCHOR, OUTSIDE_COVERED_SPAN, NO_ANALOG_MATCH}
 )
 
 

@@ -14,6 +14,7 @@ internal `~jobs` tables, which only exist once something populates.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import datajoint as dj
@@ -39,7 +40,12 @@ schema = dj.Schema()
 # 'strobes' is Intan's under the NI (part 3b-2; amendments 44 to 50): its own
 # strobe edges, matched to the NI's, are the pairs the fit stands on, where a
 # barcode's decoded value would be under the sync box.
-_TIME_SOURCE_ENUM = "enum('barcode','trigger','clock','none','strobes')"
+# 'analog' is the eye tracker's under the NI (design spec
+# `2026-10-18-training-records-and-backup-clock-design.md`, amendments 77-80):
+# its own columns, matched to their analog copy on an NI channel, are the
+# pairs, less the copy's lag (`SystemTimebase.Copy`). Fitted, it is as good
+# as the lag; unfittable, the copy was refused and no barcode places the file.
+_TIME_SOURCE_ENUM = "enum('barcode','trigger','clock','none','strobes','analog')"
 
 # The system whose own timeline is session time, under each clock that keeps
 # it: its fit is identity, the truth rather than a placeholder (amendment 50's
@@ -357,6 +363,44 @@ class SystemTimebase(dj.Computed):
     # the session. `fit_status` is the column to branch on; the rest are its
     # payload.
 
+    class Copy(dj.Part):
+        definition = """
+        # The eye tracker's analog copy on the NI, where it was looked for: the
+        # eye tracker under the NI's clock, with one eye file (design spec
+        # `2026-10-18-training-records-and-backup-clock-design.md`, amendments
+        # 77-80). `outcome` is amendment 77's: placed; failed, a channel gave
+        # the distinct windows but the fit was refused; or absent, none did.
+        # The lag is removed from every pair's NI time before the fit. Placed,
+        # the file's offset, residual and first sample are kept here for
+        # `Segment.make`, which writes them without matching the copy again,
+        # for that file alone: the one `placed_*` names (`copy_identity`).
+        # `search_unaimed` is why the two files' clocks did not aim the channel
+        # search (amendment 85), null where they did: unaimed, an eye file far
+        # from the NI's start is reported absent though its copy is there.
+        # Key: (subject, session_datetime, system).
+        -> master
+        ---
+        outcome                  : enum('placed','failed','absent')
+        refusal=''               : varchar(255)  # why it was refused; '' unless failed
+        ni_channel=null          : smallint      # the copy's channel, XA<k>; null unless placed
+        signal=null              : varchar(32)   # the eye columns it matched, a name in analog_copy.FAMILIES
+        n_pairs=null             : int unsigned  # the pairs the fit stands on, after the drop
+        n_dropped=null           : int unsigned  # pairs off the line, dropped (78)
+        dropped_stretches=null   : varchar(255)  # placed: their eye seconds, "100.0-110.0 s, ..."; null for none
+        lag_s=null               : double        # removed from each pair's NI time; 0 where unmeasured
+        lag_measured=null        : tinyint(1)    # 0: no lag measured on the rig, so 0
+        lag_source_datetime=null : datetime      # the session it was measured in; this one's where measured here
+        agreement_us=null        : double        # the corrected copy against the file's barcodes in the span, at worst
+        offset_s=null            : double        # placed: the file's, session_s = device_s / scale + offset_s
+        residual_us=null         : double        # placed: the corrected pairs' RMS about that offset
+        first_sample=null        : bigint        # placed: the eye row at the first pair, as Segment's first_sample
+        placed_file=null         : varchar(255)  # placed: the file it placed, relative to the session's folder
+        placed_rows=null         : int unsigned  # placed: that file's rows
+        placed_bytes=null        : bigint unsigned  # placed: that file's size
+        search_unaimed=null      : varchar(255)  # why the clocks did not aim the search (85); null where they did
+        rig                      : varchar(64)   # the manifest's
+        """
+
     @property
     def key_source(self):
         """Only systems belonging to a session that actually landed.
@@ -399,11 +443,16 @@ class SystemTimebase(dj.Computed):
         makes their files outside the span (the plan's decision 2). See
         design spec `2026-10-18-training-records-and-backup-clock-design.md`,
         amendments 40 and 44 to 57.
+
+        The eye tracker under the NI, with one eye file, is first looked for
+        on the NI's analog inputs, by its copy (`_make_by_copy`, amendments
+        77-80): placed by it, its `time_source` is 'analog'; where the copy
+        is absent, or refused while its barcodes place the file, the barcode
+        path stands. Either way its `Copy` row says what was found.
         """
         from wl_preproc.schema import ingest
         from wl_preproc.timebase import segments
         from wl_preproc.timebase.clock import clock_for
-        from wl_preproc.timebase.fit import fit_rate_across
 
         session_dir = Path(
             (ingest.Ingestion & {k: key[k] for k in pipeline.Session.primary_key}).fetch1(
@@ -434,6 +483,9 @@ class SystemTimebase(dj.Computed):
         # Intan, and 'barcode' for the systems carrying the box's barcodes
         # where the NI decoded some; 'none' for them where it decoded none.
         by_strobes = clock.source == "nidq" and key["system"] == "rhs"
+        # The NI's barcodes, under its clock; the sync box's reference is
+        # read where it is used (`_by_barcodes`).
+        reference: dict[int, float] = {}
         if clock.source == "nidq":
             reference = clock.barcode_reference() if key["system"] in _BY_THE_NIS_BARCODES else {}
             row["time_source"] = ("clock" if keeps_time else "strobes" if by_strobes
@@ -479,13 +531,28 @@ class SystemTimebase(dj.Computed):
             self._make_by_strobes(row, scans, session_dir, nominal_rate_hz)
             return
 
+        # The eye tracker under the NI, by its analog copy (amendments 77-80).
+        # One eye file only: a session with more keeps 3b-3's rules, and no
+        # copy is looked for (amendment 77's builder's call).
+        if clock.source == "nidq" and key["system"] == "ohdpi" and len(scans) == 1:
+            self._make_by_copy(key, row, scans[0], session_dir, clock, reference, nominal_rate_hz)
+            return
+
+        self.insert1(self._by_barcodes(row, scans, clock, reference, nominal_rate_hz)[0])
+
+    def _by_barcodes(self, row: dict, scans: list, clock, reference: dict, nominal_rate_hz: float) -> tuple:
+        """The row the barcode path gives, and its rate fit, or None where the
+        row is `unfittable`: today's path for every system but the one that
+        keeps time and Intan under the NI, and 3b-3's for the eye tracker
+        whose copy is absent, or failed where its barcodes place it."""
+        from wl_preproc.timebase.fit import fit_rate_across
+
         if clock.source == "nidq" and row["time_source"] == "none":
             # No way onto the NI's clock: not a system carrying the box's
             # barcodes, or the NI decoded none of them (amendment 51; the
             # plan's decision 2). The fit columns stay NULL, as for any system
             # that could not be fitted.
-            self.insert1({**row, "fit_status": "unfittable", "nominal_rate_hz": nominal_rate_hz})
-            return
+            return {**row, "fit_status": "unfittable", "nominal_rate_hz": nominal_rate_hz}, None
 
         if clock.source != "nidq":
             reference = clock.barcode_reference()
@@ -496,23 +563,95 @@ class SystemTimebase(dj.Computed):
             # "a system with zero decodable barcodes". The row records that it
             # was checked and could not be fitted; the fit columns stay NULL,
             # because zeros there are what a flawless fit looks like.
-            self.insert1(
-                {**row, "fit_status": "unfittable", "nominal_rate_hz": nominal_rate_hz}
-            )
+            return {**row, "fit_status": "unfittable", "nominal_rate_hz": nominal_rate_hz}, None
+
+        return {
+            **row,
+            "fit_status": "fitted",
+            "n_barcodes_matched": fit.n_matched,
+            "nominal_rate_hz": nominal_rate_hz,
+            "fitted_rate_hz": fit.fitted_rate_hz,
+            "drift_ppm": fit.drift_ppm,
+            "residual_us_rms": fit.residual_us_rms,
+            "residual_us_max": fit.residual_us_max,
+        }, fit
+
+    def _make_by_copy(self, key: dict, row: dict, scan, session_dir: Path, clock, reference: dict,
+                      nominal_rate_hz: float) -> None:
+        """The eye tracker under the NI: placed by its analog copy, with a
+        `Copy` row saying how (amendments 77-80; the plan's outcome table).
+
+        - **Absent** (`NoCopy`: no channel gave `MIN_PAIRS` distinct windows):
+          3b-3's row, by the NI's barcodes or by none.
+        - **Failed** (`CopyRefused`): 3b-3's row where its barcodes fit;
+          else `unfittable` by the analog mechanism, and `Segment.make`
+          rejects the file as `no_analog_match`.
+        - **Placed:** `fitted` by the analog mechanism, the rate fitted to the
+          copy's pairs less the lag. Where barcodes also place the file, the
+          lag is measured over the file's own barcodes in the covered span,
+          and the corrected copy is held against them there (`_cross_check`);
+          else it is carried from the rig (`_carried_lag`), or is 0 and
+          unmeasured. A lag once used is kept (amendment 28): nothing here
+          re-places a session.
+
+        Placed, the file's offset, its residual and its first sample are
+        stored on the `Copy` row too, and `Segment.make` writes them as they
+        are: the copy is matched once per session, here (fix round 1,
+        finding 1), never again for the segment.
+        """
+        from wl_preproc.timebase.analog_copy import CopyRefused, NoCopy, place_eye_by_copy, stretches_text
+        from wl_preproc.timebase.clock import clipped
+        from wl_preproc.timebase.fit import fit_offset, fit_offset_to_pairs, fit_pairs_across
+
+        by_barcodes, barcode_fit = self._by_barcodes(row, [scan], clock, reference, nominal_rate_hz)
+        copy = {**key, "rig": _manifest_rig(session_dir)}
+        try:
+            placement = place_eye_by_copy(session_dir, scan.path)
+        except NoCopy as absent:
+            self.insert1(by_barcodes)
+            self.Copy.insert1({**copy, "outcome": "absent", "search_unaimed": _unaimed(absent.search_unaimed)})
+            return
+        except CopyRefused as refusal:
+            self.insert1(by_barcodes if barcode_fit is not None else {
+                **row, "time_source": "analog", "fit_status": "unfittable", "nominal_rate_hz": nominal_rate_hz})
+            self.Copy.insert1({**copy, "outcome": "failed", "refusal": clipped(str(refusal)),
+                               "search_unaimed": _unaimed(refusal.search_unaimed)})
             return
 
-        self.insert1(
-            {
-                **row,
-                "fit_status": "fitted",
-                "n_barcodes_matched": fit.n_matched,
-                "nominal_rate_hz": nominal_rate_hz,
-                "fitted_rate_hz": fit.fitted_rate_hz,
-                "drift_ppm": fit.drift_ppm,
-                "residual_us_rms": fit.residual_us_rms,
-                "residual_us_max": fit.residual_us_max,
-            }
-        )
+        pairs = placement.match.pairs
+        measured = None
+        if barcode_fit is not None:
+            barcode_line = (barcode_fit.scale, fit_offset(scan.barcodes, reference, barcode_fit).offset_s)
+            measured = _cross_check(pairs, scan.barcodes, reference, barcode_line, clock.covered_span(),
+                                    nominal_rate_hz)
+        if measured is not None:
+            (lag_s, agreement_us), source_datetime = measured, key["session_datetime"]
+        else:
+            agreement_us = None
+            lag_s, source_datetime = _carried_lag(copy["rig"], key["session_datetime"]) or (0.0, None)
+        corrected = [(ni_s - lag_s, device_s) for ni_s, device_s in pairs]
+        fit = fit_pairs_across([corrected], nominal_rate_hz)
+        offset = fit_offset_to_pairs(corrected, fit)
+        self.insert1({
+            **row,
+            "time_source": "analog",
+            "fit_status": "fitted",
+            "n_barcodes_matched": 0 if barcode_fit is None else barcode_fit.n_matched,
+            "nominal_rate_hz": nominal_rate_hz,
+            "fitted_rate_hz": fit.fitted_rate_hz,
+            "drift_ppm": fit.drift_ppm,
+            "residual_us_rms": fit.residual_us_rms,
+            "residual_us_max": fit.residual_us_max,
+        })
+        self.Copy.insert1({
+            **copy, "outcome": "placed", "ni_channel": placement.match.channel, "signal": placement.match.signal,
+            "n_pairs": len(pairs), "n_dropped": placement.match.n_dropped,
+            "dropped_stretches": clipped(stretches_text(placement.match.dropped_stretches)) or None, "lag_s": lag_s,
+            "lag_measured": source_datetime is not None, "lag_source_datetime": source_datetime,
+            "agreement_us": agreement_us, "offset_s": offset.offset_s, "residual_us": offset.residual_us,
+            "first_sample": placement.first_sample, "search_unaimed": _unaimed(placement.search_unaimed),
+            **dict(zip(("placed_file", "placed_rows", "placed_bytes"), copy_identity(scan, session_dir), strict=True)),
+        })
 
     def _make_by_strobes(self, row: dict, scans: list, session_dir: Path, nominal_rate_hz: float) -> None:
         """Intan under the NI: the recordings that anchor, fitted as one.
@@ -549,6 +688,124 @@ class SystemTimebase(dj.Computed):
                 "residual_us_max": fit.residual_us_max,
             }
         )
+
+
+def copy_identity(scan, session_dir: Path) -> tuple[str, int, int]:
+    """The eye file a copy's placement belongs to, as `SystemTimebase.Copy`
+    records it and `Segment.make` checks it (fix round 2): its path within the
+    session's folder, its rows (frames less those missing) and its size in
+    bytes. The path and the size are what `timebase/clock.py::choice_inputs`
+    already holds a file by; its modification time is left out, since a copy
+    of the session, or the archive's rehydration, resets it (as ruling R14
+    leaves it out of the eye's start)."""
+    return (str(scan.path.relative_to(session_dir)), int(scan.stream.n_samples - scan.n_frames_missing),
+            int(scan.path.stat().st_size))
+
+
+def _unaimed(reason: str | None) -> str | None:
+    """`Copy.search_unaimed`: the reason, cut to its column, or None."""
+    from wl_preproc.timebase.clock import clipped
+
+    return None if reason is None else clipped(reason)
+
+
+def _manifest_rig(session_dir: Path) -> str:
+    """The rig the session's manifest names, the one a lag is carried within
+    (amendment 79), or '' where it cannot be read, from which nothing is
+    carried."""
+    from wl_preproc.contracts.manifest import SessionManifest
+    from wl_preproc.contracts.paths import MANIFEST_FILENAME
+
+    try:
+        return SessionManifest.from_yaml((session_dir / MANIFEST_FILENAME).read_text(encoding="utf-8")).rig
+    except (OSError, ValueError):
+        return ""
+
+
+def _cross_check(pairs, barcodes, reference: dict, barcode_line: tuple[float, float],
+                 span: tuple[float, float] | None, nominal_rate_hz: float) -> tuple[float, float] | None:
+    """`(lag_s, agreement_us)`: the copy's lag as the file's barcodes measure
+    it, and how far, after it is removed, the copy then sits from them at
+    worst (amendment 79). None where nothing measures it: no span, or no pair
+    of the copy's over the file's own barcodes.
+
+    **Over the file's own barcodes in the span** (fix round 1, finding 4):
+    from the session time of its first barcode the NI holds to that of its
+    last, within the span. An eye file started or stopped inside the box's
+    span has no barcode past those ends, and the barcodes' line there is
+    extrapolated, its rate the worst-measured thing in it (2 ms frames over a
+    short stretch), so a sound session would be called D for it.
+
+    - `lag_s = mean(ni_s - barcode_s(device_s))` over the copy's pairs whose
+      NI time lies in that interval, `barcode_s` the file's placement by its
+      barcodes, `barcode_line`, `(scale, offset_s)`: 3b-3's rate and offset.
+    - `agreement_us` is the largest of the corrected copy's placement (its own
+      rate fit and offset through every corrected pair, as the file is
+      placed) less the barcodes', at the interval's two ends, where two lines
+      differ most, and of each corrected pair inside it less the barcodes'
+      placement of its device time."""
+    from wl_preproc.timebase.fit import fit_offset_to_pairs, fit_pairs_across
+
+    if span is None:
+        return None
+    shared = [reference[barcode.value] for barcode in barcodes if barcode.value in reference]
+    low_s, high_s = max(min(shared, default=math.inf), span[0]), min(max(shared, default=-math.inf), span[1])
+    scale, offset_s = barcode_line
+    departures = [(ni_s, device_s, ni_s - (device_s / scale + offset_s)) for ni_s, device_s in pairs
+                  if low_s <= ni_s <= high_s]
+    if not departures:
+        return None
+    lag_s = sum(departure for _ni_s, _device_s, departure in departures) / len(departures)
+    corrected = [(ni_s - lag_s, device_s) for ni_s, device_s in pairs]
+    fit = fit_pairs_across([corrected], nominal_rate_hz)
+    copy_offset_s = fit_offset_to_pairs(corrected, fit).offset_s
+    at_ends = [abs((session_s - offset_s) * scale / fit.scale + copy_offset_s - session_s)
+               for session_s in (low_s, high_s)]
+    at_pairs = [abs(departure - lag_s) for _ni_s, _device_s, departure in departures]
+    return lag_s, max(at_ends + at_pairs) * 1e6
+
+
+def _lag_in_bounds(lag_s: float) -> bool:
+    """Amendment 79's bound: the copy cannot lead its frame, nor trail it by
+    more than `LAG_CEILING_S`."""
+    from wl_preproc.timebase.analog_copy import LAG_CEILING_S
+
+    return 0.0 <= lag_s <= LAG_CEILING_S
+
+
+def _frame_us(nominal_rate_hz: float) -> float:
+    """One eye frame, the cross-check's bound (amendment 79)."""
+    return 1e6 / nominal_rate_hz
+
+
+def copy_fails(copy: dict, nominal_rate_hz: float) -> bool:
+    """A placed `Copy` row whose measured lag fails amendment 79's checks: out
+    of bounds, or, measured here, a corrected copy more than a frame off the
+    barcodes over the span. Such a session is tier D (`TimingProvenance`)."""
+    if copy["outcome"] != "placed" or not copy["lag_measured"]:
+        return False
+    disagrees = copy["agreement_us"] is not None and copy["agreement_us"] > _frame_us(nominal_rate_hz)
+    return disagrees or not _lag_in_bounds(copy["lag_s"])
+
+
+def _carried_lag(rig: str, session_datetime) -> tuple | None:
+    """`(lag_s, the session it was measured in)`: the latest lag measured on
+    `rig` at or before `session_datetime` whose copy passed its own checks
+    (amendment 79; ruling P2), or None. Measured there, not carried: its
+    `agreement_us` is set. The copy's checks, not the session's tier, decide,
+    since every session's fits are made before any tier is (ruling P2). A
+    session not yet placed is not read, so one placed before its rig's
+    earlier measurement is kept as placed (ruling P3, amendment 28)."""
+    if not rig:
+        return None
+    rows = (SystemTimebase.Copy * SystemTimebase.proj("nominal_rate_hz") & {"rig": rig, "outcome": "placed"}
+            & f"session_datetime <= '{session_datetime}'").to_dicts()
+    good = [row for row in rows if row["lag_measured"] and row["agreement_us"] is not None
+            and not copy_fails(row, row["nominal_rate_hz"])]
+    if not good:
+        return None
+    latest = max(good, key=lambda row: (row["session_datetime"], row["subject"]))
+    return latest["lag_s"], latest["session_datetime"]
 
 
 @schema
@@ -692,6 +949,12 @@ class TimingProvenance(dj.Computed):
         # checks, unrelated to any of TierInputs' own fields and unchanged
         # from before 1c-5, but for what amendment 57 leaves out.
         failed = len(aligned) + len(left_out) < len(systems) or len(rejected) > len(outside)
+
+        # And if the eye tracker's copy measured a lag that fails amendment
+        # 79's checks: below 0 or past the ceiling, or a corrected copy more
+        # than a frame off the barcodes over the span.
+        copies = (SystemTimebase.Copy * SystemTimebase.proj("nominal_rate_hz") & session_key).to_dicts()
+        failed = failed or any(copy_fails(copy, copy["nominal_rate_hz"]) for copy in copies)
 
         # And if the box lost code words of session time where they mattered:
         # in a measured run, or by a desync no code word follows, after which
@@ -1040,8 +1303,6 @@ def _box_cross_check(session_dir: Path, reference: dict[int, float]
     its words are not in `codes()`, so it cuts nothing. None where the box
     holds no NI-reference value, holds no word over it, or its log cannot be
     read."""
-    import math
-
     from wl_preproc.timebase import segments
 
     try:

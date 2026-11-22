@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from wl_preproc.eye.span import eye_span
 from wl_preproc.nwb.describe import task_name
 from wl_preproc.nwb.eye_events import MEASUREMENTS
 from wl_preproc.nwb.trim import BlockSet
@@ -486,7 +487,11 @@ def _span_notes(session_key: dict, provenance: dict) -> list[str]:
     # Session time under the NI is its first file's, the one SpikeGLX
     # segment, from t = 0.
     session = (core.Segment & {**session_key, "system": "spikeglx"}).to_dicts()
-    if session and (core.Segment & {**session_key, "system": "ohdpi"}):
+    # An eye file its analog copy placed is used past the span (amendment 81),
+    # so nothing of it is left out.
+    by_copy = timebase.SystemTimebase & session_key & {"system": "ohdpi", "time_source": "analog",
+                                                       "fit_status": "fitted"}
+    if session and (core.Segment & {**session_key, "system": "ohdpi"}) and not by_copy:
         first_s, last_s = min(row["start_s"] for row in session), max(row["end_s"] for row in session)
         notes += [f"eye data outside the sync box's covered span, {a:.3f} s to {b:.3f} s, is left out: no barcode "
                   "placed it" for a, b in ((first_s, start_s), (end_s, last_s)) if a < b]
@@ -495,6 +500,47 @@ def _span_notes(session_key: dict, provenance: dict) -> list[str]:
         notes.append(f"{row['system']} file {row['file_path']} is left out: none of its barcodes is one the NI "
                      f"recorded, so it lies outside the sync box's covered span, {start_s:.3f} s to {end_s:.3f} s")
     return notes
+
+
+def _copy_notes(session_key: dict) -> list[str]:
+    """How the eye tracker was placed where its analog copy was found
+    (`SystemTimebase.Copy`; amendments 77-80), the lag's footing in words: no
+    note where the copy was absent, and 3b-3's placement stands. Placed, the
+    channel, the signal, the lag and, measured here, the barcodes that measured
+    it (`Segment.n_barcodes` is 0 for a file the copy placed); any stretch
+    dropped. Failed, the matcher's refusal as stored, and what placed the
+    file instead."""
+    from wl_preproc.schema import timebase
+
+    copies = (timebase.SystemTimebase.Copy * timebase.SystemTimebase.proj(
+        "fit_status", "time_source", "n_barcodes_matched") & session_key & {"system": "ohdpi"}).to_dicts()
+    if not copies:
+        return []
+    (copy,) = copies
+    if copy["outcome"] == "failed":
+        if (copy["fit_status"], copy["time_source"]) == ("fitted", "barcode"):
+            return ["the eye tracker's analog copy on the NI was refused, so the NI's own barcodes placed it over "
+                    f"the covered span: {copy['refusal']}"]
+        return ["the eye tracker's analog copy on the NI was refused, and no barcode placed the eye file, so it is "
+                f"not placed: {copy['refusal']}"]
+    if copy["outcome"] != "placed":
+        return []
+    note = (f"the eye tracker was placed by its analog copy on the NI, channel XA{copy['ni_channel']}'s "
+            f"'{copy['signal']}', {copy['n_pairs']} pairs: ")
+    lag_ms = f"{copy['lag_s'] * 1e3:.2f} ms"
+    if not copy["lag_measured"]:
+        note += ("lag 0 s, unmeasured, so its time may be off by the eye tracker's output latency, of the order of "
+                 "4-5 ms")
+    elif copy["lag_source_datetime"] == session_key["session_datetime"]:
+        note += f"lag {lag_ms}, measured in this session"
+        if copy["n_barcodes_matched"]:
+            note += f"; placed by its copy, {copy['n_barcodes_matched']} barcodes measured the lag"
+    else:
+        note += f"lag {lag_ms}, measured in session {copy['lag_source_datetime'].isoformat()}"
+    if copy["dropped_stretches"]:
+        note += (f"; the copy's windows at {copy['dropped_stretches']} of the eye's own time were off its line and "
+                 "dropped, so the eye's time there is the line's")
+    return [note]
 
 
 def _usable_fraction(times: np.ndarray, stretches: list[tuple]) -> float | None:
@@ -547,7 +593,8 @@ def _eye(session_key: dict, session_dir: Path, blocks: BlockSet, validity_idx: i
     """The eye tracker's samples, tables and events in the file's blocks and,
     with `span`, the covered span (amendment 58): every eye stage used only
     the samples inside it, and the file holds only those. `None` is the whole
-    session."""
+    session: under the sync box, and for an eye file placed by its analog copy
+    (amendment 81), which places every frame."""
     from wl_preproc.eye.detect.labels import true_runs
     from wl_preproc.eye.detect.validity import ValidityParams
     from wl_preproc.eye.ohdpi import read_columns, read_ohdpi
@@ -809,7 +856,7 @@ def gather(activation_key: dict) -> Gathered:
     clock = session_clock.wall_reference(key["session_datetime"],
                                          rig_at_zero=rig_clock[0]["rig_at_zero"] if rig_clock else None)
     validity_idx, detection_idx = _paramsets()
-    eye = _eye(session_key, session_dir, extent, validity_idx, detection_idx, session_clock.covered_span())
+    eye = _eye(session_key, session_dir, extent, validity_idx, detection_idx, eye_span(session_key, session_dir))
     # Samples in these runs, but none inside the covered span: the notes say
     # so, and the description gains nothing (amendment 63).
     no_eye_samples = eye is not None and eye.get("no_samples", False) and not eye.get("outside_span", False)
@@ -880,5 +927,5 @@ def gather(activation_key: dict) -> Gathered:
         trial_notes=_trial_notes(session_key, run_rows) + _outside_runs_notes(key, session_key, activation["role"]),
         rig_record=rig_record,
         rig_tables=rig_tables,
-        span_notes=_span_notes(session_key, provenance[0]),
+        span_notes=[*_span_notes(session_key, provenance[0]), *_copy_notes(session_key)],
     )

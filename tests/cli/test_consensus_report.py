@@ -33,6 +33,7 @@ could not hold.
 from __future__ import annotations
 
 import datetime
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -97,19 +98,30 @@ def _section(body: str, heading: str) -> str:
     repository's test layout is deliberately `__init__.py`-free (this
     project's own CLAUDE.md), so test files do not import fixtures or helpers
     from one another.
+
+    The heading is matched whole: `## ` and `heading`, then the line's end,
+    ` (` or ` —`, the report's own heading suffixes. A prefix alone let
+    `"Eye"` find `## Eye placed by its analog copy (24 h)`, which the report
+    puts first, and 13 tests about the Eye section read that one
+    instead (the analog copy's final fix wave, 2026-11-22). Kept identical in
+    every copy.
     """
-    marker = f"\n## {heading}"
-    assert marker in body, f"no section headed {heading!r} in:\n{body}"
-    return body.split(marker, 1)[1].split("\n## ", 1)[0]
+    found = re.search(rf"^## {re.escape(heading)}(?=$| \(| —)", body, flags=re.MULTILINE)
+    assert found is not None, f"no section headed {heading!r} in:\n{body}"
+    return body[found.end():].split("\n## ", 1)[0]
 
 
 def _subsection(section: str, heading: str) -> str:
     """The slice of a `##` section under one of ITS OWN `###` subheadings.
     Mirrors `test_detect_report.py`'s copy exactly -- see that file for why an
-    assertion needs this rather than a bare substring search."""
-    marker = f"\n### {heading}"
-    assert marker in section, f"no subsection headed {heading!r} in:\n{section}"
-    return section.split(marker, 1)[1].split("\n### ", 1)[0]
+    assertion needs this rather than a bare substring search.
+
+    The heading is matched whole, as `_section`'s is: `### ` and `heading`,
+    then the line's end, ` (` or ` —`. Kept identical in every copy.
+    """
+    found = re.search(rf"^### {re.escape(heading)}(?=$| \(| —)", section, flags=re.MULTILINE)
+    assert found is not None, f"no subsection headed {heading!r} in:\n{section}"
+    return section[found.end():].split("\n### ", 1)[0]
 
 
 def _line_for(subsection: str, needle: str) -> str:
@@ -309,7 +321,7 @@ def _plant_agreement(
 def _agreement(root, prefix) -> str:
     """The `### Detector agreement` subsection of a freshly built report."""
     section = _section(build_report(root, prefix=prefix), "Detection")
-    return _subsection(section, "Detector agreement")
+    return _subsection(section, "Detector agreement per detector pair, across every session")
 
 
 def test_the_agreement_subsection_exists_and_states_its_own_scope(

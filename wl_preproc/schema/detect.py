@@ -320,7 +320,7 @@ class EyeValidity(dj.Computed):
         from wl_preproc.eye.detect.velocity import velocity
         from wl_preproc.eye.ohdpi import read_ohdpi, read_tracker_loss
         from wl_preproc.schema import eye as eye_schema, ingest
-        from wl_preproc.timebase.clock import clock_for
+        from wl_preproc.eye.span import eye_span
 
         session_key = {k: key[k] for k in pipeline.Session.primary_key}
         # `ParamSet`'s own primary key is `(paramset_type, paramset_idx)`,
@@ -346,7 +346,7 @@ class EyeValidity(dj.Computed):
         # (design spec `2026-11-06-eye-lost-data-and-region-design.md` section 7).
         setup = (core.SessionSetup & session_key).to_dicts()
         field_deg = (setup[0]["half_field_h_deg"], setup[0]["half_field_v_deg"]) if setup else None
-        placed = eye_schema.placed_rows(clock_for(session_key, session_dir).covered_span(), segment,
+        placed = eye_schema.placed_rows(eye_span(session_key, session_dir), segment,
                                         recording.frame_numbers - recording.frame_numbers[0])
 
         for eye_value, file_eye in (("left", "Left"), ("right", "Right")):
@@ -679,7 +679,7 @@ class EyeDetection(dj.Computed):
         from wl_preproc.eye.detect.velocity import local_velocity, velocity
         from wl_preproc.eye.ohdpi import read_ohdpi
         from wl_preproc.schema import eye as eye_schema, ingest
-        from wl_preproc.timebase.clock import clock_for
+        from wl_preproc.eye.span import eye_span
 
         session_key = {k: key[k] for k in pipeline.Session.primary_key}
         validity_key = {**session_key, "validity_paramset_idx": key["validity_paramset_idx"]}
@@ -717,8 +717,9 @@ class EyeDetection(dj.Computed):
         fs_hz = recording.fs_hz
         # The rows inside the covered span (amendment 58), the only ones the
         # mask offered: the repair and the velocities are made over them
-        # alone, and a detector reads them alone. `None` under the sync box.
-        placed = eye_schema.placed_rows(clock_for(session_key, session_dir).covered_span(), segment,
+        # alone, and a detector reads them alone. `None` under the sync box, and
+        # for an eye file placed by its analog copy (amendment 81).
+        placed = eye_schema.placed_rows(eye_span(session_key, session_dir), segment,
                                         recording.frame_numbers - recording.frame_numbers[0])
 
         spans: dict[str, list[Run]] = {}

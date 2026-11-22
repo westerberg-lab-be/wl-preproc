@@ -55,6 +55,11 @@ class NidqMeta:
     n_analog_channels: int
     n_digital_words: int
     file_created: datetime.datetime | None = None
+    # The census's XA count: the non-multiplexed analog channels, saved last
+    # of the analog ones, after MN and MA, so at columns
+    # `n_analog_channels - n_xa_channels` up to `n_analog_channels`. The eye
+    # tracker's analog copy is looked for on them (amendment 78).
+    n_xa_channels: int = 0
 
     @property
     def n_channels(self) -> int:
@@ -120,6 +125,7 @@ def read_nidq_meta(path: Path) -> NidqMeta:
         n_analog_channels=mn + ma + xa,
         n_digital_words=dw,
         file_created=_file_created(fields.get(_CREATED_KEY)),
+        n_xa_channels=xa,
     )
 
 

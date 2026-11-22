@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -37,10 +38,17 @@ def _section(body: str, heading: str) -> str:
     the id simply moved to the Quarantined section. A report whose whole job
     is to put facts under the right heading cannot be tested by a search that
     ignores headings.
+
+    The heading is matched whole: `## ` and `heading`, then the line's end,
+    ` (` or ` —`, the report's own heading suffixes. A prefix alone let
+    `"Eye"` find `## Eye placed by its analog copy (24 h)`, which the report
+    puts first, and 13 tests about the Eye section read that one
+    instead (the analog copy's final fix wave, 2026-11-22). Kept identical in
+    every copy.
     """
-    marker = f"\n## {heading}"
-    assert marker in body, f"no section headed {heading!r} in:\n{body}"
-    return body.split(marker, 1)[1].split("\n## ", 1)[0]
+    found = re.search(rf"^## {re.escape(heading)}(?=$| \(| —)", body, flags=re.MULTILINE)
+    assert found is not None, f"no section headed {heading!r} in:\n{body}"
+    return body[found.end():].split("\n## ", 1)[0]
 
 
 def _declared_count(section: str) -> int:

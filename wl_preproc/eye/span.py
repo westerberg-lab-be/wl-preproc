@@ -14,6 +14,8 @@ barcode and nothing was placed by barcode at all.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 Span = tuple[float, float]
@@ -56,3 +58,20 @@ def clip_to_span(start_s: float, end_s: float, span: Span | None) -> Span | None
         return (start_s, end_s)
     start_s, end_s = max(start_s, span[0]), min(end_s, span[1])
     return (start_s, end_s) if end_s > start_s else None
+
+
+def eye_span(session_key: dict, session_dir: Path) -> Span | None:
+    """The span the eye tracker's samples are cut to (amendment 81): `None`,
+    the whole file, where the eye file was placed by its analog copy
+    (`SystemTimebase.time_source == 'analog'` for `ohdpi`), which places every
+    frame and not only those the barcodes cover; otherwise the clock's own
+    `covered_span()`. An eye file whose copy is absent or failed is placed by
+    barcodes (or rejected), and is cut as before. The cameras are not the eye
+    tracker, and still ask the clock."""
+    from wl_preproc.schema import timebase
+    from wl_preproc.timebase.clock import clock_for
+
+    placed = timebase.SystemTimebase & session_key & {"system": "ohdpi", "time_source": "analog"}
+    if placed:
+        return None
+    return clock_for(session_key, session_dir).covered_span()

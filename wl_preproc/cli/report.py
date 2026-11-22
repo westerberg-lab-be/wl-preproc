@@ -1575,6 +1575,101 @@ def _split_clock_line(row: dict) -> str:
             f"{SPLIT_CLOCK_PPM:g} ppm, the rate unmeasured; nothing is corrected")
 
 
+def _copy_rows(ingested_keys: set, prefix: str = DEFAULT_PREFIX) -> tuple[list[dict], list[dict]]:
+    """`(rows, history)`: the eye tracker's `SystemTimebase.Copy` row of each
+    session ingested in the last 24 h that has one, with its session's folder,
+    the eye system's rate, fit and time source and the barcodes that measured
+    its lag; and every row of the rigs they name that placed with a lag
+    measured, for `_copy_lines` to compare against. Windowed as the other
+    per-session lists are: a refusal is a fact of its session."""
+    from wl_preproc.schema import ingest, timebase
+
+    timebase.activate(prefix=prefix)
+    if not ingested_keys:
+        return [], []
+    sessions = [{"subject": subject, "session_datetime": at} for subject, at in ingested_keys]
+    system = timebase.SystemTimebase.proj("nominal_rate_hz", "fit_status", "time_source", "n_barcodes_matched")
+    rows = ((timebase.SystemTimebase.Copy & sessions & {"system": "ohdpi"}) * system
+            * ingest.Ingestion.proj("session_dir")).to_dicts(order_by=["subject", "session_datetime"])
+    rigs = [{"rig": rig} for rig in sorted({row["rig"] for row in rows if row["rig"]})]
+    history = [] if not rigs else ((timebase.SystemTimebase.Copy & rigs & {"system": "ohdpi", "outcome": "placed"})
+                                   * system * ingest.Ingestion.proj("session_dir")).to_dicts()
+    return rows, history
+
+
+def _copy_lines(rows: list[dict], history: list[dict]) -> list[str]:
+    """What a person reading the report needs of the eye's analog copy
+    (amendments 77-80 and 85): each copy refused, with the matcher's own
+    refusal and what placed the file instead; each absent copy whose channel
+    search the two files' clocks did not aim (`search_unaimed`), and so could
+    not reach an eye file started far from the NI; each copy whose lag,
+    measured here, fails its checks (`timebase.copy_fails`), which makes the
+    session D, with no NWB file to say why; and each lag measured in its own
+    session that is more than one frame period (`1 / nominal_rate_hz`) from
+    the one the same rig measured before it. The previous is the carry's
+    (`timebase._carried_lag`): the rig's latest lag measured in a session at
+    or before this one, in `(session_datetime, subject)` order, whose copy
+    passed its own checks. A lag carried from another session, or none, is
+    never compared; nor is one that fails its checks, named for that alone.
+    An absent copy whose search was aimed is not named."""
+    from wl_preproc.schema.timebase import copy_fails
+    from wl_preproc.timebase.analog_copy import CLOCK_SLACK_S, LAG_CEILING_S, MIN_PAIRS, SEARCH_PREFIX_S, STEP_S
+
+    def order(row):
+        return (row["session_datetime"], row["subject"])
+
+    lines = []
+    for row in sorted(rows, key=order):
+        head = (f"- `{Path(row['session_dir']).name}` — `{row['subject']}` @ "
+                f"{row['session_datetime']:%Y-%m-%d %H:%M} — ")
+        if row["outcome"] == "failed":
+            placed = ("the NI's own barcodes placed the eye file over the covered span"
+                      if (row["fit_status"], row["time_source"]) == ("fitted", "barcode") else
+                      "no barcode placed the eye file, so it is rejected `no_analog_match`, which fails the session "
+                      "(tier D)")
+            lines.append(f"{head}the eye tracker's analog copy was refused: {row['refusal']}; {placed}")
+            continue
+        if row["outcome"] == "absent":
+            if row["search_unaimed"]:
+                before_s = SEARCH_PREFIX_S - MIN_PAIRS * STEP_S
+                lines.append(
+                    f"{head}no copy was found on the NI, but the search was not aimed by the two files' clocks "
+                    f"({row['search_unaimed']}), so a copy in an eye file started more than about {before_s:.0f} s "
+                    f"before the NI, or {before_s + CLOCK_SLACK_S:.0f} s after it, would not have been found")
+            continue
+        if copy_fails(row, row["nominal_rate_hz"]):
+            lag_ms, ceiling_ms = row["lag_s"] * 1e3, LAG_CEILING_S * 1e3
+            bound = ("is below 0, and a copy cannot lead its frame" if row["lag_s"] < 0.0 else
+                     f"is above the ceiling of {ceiling_ms:.2f} ms" if row["lag_s"] > LAG_CEILING_S else
+                     f"is within its bounds, 0 to {ceiling_ms:.2f} ms")
+            agreement = ""
+            if row["agreement_us"] is not None:
+                frame_us = 1e6 / row["nominal_rate_hz"]
+                relation = "more than" if row["agreement_us"] > frame_us else "within"
+                agreement = (f"; the corrected copy is {row['agreement_us'] / 1e3:.2f} ms from the eye file's "
+                             f"barcodes at worst, {relation} one frame, {frame_us / 1e3:.2f} ms")
+            lines.append(f"{head}the copy's lag, {lag_ms:.2f} ms measured here, {bound}{agreement}; "
+                         "so the session is tier D")
+            continue
+        if row["outcome"] != "placed" or not row["lag_measured"] or row["agreement_us"] is None or not row["rig"]:
+            continue
+        earlier = [other for other in history
+                   if other["rig"] == row["rig"] and other["lag_measured"] and other["agreement_us"] is not None
+                   and order(other) < order(row) and not copy_fails(other, other["nominal_rate_hz"])]
+        if not earlier:
+            continue
+        previous = max(earlier, key=order)
+        jump_s, frame_s = abs(row["lag_s"] - previous["lag_s"]), 1.0 / row["nominal_rate_hz"]
+        if jump_s - frame_s <= 1e-9:
+            continue
+        lines.append(
+            f"{head}the lag, {row['lag_s'] * 1e3:.2f} ms measured here, is {jump_s * 1e3:.2f} ms from the "
+            f"{previous['lag_s'] * 1e3:.2f} ms measured in session {previous['session_datetime'].isoformat()} on rig "
+            f"`{row['rig']}`, more than one frame period, {frame_s * 1e3:.2f} ms (placed by its copy; "
+            f"{row['n_barcodes_matched']} barcodes measured the lag)")
+    return lines
+
+
 def _syncbox_restarts(prefix: str = DEFAULT_PREFIX) -> list[dict]:
     """Every sync box segment other than session time's, with its session's
     folder: each came from a restart of the box, or contradicted its process's
@@ -1725,6 +1820,13 @@ def build_report(
                   "- **The sync box's segments were declared before its header named the clocks its ticks count, "
                   "so which sessions' code words are on a split clock cannot be read, and no segment is recorded "
                   f"until the table is altered and the daemon restarted:** `{unaltered}`"]
+
+    # Amendments 77-80: the eye tracker's analog copy, where it was refused or
+    # its lag jumped. Under `## Eye placed by its analog copy`, since a copy
+    # that placed the file without remark is the ordinary case and not listed.
+    copy_lines = _copy_lines(*_copy_rows(recent, prefix))
+    lines += ["", f"## Eye placed by its analog copy (24 h) — {len(copy_lines)}", ""]
+    lines += copy_lines or ["- none"]
 
     # Design spec section 5.2 (quoting parent spec §8.5): the reclamation
     # gate, surfaced here "since an ungated session is what will eventually

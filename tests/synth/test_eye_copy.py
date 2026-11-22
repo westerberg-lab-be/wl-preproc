@@ -1,0 +1,359 @@
+"""The eye tracker's analog copy on the NI's analog inputs (design spec
+`2026-10-18-training-records-and-backup-clock-design.md`, amendments 77-84).
+
+The tests read the NI file's bytes and the eye's own traces (`eye_traces`),
+and re-derive the copy's timing from the recipe's nominal numbers rather than
+from the writer's arrival function, so they cross the boundary.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from wl_preproc.contracts.events import TaskTypeCode
+from wl_preproc.synth.ohdpi import (
+    _SACCADE_SEED_KEY,
+    OHDPI_FPS,
+    OHDPI_PRE_ROLL_S,
+    SACCADE_MAIN_SEQUENCE_S,
+    SACCADE_PX_PER_DEG,
+    eye_traces,
+    saccadic_gaze_px,
+)
+from wl_preproc.synth.recipe import EYE_RECIPE, RECIPES, BlockSpec, EyeCopy, MontageSpec, SessionRecipe
+from wl_preproc.synth.session import generate_session
+from wl_preproc.synth.spikeglx import (
+    EYE_PROCESSING_MEDIAN_S,
+    NIDQ_N_DIGITAL_WORDS,
+    NIDQ_SAMPLE_RATE_HZ,
+    SPIKEGLX_PRE_ROLL_S,
+    eye_copy_frame_arrivals_s,
+)
+from wl_preproc.timebase import analog_copy
+from wl_preproc.timebase._nidq_meta import read_nidq_meta
+
+N_XA = 16
+COPY_CHANNEL = 3
+NOISE_V = EyeCopy(channel=0).noise_v
+
+
+def _recipe(**update) -> SessionRecipe:
+    """The eye recipe without a sync box (the NI keeps time), long enough to
+    hold a stall: 12 trials of 3 s."""
+    base = {
+        **EYE_RECIPE.model_dump(),
+        "systems": ("spikeglx", "ohdpi"),
+        "blocks": (BlockSpec(task_type=TaskTypeCode.RF_MAP, n_trials=12, trial_duration_s=3.0),),
+        "montages": (MontageSpec(start_s=0.0, end_s=36.0),),
+    }
+    return SessionRecipe(**{**base, **update})
+
+
+def _generate(root: Path, recipe: SessionRecipe) -> Path:
+    generate_session(root, recipe)
+    (nidq,) = root.rglob("*.nidq.bin")
+    return nidq
+
+
+def _volts(nidq: Path) -> np.ndarray:
+    meta = read_nidq_meta(nidq.with_suffix(".meta"))
+    words = np.fromfile(nidq, dtype=np.int16).reshape(-1, meta.n_channels)
+    return words[:, : meta.n_analog_channels] * 5.0 / 32768.0
+
+
+def _frame_starts(n_frames: int, extra_s: float = 0.0) -> np.ndarray:
+    """Each eye frame's first NI sample, from the recipe's nominal numbers (no
+    clock drift in these recipes): the frame's capture, on the NI's origin."""
+    seconds = np.arange(n_frames) / OHDPI_FPS - OHDPI_PRE_ROLL_S + SPIKEGLX_PRE_ROLL_S + extra_s
+    return np.rint(seconds * NIDQ_SAMPLE_RATE_HZ).astype(int)
+
+
+def _channel_at_frames(volts: np.ndarray, channel: int, n_frames: int, delay_s: float) -> tuple[np.ndarray, np.ndarray]:
+    """The channel's value `delay_s` after each frame's capture; the frames it
+    exists for, and the values."""
+    starts = _frame_starts(n_frames, delay_s)
+    keep = (starts >= 0) & (starts < len(volts))
+    return np.flatnonzero(keep), volts[starts[keep], channel]
+
+
+# Computed from the writer at the branch's starting commit (fc33ebe), before
+# `eye_copy` existed: sha256 of each recipe's `.nidq.bin` and `.nidq.meta`.
+NIDQ_HASHES_AT_FC33EBE = {
+    "ci": (
+        "12d6bc498c16330aa91e505e3ee554e086080f0756e3bd631727656859a77652",
+        "fdd79c4982900da115fea2af05979aedd6d5ab2d4a4f986d6d4826b24194f8f6",
+    ),
+    "ni-clock": (
+        "d802f4cad382bfd2dca9ddb52ab09c78b0ea6d79d9ea835febcf0b50e986ee82",
+        "2503e86e9b3c794b73334267e3378181d0c85e14896e07d2a95bb3c1e35cac11",
+    ),
+    "eye": (
+        "7bce1753035fe0941c1f4adc458506be91c5b0190a43fd1b54dbf49e7a78dbbd",
+        "a30a1981416189ca8ceace9d8e0c819bf5e6fb5ca9015b0e6db04aca90aa9bec",
+    ),
+}
+
+# sha256 of the eye file (`OpenIris-synthetic.txt`) for the recipes that write
+# one, computed at fc33ebe, before `write_ohdpi` was split into `eye_traces`.
+# The file passes through sin/cos, which Linux rounds otherwise in the last
+# digits, so it is compared where it was taken (macOS) and skipped elsewhere.
+OHDPI_HASHES_AT_FC33EBE = {
+    "eye": "4cf5a5ff117c84c02c81d01ada9a48058d9c28337ddf8036c5360ceef5229343",
+    "drift": "6fa3ddc063c2f350a87c3d1b95ba7270e8269e87f2e12eaf060963c0a83e08d0",
+}
+
+
+@pytest.mark.parametrize("name", sorted(NIDQ_HASHES_AT_FC33EBE))
+def test_a_recipe_without_a_copy_writes_the_same_bytes(tmp_path, name):
+    assert RECIPES[name].eye_copy is None
+    nidq = _generate_plain(tmp_path, RECIPES[name])
+    bin_hash, meta_hash = NIDQ_HASHES_AT_FC33EBE[name]
+    assert hashlib.sha256(nidq.read_bytes()).hexdigest() == bin_hash
+    assert hashlib.sha256(nidq.with_suffix(".meta").read_bytes()).hexdigest() == meta_hash
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="trig rounds differently on Linux; hashes taken on macOS")
+@pytest.mark.parametrize("name", sorted(OHDPI_HASHES_AT_FC33EBE))
+def test_a_recipe_without_a_copy_writes_the_same_eye_file(tmp_path, name):
+    generate_session(tmp_path, RECIPES[name])
+    (eye,) = tmp_path.rglob("OpenIris-synthetic.txt")
+    assert hashlib.sha256(eye.read_bytes()).hexdigest() == OHDPI_HASHES_AT_FC33EBE[name]
+
+
+def test_a_copy_adds_saccades_and_moves_no_other_draw():
+    """With a copy, the left eye's rotation gains `saccadic_gaze_px` from its own
+    stream, keyed on the recipe's seed, and every other draw is the same as
+    without one (`eye_traces`)."""
+    plain, with_copy = eye_traces(_recipe()), eye_traces(_recipe(eye_copy=EyeCopy(channel=COPY_CHANNEL)))
+    gaze = saccadic_gaze_px(len(plain.t), np.random.default_rng([EYE_RECIPE.seed, _SACCADE_SEED_KEY]))
+
+    for name in ("common_x", "common_y", "p1x_jitter_left", "p1y_jitter_left", "p1x_jitter_right", "p1y_jitter_right"):
+        assert np.array_equal(getattr(plain, name), getattr(with_copy, name)), name
+    assert np.allclose(with_copy.rot_x_left - plain.rot_x_left, gaze[0], rtol=0.0, atol=1e-9)
+    assert np.allclose(with_copy.rot_y_left - plain.rot_y_left, gaze[1], rtol=0.0, atol=1e-9)
+    assert np.allclose(with_copy.rot_x_right - plain.rot_x_right, gaze[0], rtol=0.0, atol=1e-9)
+
+
+def test_the_saccades_are_about_three_a_second_on_the_main_sequence():
+    """About three saccades a second, X and Y moving together, each lasting the
+    main sequence's duration for its amplitude to within a frame."""
+    fps = OHDPI_FPS
+    gaze = saccadic_gaze_px(int(600 * fps), np.random.default_rng(1)) / SACCADE_PX_PER_DEG
+    # Moving: more than rounding (a ramp's last frame lands a rounding error
+    # from its target, which the hold after it then corrects).
+    axis_moving = np.abs(np.diff(gaze, axis=1)) > 1e-9
+    moving = np.any(axis_moving, axis=0)
+    # Together: where one axis moves, so does the other (but for a saccade that
+    # barely moves one axis, whose steps there are below the tolerance).
+    assert np.mean(np.all(axis_moving[:, moving], axis=0)) > 0.99
+    edges = np.flatnonzero(np.diff(moving.astype(int)))
+    starts, stops = edges[::2] + 1, edges[1::2] + 1
+    starts, stops = (starts, stops) if moving[starts[0]] else (starts[1:], stops)
+    count = min(len(starts), len(stops))
+    starts, stops = starts[:count], stops[:count]
+    assert 2.5 <= count / 600 <= 3.5
+    amplitude = np.hypot(*(gaze[:, stops] - gaze[:, starts]))
+    intercept_s, slope_s = SACCADE_MAIN_SEQUENCE_S
+    duration_s = (stops - starts) / fps
+    assert np.all(np.abs(duration_s - (intercept_s + slope_s * amplitude)) <= 1.0 / fps + 1e-9)
+    assert 4.0 <= np.median(amplitude) <= 10.0
+
+
+def _generate_plain(root: Path, recipe: SessionRecipe) -> Path:
+    return _generate(root, recipe)
+
+
+def test_the_copy_lands_on_its_channel(tmp_path):
+    copy = EyeCopy(channel=COPY_CHANNEL)
+    recipe = _recipe(eye_copy=copy)
+    nidq = _generate(tmp_path / "with", recipe)
+    meta = read_nidq_meta(nidq.with_suffix(".meta"))
+    assert meta.n_analog_channels == N_XA
+    assert meta.n_digital_words == NIDQ_N_DIGITAL_WORDS
+
+    # The digital words are the same bytes as without a copy: the same barcodes.
+    plain = _generate(tmp_path / "without", _recipe())
+    with_words = np.fromfile(nidq, dtype=np.int16).reshape(-1, meta.n_channels)[:, N_XA:]
+    plain_words = np.fromfile(plain, dtype=np.int16).reshape(-1, NIDQ_N_DIGITAL_WORDS)
+    assert np.array_equal(with_words, plain_words)
+
+    # The copy follows the eye's left P1-P4 X and Y, `lag_s` late: fitted on
+    # both, as the matcher fits a family, it clears the matcher's own floor.
+    # (Against X alone it cannot: the copy mixes Y in, and limits both.)
+    volts = _volts(nidq)
+    x, y = eye_traces(recipe).left_p1_minus_p4()
+    frames, seen = _channel_at_frames(volts, COPY_CHANNEL, len(x), copy.lag_s)
+    assert np.sqrt(_explained(seen, (x[frames], y[frames]))) > analog_copy.MIN_CORRELATION
+    for other in range(N_XA):
+        if other == COPY_CHANNEL:
+            continue
+        _, noise = _channel_at_frames(volts, other, len(x), copy.lag_s)
+        assert abs(np.corrcoef(noise, x[frames])[0, 1]) < 0.2, other
+
+
+def _explained(seen: np.ndarray, columns: tuple[np.ndarray, ...]) -> float:
+    """`R^2` of the least-squares fit of `seen` on `[columns, 1]`: the matcher's
+    model of a copy (`timebase/analog_copy.py`)."""
+    design = np.column_stack((*columns, np.ones(len(seen))))
+    coef, *_ = np.linalg.lstsq(design, seen, rcond=None)
+    return float(1.0 - np.var(seen - design @ coef) / np.var(seen))
+
+
+def test_the_copy_is_not_the_family_the_matcher_reads(tmp_path):
+    """No linear map of any family's columns jointly, the matcher's own model,
+    reproduces the copy: the matcher's tests cannot pass on the generator and
+    the matcher agreeing (78). The family that made it, P1-P4 (X, Y), comes
+    closest; `EYE_COPY_TANH_SCALE_SDS` limits it enough that even it leaves a
+    good part unexplained (measured R^2 0.928 here; 0.880-0.930 over six
+    seeds; 0.997 at the 3 SDs it once was)."""
+    copy = EyeCopy(channel=COPY_CHANNEL)
+    recipe = _recipe(eye_copy=copy)
+    volts = _volts(_generate(tmp_path, recipe))
+    traces = eye_traces(recipe)
+    x, y = traces.left_p1_minus_p4()
+    families = {
+        "P1-P4 (X, Y)": (x, y),
+        "P1 (X, Y)": (traces.common_x + traces.p1x_jitter_left, traces.common_y + traces.p1y_jitter_left),
+    }
+    frames, seen = _channel_at_frames(volts, COPY_CHANNEL, len(x), copy.lag_s)
+    # Not "residual above the noise", which the channel's own noise and jitter
+    # meet for a linear copy as well: the family must leave a good part of the
+    # variance unexplained. In 10-frame means, which take out the per-frame
+    # jitter and the white P1 noise a linear copy would also lose, so that a
+    # linear copy explains over 0.95 and only the nonlinearity is left to fail it.
+    block = 10
+    usable = len(frames) // block * block
+
+    def blocks(values: np.ndarray) -> np.ndarray:
+        return values[:usable].reshape(-1, block).mean(axis=1)
+
+    for name, columns in families.items():
+        explained = _explained(blocks(seen), tuple(blocks(column[frames]) for column in columns))
+        assert explained < 0.95, (name, explained)
+
+
+def _best_delay_s(volts: np.ndarray, x: np.ndarray, frames: np.ndarray) -> float:
+    """The delay after capture, in 1 ms steps, at which the channel best follows
+    the eye over `frames`."""
+    best, best_r = 0.0, -1.0
+    for delay_ms in range(0, 80):
+        starts = _frame_starts(len(x), delay_ms * 1e-3)[frames]
+        r = np.corrcoef(volts[starts, COPY_CHANNEL], x[frames])[0, 1]
+        if r > best_r:
+            best, best_r = delay_ms * 1e-3, r
+    return best
+
+
+def test_a_stall_delays_its_stretch(tmp_path):
+    copy = EyeCopy(channel=COPY_CHANNEL, stall=(20.0, 25.0, 0.04))
+    recipe = _recipe(eye_copy=copy)
+    volts = _volts(_generate(tmp_path, recipe))
+    x, _y = eye_traces(recipe).left_p1_minus_p4()
+    session_s = np.arange(len(x)) / OHDPI_FPS - OHDPI_PRE_ROLL_S
+    inside = np.flatnonzero((session_s >= 20.5) & (session_s < 24.5))
+    outside = np.flatnonzero((session_s >= 5.0) & (session_s < 15.0))
+    # One eye frame (2 ms) and the processing jitter's own spread.
+    assert _best_delay_s(volts, x, outside) == pytest.approx(copy.lag_s, abs=0.004)
+    assert _best_delay_s(volts, x, inside) == pytest.approx(copy.lag_s + 0.04, abs=0.004)
+
+
+def test_source_noise_and_flat_carry_no_eye(tmp_path):
+    recipe = _recipe(eye_copy=EyeCopy(channel=COPY_CHANNEL, source="flat"))
+    flat = _volts(_generate(tmp_path / "flat", recipe))[:, COPY_CHANNEL]
+    assert np.all(flat == flat[0])
+    assert flat[0] == pytest.approx(0.3, abs=5.0 / 32768)
+
+    recipe = _recipe(eye_copy=EyeCopy(channel=COPY_CHANNEL, source="noise"))
+    noise = _volts(_generate(tmp_path / "noise", recipe))[:, COPY_CHANNEL]
+    assert abs(noise.mean()) < 0.001
+    assert noise.std() == pytest.approx(NOISE_V, rel=0.05)
+
+
+def test_the_copy_is_deterministic_and_clipped(tmp_path):
+    recipe = _recipe(eye_copy=EyeCopy(channel=COPY_CHANNEL, offset_v=4.9999, gain_v=0.2, clip_v=2.0))
+    first = _generate(tmp_path / "a", recipe).read_bytes()
+    second = _generate(tmp_path / "b", recipe).read_bytes()
+    assert first == second
+    volts = _volts(_generate(tmp_path / "c", recipe))
+    assert volts[:, COPY_CHANNEL].max() <= 2.0 + 5.0 / 32768
+
+
+def test_the_frames_shown_are_late_as_the_instrument_is(tmp_path):
+    """Each frame's delay after capture, less the DAC's lag: a median near the
+    paper's 1.1 ms, and 2% of frames 10-50 ms (amendment 84), none of them
+    holding the frames behind them back."""
+    recipe = _recipe(eye_copy=EyeCopy(channel=COPY_CHANNEL, lag_s=0.0))
+    n_frames = len(eye_traces(recipe).t)
+    nominal = np.arange(n_frames) / OHDPI_FPS - OHDPI_PRE_ROLL_S + SPIKEGLX_PRE_ROLL_S
+    delay = eye_copy_frame_arrivals_s(recipe, recipe.eye_copy, 0.0) - nominal
+    assert 0.9e-3 < np.median(delay) < 1.3e-3
+    slow = np.mean((delay >= 10e-3) & (delay <= 50e-3))
+    assert 0.01 < slow < 0.04
+    # No chain: the frame after a slow one arrives on its own schedule.
+    after_slow = delay[1:][delay[:-1] >= 10e-3]
+    assert np.median(after_slow) < 3e-3
+
+
+def test_the_generators_copy_is_matched(tmp_path):
+    """The generator's own copy, read from the NI file it writes, through
+    `find_channel` and `match_copy`: the left eye's P1-P4 (X, Y) on its channel
+    is found among the families Task 3 builds, and every pair lies within a
+    tenth of a frame of the generator's truth, lag included.
+
+    The eye's clock runs 40 ppm fast and the NI's 25 ppm slow. The truth of a
+    device time `t` (eye seconds from its first frame) is the NI time its copy
+    reaches the channel: `t`'s session time on the NI's clock, plus the NI's
+    pre-roll, plus the copy's delay. The delay is the DAC's `lag_s`, the
+    tracker's processing (`EYE_PROCESSING_MEDIAN_S`, its mean), and half a
+    frame: each frame is held for one frame, so the copy is the trace's
+    zero-order hold, whose delay against the trace's own samples is half its
+    hold. The channel is decimated here by block means of 30 (Task 3's job),
+    each at its block's centre."""
+    eye_ppm, ni_ppm = 40.0, -25.0
+    copy = EyeCopy(channel=2, n_channels=3)
+    recipe = _recipe(
+        blocks=(BlockSpec(task_type=TaskTypeCode.RF_MAP, n_trials=84, trial_duration_s=3.0),),
+        montages=(MontageSpec(start_s=0.0, end_s=252.0),),
+        eye_copy=copy,
+        system_drift_ppm=(("ohdpi", eye_ppm), ("spikeglx", ni_ppm)),
+    )
+    volts = _volts(_generate(tmp_path, recipe))
+    block = round(NIDQ_SAMPLE_RATE_HZ / analog_copy.DECIMATED_RATE_HZ)
+    usable = len(volts) // block * block
+    channels = [volts[:usable, k].reshape(-1, block).mean(axis=1).astype(np.float32) for k in range(copy.n_channels)]
+    traces = eye_traces(recipe, eye_ppm)
+    left_x, left_y = traces.left_p1_minus_p4()
+    pupil = np.full(len(traces.t), 60.0)  # `write_ohdpi`'s PupilWidth: constant, so skipped
+    families = {
+        "Right P1-P4 (X, Y)": np.column_stack(
+            (traces.p1x_jitter_right + traces.rot_x_right, traces.p1y_jitter_right + traces.rot_y_right)
+        ),
+        "Right P1 (X, Y)": np.column_stack(
+            (traces.common_x + traces.p1x_jitter_right, traces.common_y + traces.p1y_jitter_right)
+        ),
+        "Right PupilWidth": pupil,
+        "Left P1-P4 (X, Y)": np.column_stack((left_x, left_y)),
+        "Left P1 (X, Y)": np.column_stack(
+            (traces.common_x + traces.p1x_jitter_left, traces.common_y + traces.p1y_jitter_left)
+        ),
+        "Left PupilWidth": pupil,
+    }
+    eye_time = traces.t
+
+    found = analog_copy.find_channel(eye_time, families, channels, analog_copy.DECIMATED_RATE_HZ)
+    match = analog_copy.match_copy(eye_time, families[found[1]], channels[found[0]], analog_copy.DECIMATED_RATE_HZ)
+
+    assert found == (copy.channel, "Left P1-P4 (X, Y)")
+    assert match.n_dropped == 0
+    assert len(match.pairs) >= max(analog_copy.MIN_PAIRS, 0.9 * match.n_windows)
+    ni_s, device_s = np.array(match.pairs).T
+    ni_s = ni_s + (block - 1) / 2 / NIDQ_SAMPLE_RATE_HZ
+    session_s = (device_s - OHDPI_PRE_ROLL_S) / (1 + eye_ppm * 1e-6)
+    delay_s = copy.lag_s + EYE_PROCESSING_MEDIAN_S + 0.5 / OHDPI_FPS
+    truth_s = session_s * (1 + ni_ppm * 1e-6) + SPIKEGLX_PRE_ROLL_S + delay_s
+    assert np.max(np.abs(ni_s - truth_s)) <= 0.2e-3

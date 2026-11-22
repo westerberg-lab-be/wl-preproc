@@ -1191,3 +1191,241 @@ made five decisions the spec was silent on (66). The build's rulings corrected o
       over that stretch alone (`test_a_file_inside_a_hole_in_the_nis_barcodes_is_not_outside_and_fails`). That
       session is D. `before_ni`'s camera, whose one barcode precedes the NI's first, is still
       `outside_covered_span`, and its session N.
+
+## Amendments, 2026-11-21: the eye tracker placed by its analog copy on the NI, designed
+
+**Why.** Under the NI's clock, an eye-tracker file the NI's barcodes cannot place makes the session tier D
+(amendments 51 and 57), and a partial box's eye data is used only inside its covered span (58). On recording days
+the eye tracker's analog output reaches the NI's analog inputs (parent spec §7.1's second sync path; wl-sync's
+`docs/superpowers/specs/2026-08-13-syncbox-breakout-pcb-design.md` §3.2: gaze X/Y and pupil of both eyes, from
+the ACCESIO DAC, all sixteen analog sources reach the NI). Matching the eye file's gaze to that copy places the
+whole file on the NI's clock with no barcode. This is amendment 65's eye half, "synced in a pinch" (51).
+
+**What the requester chose, 2026-11-21:**
+- **eye tracker only.** Cameras have no analog copy, and their files carry no wall-clock time today (the sidecar
+  has none; a video file's modification time moves if anything touches it on the camera computer, which would
+  leave a dead-cable file out without failing). A camera file with no barcode under the NI still fails the
+  session (57). Telling "ran after the box stopped" from "dead cable" waits for the camera package (wl-camacq,
+  registered, no repository yet) to write each file's start and end wall time. That is amendment 65's camera
+  half, now carried (amendment 83).
+- **slide the trace along its copy**, over the alternatives below.
+- **publish with the lag labelled unmeasured** until a real session measures it.
+- the behaviour below, played back and approved the same day.
+
+**Approaches considered.**
+1. **Line the trace up with its copy, stretch by stretch (chosen).** Over many stretches of the recording, the
+   time shift at which the eye file's gaze best matches the NI channel gives a pair (eye time, NI time); the
+   existing least-squares fit turns the pairs into a rate and an offset, as for barcodes and Intan's strobes. The
+   DAC's unknown scale and offset do not matter, every saccade and blink contributes, and ambiguity is
+   measurable.
+2. **Find each frame's step on the NI.** The copy changes once per frame, so the NI sees a staircase. Finest in
+   principle (an NI sample), but during fixation the steps are below the noise, and the board's buffering or any
+   smoothing blurs them: it fails on most of a session.
+3. **Match saccades and blinks as events** with the strobe matcher. Throws away most of the signal and needs its
+   own detector on a raw voltage.
+
+77. **When the copy is used.** Under the NI's clock (`SessionClock.source = 'nidq'`) only, for the eye tracker
+    (`ohdpi`) only. Under the sync box's clock nothing changes. Intan's copy (through the mux) and the cameras
+    are out of scope.
+    - **No box, or a box with no barcode in the eye file:** the eye file is placed by its copy over its whole
+      recording.
+    - **A partial box (3b-3):** the eye file is placed by its copy over its whole recording too, and over the
+      covered span its barcodes place it as well; the two measure the lag (79). This lifts amendment 58's cut for
+      an eye file placed this way: its samples outside the span are placed by a fit the copy verified there, so
+      every stage uses them.
+    - **No copy found** (no NI analog channel carries it, as on a day without the board): 3b-3's behaviour
+      stands, barcodes over the span where there are any, and amendment 57's `no_barcode` where there are none.
+    - *Builder's call, from the builder check:* **"no copy" and "a copy that fails" are told apart by the
+      distinct windows.** No copy: no channel gives the plan's minimum number of distinct windows (the NI
+      recorded no analog channel, or only noise). A copy that fails: some channel does, but the fit is refused
+      (78). A copy that fails, where barcodes place the file, falls back to 3b-3's placement over the span and is
+      named in the file and the daily report; with no barcodes it is `no_analog_match` and fails. So this piece
+      never turns a session 3b-3 publishes into D, except through the cross-check (79).
+    - *Builder's call:* **the copy does not override amendment 76.** A file that is `no_shared_barcode` (inside a
+      hole in the NI's decode) still fails: that hole is a fault in the NI's own barcode line, which the eye's
+      copy cannot vouch for.
+    - *Builder's call:* **per system, as `SystemTimebase` is.** The eye tracker has one file per session in
+      practice: the NWB builder already refuses more than one ohDPI segment (`nwb/gather.py`, section 4.3). A
+      session with more than one eye file is not placed by its copy; 3b-3's rules apply to it.
+78. **The match.**
+    - The eye file's own time is its frames' (frame number and the camera's seconds, as `eye/ohdpi.py` reads
+      them). The NI's is its analog samples at `niSampRate`.
+    - **Finding the channel.** Every non-multiplexed analog channel the NI recorded (the census's XA count) is
+      tried against the eye file's gaze X and Y of each eye. No channel map is declared: wl-sync's documents pin
+      only AI15 (the audio tap). For timing it does not matter which eye or which axis matched; the file records
+      which pair did (80).
+    - **The pairs.** Over windows across the recording, the shift that best matches the trace to the channel
+      (normalised, so scale and offset drop out) gives one pair per window, refined below a frame. A window whose
+      best shift is not clearly better than its next best (a fixation with no movement, a flat or clipped
+      channel, a periodic stretch) gives no pair.
+    - **The fit.** The pairs go through `fit.py::fit_pairs_across`, rate and offset as for barcodes. Its residual
+      must stay within a fraction of a frame. A file with too few pairs, or whose pairs do not fit, is refused.
+    - *Builder's call:* **pairs off the line are dropped, up to a limit.** The copy comes through a USB DAC driven
+      by software, whose delay can jump during a stall. Pairs further from the fitted line than the residual
+      bound are dropped and the line refitted, up to a fraction of all pairs the plan names. Beyond it the file
+      is refused. The dropped stretches are named in the file, because the eye's time there is the line's, not
+      a measured one.
+    - **What is compared with the copy.** The eye file holds no gaze: gaze is computed from it through a
+      calibration that itself needs session time. So the match reads the file's own columns, and tries each of
+      the candidates for what the DAC puts out (78a), taking the best. The synthetic copy is generated from a
+      different, mixed and mildly nonlinear map of those columns, never the column the matcher reads, so that a
+      passing test is not a tautology.
+    - **Refusal.** The eye file is rejected with the new reason `no_analog_match`, which fails the session, as an
+      unplaced device does (51). A refusal names why (no candidate channel, too few distinct windows, residual).
+    - The plan fixes the window length and step, the distinctness ratio, the minimum number of pairs and the
+      residual bound, from synthetic data, each a named constant. Real data revisits them (`docs/hardware-checks.md`).
+78a. **What the DAC puts out is not known** (the requester, 2026-11-21: "not sure; try them all"). wl-sync's
+    breakout design says only "Eye X/Y, both eyes" and pupil, from the ACCESIO DAC driven by the eye-tracking
+    software. So the matcher tries each likely source against each NI input: the DPI's P1-P4 difference vector
+    (X and Y), P1 alone (X and Y), and the pupil, each eye, and takes the best. The file records which matched. A
+    hardware check confirms what the output carries, and the search narrows to it then.
+79. **The lag.** The copy trails each frame by the eye tracker's processing and the DAC's update. The instrument's
+    paper gives its parts (84): about 1.1 ms of processing typically and 3-4 ms from the analog output, plus a
+    fixed filter delay before the NI digitises it. Its true size is unknown until measured.
+    - **Measured** wherever one eye file is placed both by barcodes (over the covered span) and by its copy: the
+      mean difference of the two placements over the span. It is recorded per session, with the rig and the
+      session it came from.
+    - **Applied:** the copy's placement is corrected by the lag. A session that measured it uses its own. One that
+      did not uses the latest lag measured on the same rig (the manifest's `rig`) at or before its session time,
+      and names that session. With none, the lag is 0 and **unmeasured**.
+    - **Kept as placed.** A later measurement does not move a session already placed, as a session keeps the
+      clock it was timed by (amendment 28). Re-placing is deleting its rows, as for any clock.
+    - **The cross-check.** After the lag is removed, the two placements must agree over the span within one frame
+      period (2 ms at 500 Hz). If not, the session is tier D: barcodes and copy disagree about the eye's time.
+      That catches a lag that varies across the span, not a wrong constant, which the mean absorbs. So:
+    - *Builder's call:* **the lag is bounded.** A measured lag must be at least 0 (the copy cannot lead its
+      frame) and at most a ceiling the plan names, far above any output latency and far below the spacing of
+      saccades. Outside it the session is tier D.
+    - *Builder's call:* **only a good session's lag is carried.** A lag counts for later sessions only from a
+      session whose eye placement passed and whose tier is not D. A lag that differs from the rig's previous one
+      by more than a frame is named in the daily report.
+80. **What is recorded and published.**
+    - `SystemTimebase.time_source` gains `analog` (the enum `_TIME_SOURCE_ENUM`); such a fit is `fitted`, so the
+      session can be tier N.
+    - Which NI channel and which eye signal matched, the number of pairs, the residual, the lag used, whether it was
+      measured, and its source session, are stored with the fit.
+    - The NWB file's `processing/timebase` says the eye tracker was placed by its analog copy on NI input `XA<k>`,
+      the lag used, and either the session it was measured in or that it is unmeasured, with the error that
+      implies stated as unknown, of the order of the eye tracker's output latency. `system_clocks.time_source` reads
+      `analog` with that text.
+    - The listing gives a rejected eye file's `reason` as `no_analog_match`, a plain string, as wl.works already
+      reads it. wl.works is told at the merge.
+81. **The tests.** Synthetic, like all of part 3b: the breakout board is not built, so no recording with the copy
+    exists. The generator writes the copy onto NI analog channels from the eye trace, with a lag, a scale and
+    offset, noise and smoothing, on an NI channel the test does not name. Sessions: no box with the copy; a
+    partial box with the copy (lag measured, whole file placed); a second session on that rig with no box (lag
+    carried, its source named); no copy (3b-3 unchanged); a copy on a channel that is not the eye's, a flat
+    channel, and a copy with a dropped stretch (refused or placed, each by its rule); barcodes and copy that
+    disagree by more than a frame (tier D).
+82. **What waits on hardware** goes to `docs/hardware-checks.md`: the lag on a real session with both the box and
+    the copy; which NI inputs carry the eye; what the DAC actually puts out (78a); the plan's constants against
+    real traces; the board's buffering and any smoothing on the eye channels.
+83. **Carried: the camera half of amendment 65.** The ask to the camera package (wl-camacq): write each video
+    file's start and end on the camera computer's wall clock, with its synchronisation state, in the sidecar.
+    The same ask corrects our sidecar contract (`contracts/sidecar.py`), which still requires `trigger_source`
+    `syncbox`: wl-sync voided the camera triggers on 2026-08-16, and the cameras free-run and record the barcode
+    line (wl-sync `docs/superpowers/plans/2026-08-13-sync-box.md:1158`).
+84. **This supersedes the 1c-4 timebase design's §2.1 for this use only** (the requester, 2026-11-21, told of the
+    conflict). §2.1 rejected aligning the eye tracker through its analog output, on the instrument's paper
+    (10.1016/j.jneumeth.2026.110693): frame processing "1.1±0.1 ms (median ± IQR)" but "up to a maximum of 50 ms",
+    "2% of frames ≥ 10 ms", and the analog output "imposed an additional 3-4 ms delay". It concluded "there is no
+    single offset to recover". That holds for the copy's frames one by one, and less for what is built here:
+    - **what is placed is the eye file's own frame times,** stamped at capture. A frame slow to process is late
+      only in the copy, not in the file.
+    - **the copy only fits a rate and an offset** through many windows (78). A late frame is noise in one window,
+      a burst of them is a window off the line, dropped (78), and what remains is the typical delay, the lag (79),
+      which the box measures where it ran.
+    - §2.1's other objection, that it needs the NI and so cannot serve an Intan-only rig, does not apply to a
+      fallback under the NI's clock alone.
+    - **Its cost:** until the lag is measured on a real session, eye data placed this way is off by about the
+      paper's typical delays (roughly 4-5 ms) plus the filter's, where barcodes place it within one 2 ms frame.
+      The file says so (80).
+    - Barcodes stay the eye tracker's sync path wherever they exist (77); §2.1 stands for every other use.
+
+## Amendments, 2026-11-21, made while planning and building the analog copy
+
+The plan (`docs/superpowers/plans/2026-11-21-eye-by-analog-copy.md`) builds amendments 77-84. While it was built
+the requester chose how the channel search is aimed (85), and the build's rulings changed what 77-79 say (86).
+Where these differ from 77-84, they bind. The ledger, `.superpowers/sdd/2026-11-21-eye-by-analog-copy/progress.md`,
+holds the full wording of every ruling; the handoff (`docs/handoffs/2026-11-21-eye-by-analog-copy.md`) lists them
+all, with their costs.
+
+85. **The channel search is aimed by the two files' clocks** (the requester, 2026-11-21). Task 3's review found
+    that a search over the NI's first `SEARCH_PREFIX_S` limits both directions: an eye file that started some
+    400 s before or after the NI shares too few windows with what is read, and is reported absent. The requester
+    was asked, in plain terms, how far apart the eye tracker and SpikeGLX start, and chose "It varies; aim by
+    clocks".
+    - **The estimate.** The eye file's start on the NI is `d = (eye wall start) - (NI fileCreateTime)`, both the
+      lab PCs' local time, to the second, read in `NIDQ_TIMEZONE` where it is set, so that a change of
+      daylight-saving time between them counts (`analog_copy.py::clock_offset_s`). Positive: the eye file
+      started after the NI.
+    - **The eye's wall start** is the stamp in OpenIris's default file name, `OpenIris-YYYYMonDD-HHMMSS`
+      (`parse_openiris_stamp`; the pattern is the reference recording's, `OpenIris-2024Jul31-114628`). The file
+      holds no wall time of its own: its seconds are the device's. It is never the file's mtime, which marks the
+      end of writing and which a copy resets (ruling R14).
+    - **What is read.** Each XA channel over `[max(0, max(d,0) - CLOCK_SLACK_S), max(d,0) + SEARCH_PREFIX_S +
+      CLOCK_SLACK_S]` of the NI, clipped to the file (rulings R15 and R16). The eye's windows lie over
+      `[max(0,-d), max(0,-d) + SEARCH_PREFIX_S]` of its own time. R15 corrects the draft, which centred the NI's
+      interval on `d` and read nothing for an eye file 100 s early.
+    - **The fallback is `d = 0`,** with one WARNING naming the eye file and the reason: no stamp, one that is
+      no time, or no `fileCreateTime`. A WARNING, not INFO, since nothing in `wl_preproc` configures logging.
+      The reason is also recorded in `SystemTimebase.Copy.search_unaimed`, null where the clocks aimed the
+      search. The daily report names each absent copy whose search was not aimed, since an eye file started more
+      than about 400 s before the NI, or 520 s after it, is then reported absent though its copy is there. By R16
+      it is the same rule at `d = 0`: the NI from 0 to `SEARCH_PREFIX_S + CLOCK_SLACK_S`.
+    - **`CLOCK_SLACK_S = 120`**, set on synthetic data and revisited on real sessions
+      (`docs/hardware-checks.md` 17 and 18b).
+    - **Matching stays clock-free.** The clocks only aim the search. The chosen channel is then matched whole,
+      and its pairs are the copy's alone.
+    - **Effect:** a clock error beyond the slack gives absent, never a wrong match. In practice the copy is still
+      found up to about `CLOCK_SLACK_S` plus 400 s, since the search needs only `MIN_PAIRS` of its windows
+      (Task 3's deferred minor).
+86. **The builder's decisions that change the design as written.**
+    - **A joint fit per candidate family** (ruling R7). This supersedes 78a's ten single traces. A copy that mixes
+      the axes, as OpenIris's calibrated gaze would, biases a one-column match by about a millisecond a window,
+      past `RESIDUAL_BOUND_US`. So each NI channel is regressed on a family's columns jointly, at each shift (least
+      squares on `[columns, 1]`), and scored by the multiple correlation. There are six families
+      (`analog_copy.FAMILIES`): `Left P1-P4 (X, Y)`, `Left P1 (X, Y)`, `Left PupilWidth`, `Right P1-P4 (X, Y)`,
+      `Right P1 (X, Y)` and `Right PupilWidth`. `SystemTimebase.Copy.signal` stores the name (ruling R12). Cost
+      if wrong: more compute per shift (`find_channel` about 40 s on 600 s of 16 channels), and joint rivals'
+      `R` lifted (`docs/hardware-checks.md` 17a).
+    - **A NoCopy after the channel is found is `failed`** (ruling R13). The search found `MIN_PAIRS` distinct
+      windows on the channel, so a copy is there, and too few over the whole channel is a refusal. That is 77's
+      definition of failed. Cost if wrong: a rare absent copy is reported as failed in the daily report.
+    - **A lag is carried by the copy's own checks, not by tier** (ruling P2). This supersedes 79's "whose tier is
+      not D". `SystemTimebase` fits every session before any `TimingProvenance` row exists, so a tier condition
+      would find nothing in one pass. A lag is carried from a placed `Copy` row on the same rig, at or before the
+      session, whose lag was measured there (`agreement_us` set: a carried lag is never itself a source), lies
+      within `[0, LAG_CEILING_S]`, and agrees within one frame (`schema/timebase.py::_carried_lag`). Cost if wrong: a
+      lag from a session that is D for an unrelated reason (code decode errors, say) is reused, though its own
+      measurement passed.
+    - **The order in which sessions are processed is accepted** (ruling P3). A session placed before its rig's
+      earlier measuring session is processed keeps lag 0, unmeasured and labelled so, and is not placed again
+      (amendment 28). Cost if wrong: within one daemon pass, a later session may publish with the unmeasured
+      label though a measurement exists. Deleting its timing rows places it again.
+    - **The stored placement is tied to its file** (ruling R17, with R2-1 and R2-2). The copy is matched once a
+      session, in `SystemTimebase`, and `Copy` keeps the file's `offset_s`, `residual_us` and `first_sample`
+      for `Segment.make`. It also records the file it placed: `placed_file` (its path within the session's
+      folder), `placed_rows` and `placed_bytes`, never its mtime, which copies and rehydration reset (R2-1).
+      `Segment.make` applies the placement to that file alone. Any other or changed eye file under an `analog`
+      row is rejected `no_analog_match`, and the note naming both files goes to the log, not to
+      `RejectedSegment.reason`, which keeps fixed reason words as `no_strobe_anchor` does (R2-2). Barcode and
+      Intan paths refit each file. Amendment 28 governs the session's clock, not one file's offset. Cost if
+      wrong: a replaced eye file needs its timing rows deleted to be placed again.
+    - **The measured lag is the whole delay** (ruling P1, amended at Task 4). The lag 79 measures includes the
+      eye tracker's processing, the DAC's zero-order hold and any smoothing, not only a set delay. On the
+      synthetic copy it is about 7.1 ms for a 5 ms set lag: 5 ms, plus the 1.1 ms processing median, plus half a
+      2 ms frame of hold, plus a few hundredths of a millisecond from the hold's rounding and the smoothing.
+      `copy_partial` measured 6.97 ms. Cost if wrong: test bounds only.
+    - **Agreement is held over the eye file's own barcodes** (ruling F4). This supersedes 79's "over the span".
+      The lag's pairs and the cross-check are taken between the session times of the eye file's first and last
+      shared barcode, within the span. `agreement_us` is the largest of the two lines' difference at those ends
+      and each corrected pair's departure from the barcodes inside them (`schema/timebase.py::_cross_check`). An eye
+      file that starts or stops inside the box's span has no barcode past those ends, and the barcodes' line
+      there is extrapolated, so over the whole span a sound session could be called D. Task 4's review re-graded
+      this from Minor to Important.
+    - **No box, and no copy found, is `unfitted_system`** (Task 4's ruling R4-2). 77 says "amendment 57's
+      `no_barcode` where there are none". That holds where the NI decoded barcodes. With no box at all the NI
+      decoded none, and 3b-3, unchanged, makes the eye tracker `unfittable` with `time_source` `none`, its file
+      `unfitted_system` (66, decision 2), as `copy_noise` and `copy_flat` show. Cost if wrong: none; the outcome
+      table's "absent: 3b-3 unchanged" governs.
