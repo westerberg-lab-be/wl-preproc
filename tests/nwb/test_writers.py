@@ -314,25 +314,30 @@ def test_an_ni_timed_file_says_the_ni_kept_time(tmp_path):
     # Each text is true of a session whose NI decoded no barcode as well.
     assert texts["timing_provenance.worst_residual_us"] == (
         "Largest residual, microseconds: under the NI, 0 for SpikeGLX on the identity map, Intan's largest strobe "
-        "residual where it was fitted, and the largest barcode residual of a system the NI's barcodes placed.")
+        "residual where it was fitted, the largest barcode residual of a system the NI's barcodes placed, and the "
+        "eye tracker's largest residual about its analog copy where the copy placed it.")
     assert texts["system_clocks.fitted_rate_hz"] == (
         "The rate on the session's clock: SpikeGLX's nominal rate on the identity map; Intan's rate fitted "
-        "against the NI's strobes; a system the NI's barcodes placed, its rate fitted against them; NaN for a "
-        "system not placed on the NI's clock.")
+        "against the NI's strobes; a system the NI's barcodes placed, its rate fitted against them; the eye "
+        "tracker placed by its analog copy, its rate fitted against the copy; NaN for a system not placed on the "
+        "NI's clock.")
     assert texts["system_clocks.residual_us_rms"] == (
         "RMS residual, microseconds: 0 for SpikeGLX on the identity map; Intan's RMS strobe residual; a system the "
-        "NI's barcodes placed, its RMS barcode residual; NaN for a system not placed on the NI's clock.")
+        "NI's barcodes placed, its RMS barcode residual; the eye tracker placed by its analog copy, its RMS "
+        "residual about the copy; NaN for a system not placed on the NI's clock.")
     assert texts["segments.file_path"] == "The recording file, relative to its system's folder."
     assert texts["segments.first_sample"] == (
         "Native index the segment's offset is anchored to: 0 for SpikeGLX, the NI's first file being session "
         "time; for Intan, the first strobe edge matched to the NI's; for a system the NI's barcodes placed, the "
-        "segment's first barcode.")
+        "segment's first barcode; for the eye tracker placed by its analog copy, the eye row at the copy's first "
+        "pair.")
     assert texts["system_clocks.time_source"] == (
         "How the system was placed on the NI's clock where fit_status is fitted, and how placing it was "
         "attempted where it is unfittable: clock, SpikeGLX on the identity map; strobes, Intan by its strobe "
         "edges matched to the NI's; barcode, by the NI's own barcodes, over the part the sync box covered: "
-        "where fitted they placed it, where unfittable they placed none of it; none, by no mechanism, not "
-        "placed.")
+        "where fitted they placed it, where unfittable they placed none of it; analog, by its analog copy on the "
+        "NI, matched over the whole recording: where fitted it placed the whole file, where unfittable the copy "
+        "was found but refused and none of the file was placed; none, by no mechanism, not placed.")
     source = texts["clock_reference.source"]
     assert all(f"{name}:" in source for name in ("barcode", "manifest", "rig_clock", "nidq_meta")), source
     assert "barcode's" not in texts["clock_reference.started_at_difference_s"]

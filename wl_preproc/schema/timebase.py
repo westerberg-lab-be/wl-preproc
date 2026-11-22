@@ -383,6 +383,7 @@ class SystemTimebase(dj.Computed):
         signal=null              : varchar(32)   # the eye columns it matched, a name in analog_copy.FAMILIES
         n_pairs=null             : int unsigned  # the pairs the fit stands on, after the drop
         n_dropped=null           : int unsigned  # pairs off the line, dropped (78)
+        dropped_stretches=null   : varchar(255)  # placed: their eye seconds, "100.0-110.0 s, ..."; null for none
         lag_s=null               : double        # removed from each pair's NI time; 0 where unmeasured
         lag_measured=null        : tinyint(1)    # 0: no lag measured on the rig, so 0
         lag_source_datetime=null : datetime      # the session it was measured in; this one's where measured here
@@ -594,7 +595,7 @@ class SystemTimebase(dj.Computed):
         are: the copy is matched once per session, here (fix round 1,
         finding 1), never again for the segment.
         """
-        from wl_preproc.timebase.analog_copy import CopyRefused, NoCopy, place_eye_by_copy
+        from wl_preproc.timebase.analog_copy import CopyRefused, NoCopy, place_eye_by_copy, stretches_text
         from wl_preproc.timebase.clock import clipped
         from wl_preproc.timebase.fit import fit_offset, fit_offset_to_pairs, fit_pairs_across
 
@@ -639,7 +640,8 @@ class SystemTimebase(dj.Computed):
         })
         self.Copy.insert1({
             **copy, "outcome": "placed", "ni_channel": placement.match.channel, "signal": placement.match.signal,
-            "n_pairs": len(pairs), "n_dropped": placement.match.n_dropped, "lag_s": lag_s,
+            "n_pairs": len(pairs), "n_dropped": placement.match.n_dropped,
+            "dropped_stretches": clipped(stretches_text(placement.match.dropped_stretches)) or None, "lag_s": lag_s,
             "lag_measured": source_datetime is not None, "lag_source_datetime": source_datetime,
             "agreement_us": agreement_us, "offset_s": offset.offset_s, "residual_us": offset.residual_us,
             "first_sample": placement.first_sample,

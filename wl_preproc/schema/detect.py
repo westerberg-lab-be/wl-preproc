@@ -717,7 +717,8 @@ class EyeDetection(dj.Computed):
         fs_hz = recording.fs_hz
         # The rows inside the covered span (amendment 58), the only ones the
         # mask offered: the repair and the velocities are made over them
-        # alone, and a detector reads them alone. `None` under the sync box.
+        # alone, and a detector reads them alone. `None` under the sync box, and
+        # for an eye file placed by its analog copy (amendment 81).
         placed = eye_schema.placed_rows(eye_span(session_key, session_dir), segment,
                                         recording.frame_numbers - recording.frame_numbers[0])
 

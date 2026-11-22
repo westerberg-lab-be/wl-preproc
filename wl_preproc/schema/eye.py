@@ -555,7 +555,8 @@ class EyeCalibration(dj.Computed):
         # outside it are placed by extrapolating its barcode fit, which
         # nothing verified, so a window there is no calibration window: it is
         # not counted among those found, and no note says it lacked coverage.
-        # `None` under the sync box: every window is kept, as before.
+        # `None` under the sync box, and for an eye file placed by its analog
+        # copy (amendment 81), which places every frame: every window is kept.
         #
         # **Where windows existed and none is inside, the refusal says so**
         # (ruling R10, part 3b-3's fix round 1), as the coverage-gap refusal
@@ -1222,7 +1223,8 @@ class EyeQuality(dj.Computed):
         **Only inside the covered span** (amendment 58): under the NI with a
         sync box that stopped partway, both count the frames whose session
         time lies inside it (`placed_rows`), and the rate is over the seconds
-        of recording inside it. Under the sync box, the whole recording.
+        of recording inside it. Under the sync box, and for an eye file placed
+        by its analog copy (amendment 81), the whole recording.
         """
         from wl_preproc.schema import ingest
 

@@ -590,6 +590,13 @@ def _named(stretches: Sequence[tuple[float, float]], most: int = 3) -> str:
     return f"the eye's {named}" + (f" and {more} more" if more > 0 else "")
 
 
+def stretches_text(stretches: Sequence[tuple[float, float]]) -> str:
+    """Every stretch of the eye's own seconds, `100.0-110.0 s, 130.0-140.0 s`,
+    as `SystemTimebase.Copy.dropped_stretches` keeps them and the file's notes
+    name them; '' for none."""
+    return ", ".join(f"{start:.1f}-{stop:.1f} s" for start, stop in stretches)
+
+
 def _residuals_us(pairs: Sequence[tuple[float, float]], scale: float) -> np.ndarray:
     """Each pair's distance from the line `fit_pairs_across` fitted, in the NI's
     frame, as it computes its own maximum."""

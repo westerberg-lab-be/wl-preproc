@@ -67,6 +67,10 @@ SPLIT_S = 126.0
 #: places beyond its box's span, and the one whose copy is absent, which the
 #: span still cuts.
 WINDOWED = ("copy_partial", "copy_absent")
+#: The sessions whose NWB notes are read too: one carrying a lag from another
+#: session, one unmeasured with a dropped stretch, and a copy refused where
+#: barcodes place the file (`copy_partial`, above, measures its own lag).
+NOTED = ("copy_carried", "copy_short_stall", "copy_stall_box")
 #: `copy_partial`'s ten calibration targets, in pixels at `CAL_SCALE` degrees
 #: each, none repeated, held in windows from `WINDOWS_FROM_S` every 1.5 s, all
 #: after the box's span. A held gaze is smooth, so its windows match their copy
@@ -871,12 +875,12 @@ def nwb_files(landed, prefix, tmp_path_factory):
     from tests.schema.test_nwb_build import _montage, _request
 
     keys = {}
-    for name in WINDOWED:
+    for name in (*WINDOWED, *NOTED):
         session_key = landed.key(name)
         runs = [{"run_number": row["run_number"], "start_s": row["run_start_time"], "end_s": row["run_stop_time"],
                  "works_run_id": f"wr-{row['run_number']}"}
                 for row in (core.Run & session_key).to_dicts(order_by="run_number")]
-        keys[name] = accept(_request(session_key, f"{session_key['subject']}-canonical", _montage(runs), runs),
+        keys[name] = accept(_request(session_key, f"{session_key['subject']}-{name}-canonical", _montage(runs), runs),
                             prefix=prefix)
     report = daemon.run_once(prefix=prefix, nwb_root=tmp_path_factory.mktemp("copy-nwb"))
     files = {}
@@ -927,3 +931,168 @@ def test_a_barcode_placed_eye_is_still_cut(landed):
         span = eye_span(key, landed.session_dir(name))
         assert span is not None and span == _span(landed, name), name
         assert span[1] < _segment(key)["end_s"] - 100.0, name
+
+
+# -- What the file and the report say (Task 6) ----------------------------------
+
+
+def _copy_notes(nwb_files, name) -> list[str]:
+    """The notes that speak of the eye's analog copy: one, or none."""
+    return [note for note in nwb_files[name]["description"]["notes"] if "analog copy" in note]
+
+
+def test_the_nwb_file_says_the_eye_was_placed_by_its_copy(landed, nwb_files):
+    """The file's `time_source` column text names `analog`, and a note names
+    the copy's channel `XA<k>` and signal, then the lag: measured in this
+    session (with the barcodes that measured it), measured in another's, or
+    unmeasured, 0 s, with the output latency it leaves unknown. The eye is
+    used past the covered span, so no note says its data outside is left out.
+    """
+    from pynwb import NWBHDF5IO
+
+    with NWBHDF5IO(nwb_files["copy_partial"]["path"], "r") as handle:
+        text = handle.read().processing["timebase"]["system_clocks"]["time_source"].description
+    assert "analog, by its analog copy on the NI, matched over the whole recording" in text
+
+    def placed_by(name) -> str:
+        copy = _copy(landed.key(name))
+        (note,) = _copy_notes(nwb_files, name)
+        assert note.startswith(
+            f"the eye tracker was placed by its analog copy on the NI, channel XA{copy['ni_channel']}'s "
+            f"'{copy['signal']}', {copy['n_pairs']} pairs: "), note
+        return note
+
+    partial = _copy(landed.key("copy_partial"))
+    barcodes = _fit(landed.key("copy_partial"))["n_barcodes_matched"]
+    assert barcodes > 0
+    assert placed_by("copy_partial").endswith(
+        f"lag {partial['lag_s'] * 1e3:.2f} ms, measured in this session; placed by its copy, {barcodes} barcodes "
+        "measured the lag")
+    carried = _copy(landed.key("copy_carried"))
+    assert placed_by("copy_carried").endswith(
+        f"lag {carried['lag_s'] * 1e3:.2f} ms, measured in session {partial['session_datetime'].isoformat()}")
+    assert _fit(landed.key("copy_short_stall"))["n_barcodes_matched"] == 0
+    assert ("lag 0 s, unmeasured, so its time may be off by the eye tracker's output latency, of the order of "
+            "4-5 ms") in placed_by("copy_short_stall")
+    for name in ("copy_partial", "copy_carried", "copy_short_stall"):
+        assert not any(note.startswith("eye data outside") for note in nwb_files[name]["description"]["notes"]), name
+    assert not _copy_notes(nwb_files, "copy_absent")
+
+
+def test_dropped_stretches_are_named_in_the_file(landed, nwb_files):
+    """`copy_short_stall` is placed with a stretch dropped: `Copy` keeps its
+    device-second intervals, and the note names them, saying the eye's time
+    there is the fitted line's."""
+    copy = _copy(landed.key("copy_short_stall"))
+    assert copy["n_dropped"] >= 1 and copy["dropped_stretches"]
+    first = float(copy["dropped_stretches"].split("-", 1)[0])
+    assert SHORT_STALL[0] - 15.0 <= first <= SHORT_STALL[1]
+    (note,) = _copy_notes(nwb_files, "copy_short_stall")
+    assert (f"the copy's windows at {copy['dropped_stretches']} of the eye's own time were off its line and "
+            "dropped, so the eye's time there is the line's") in note
+    assert "dropped" not in " ".join(_copy_notes(nwb_files, "copy_partial"))
+    assert not _copy(landed.key("copy_partial"))["dropped_stretches"]
+
+
+def _report_section(landed, prefix, name) -> str:
+    """The daily report's section on the eye's analog copy, read two hours
+    after `name`'s session, inside its 24 h."""
+    import datetime
+
+    from wl_preproc.cli.report import build_report
+
+    from tests.cli.test_report import _section
+
+    key = landed.key(name)
+    now = (key["session_datetime"] + datetime.timedelta(hours=2)).replace(tzinfo=datetime.UTC)
+    return _section(build_report(landed.session_dir(name).parent, prefix=prefix, now=now),
+                    "Eye placed by its analog copy")
+
+
+def test_a_failed_copy_is_named_where_barcodes_placed_the_file(landed, nwb_files, prefix):
+    """`copy_stall_box`: the copy was refused and the NI's barcodes placed
+    the file over the span. A note and a report line say so, each with the
+    matcher's own refusal as stored, and the report's says too what the barcodes
+    did. Where they placed nothing (`copy_stall`), the line says the file is
+    rejected `no_analog_match`, which fails the session."""
+    from tests.cli.test_report import _declared_count, _line_for
+
+    key = landed.key("copy_stall_box")
+    refusal = _copy(key)["refusal"]
+    assert refusal.startswith("channel XA2's")
+    (note,) = _copy_notes(nwb_files, "copy_stall_box")
+    assert note == (f"the eye tracker's analog copy on the NI was refused, so the NI's own barcodes placed it over "
+                    f"the covered span: {refusal}")
+    section = _report_section(landed, prefix, "copy_stall_box")
+    line = _line_for(section, f"@ {key['session_datetime']:%Y-%m-%d %H:%M}")
+    assert f"`{key['subject']}`" in line
+    assert line.endswith(f"the eye tracker's analog copy was refused: {refusal}; the NI's own barcodes placed the "
+                         "eye file over the covered span")
+    assert _declared_count(section) == len([line for line in section.splitlines() if line.startswith("- ")])
+    stall = landed.key("copy_stall")
+    line = _line_for(_report_section(landed, prefix, "copy_stall"), f"@ {stall['session_datetime']:%Y-%m-%d %H:%M}")
+    assert line.endswith(f"the eye tracker's analog copy was refused: {_copy(stall)['refusal']}; no barcode placed "
+                         "the eye file, so it is rejected `no_analog_match`, which fails the session (tier D)")
+
+
+def test_the_report_names_a_lag_that_jumps(landed, prefix):
+    """`copy_partial` measured a lag more than a frame period from the one
+    `copy_earlier` measured before it on the rig: named, with both, the
+    frame period, and the barcodes that measured it. `copy_earlier` is the
+    rig's first, and `copy_carried`, which measured nothing, jumps from
+    nothing."""
+    from tests.cli.test_report import _line_for
+
+    partial, earlier = _copy(landed.key("copy_partial")), _copy(landed.key("copy_earlier"))
+    frame_ms = 1e3 / _fit(landed.key("copy_partial"))["nominal_rate_hz"]
+    jump_ms = abs(partial["lag_s"] - earlier["lag_s"]) * 1e3
+    assert jump_ms > frame_ms
+    section = _report_section(landed, prefix, "copy_partial")
+    key = landed.key("copy_partial")
+    line = _line_for(section, f"@ {key['session_datetime']:%Y-%m-%d %H:%M}")
+    assert line.endswith(
+        f"the lag, {partial['lag_s'] * 1e3:.2f} ms measured here, is {jump_ms:.2f} ms from the "
+        f"{earlier['lag_s'] * 1e3:.2f} ms measured in session {earlier['session_datetime'].isoformat()} on rig "
+        f"`rig-copy-carry`, more than one frame period, {frame_ms:.2f} ms (placed by its copy; "
+        f"{_fit(key)['n_barcodes_matched']} barcodes measured the lag)")
+    assert f"@ {landed.key('copy_earlier')['session_datetime']:%Y-%m-%d %H:%M}" not in section
+    assert f"@ {landed.key('copy_carried')['session_datetime']:%Y-%m-%d %H:%M}" not in section
+
+
+def _row(**fields) -> dict:
+    import datetime
+
+    return {"subject": "zz000001", "session_datetime": datetime.datetime(2026, 11, 1, 9), "session_dir": "/s/one",
+            "rig": "rig-a", "outcome": "placed", "lag_s": 0.005, "lag_measured": 1, "agreement_us": 100.0,
+            "nominal_rate_hz": 500.0, "refusal": "", "fit_status": "fitted", "time_source": "analog",
+            "n_barcodes_matched": 9, **fields}
+
+
+def test_a_lag_is_a_jump_only_beyond_one_frame_period_from_the_rigs_previous():
+    """The previous is the rig's latest good measurement before the session,
+    in the carry's order (`timebase._carried_lag`): not another rig's, not a
+    lag that was carried (no `agreement_us`), not one that failed its
+    checks (a lag past the ceiling), not a later one. At 500 Hz a frame is 2 ms: 2 ms off is not a
+    jump, 2.1 ms is."""
+    import datetime
+
+    from wl_preproc.cli.report import _copy_lines
+
+    def at(hours, **fields):
+        return _row(session_datetime=datetime.datetime(2026, 11, 1, 9) + datetime.timedelta(hours=hours),
+                    session_dir=f"/s/{hours}", **fields)
+
+    history = [at(-3, lag_s=0.0030), at(-2, rig="rig-b", lag_s=0.0300), at(-1, agreement_us=None, lag_s=0.0100),
+               at(-1.5, agreement_us=9000.0, lag_s=0.0200), at(2, lag_s=0.0200), at(-2.5, lag_s=0.0400)]
+    assert _copy_lines([at(0, lag_s=0.0050)], history) == []
+    (line,) = _copy_lines([at(0, lag_s=0.00511)], history)
+    assert "is 2.11 ms from the 3.00 ms measured in session 2026-11-01T06:00:00" in line
+    assert _copy_lines([at(0, lag_s=0.00489)], history) == []
+    (line,) = _copy_lines([at(0, lag_s=0.00089)], history)
+    assert "is 2.11 ms from the 3.00 ms" in line
+    assert _copy_lines([at(0, lag_s=0.0300)], []) == []
+    # Only a lag measured here is compared: one carried, or none, is not.
+    assert _copy_lines([at(0, lag_s=0.0300, agreement_us=None)], history) == []
+    assert _copy_lines([at(0, lag_s=0.0, lag_measured=0, agreement_us=None)], history) == []
+    # An absent copy is not named.
+    assert _copy_lines([at(0, outcome="absent")], history) == []
