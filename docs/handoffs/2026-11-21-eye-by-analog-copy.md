@@ -264,7 +264,27 @@ Named checks the task reviews carried forward:
 
 ### The whole-branch review
 
-FINAL_REVIEW
+One whole-branch review (Opus) of `c111f8f..4f3bf8d`: no Critical finding, two Important, seven Minor.
+
+- **I1.** The fallback to `d = 0` was logged at INFO, which nothing in `wl_preproc` shows. Fixed in `115aad7`: a
+  WARNING, the nullable `Copy.search_unaimed` holding the reason, and a daily-report line for an absent copy whose
+  search was unaimed.
+- **I2.** A copy whose measured lag failed its checks made the session tier D with nothing a person reads saying
+  why. Fixed in `115aad7`: the report's section names the lag, the bound it broke, the agreement against one frame,
+  and the tier. Such a copy gets that line alone, not also a lag-jump line.
+- **M3**, the stale "amendment 85, draft" citations, was folded into the same fix.
+- **M7.** The NI's texts for `time_source`, `worst_residual_us`, `fitted_rate_hz`, `residual_us_rms` and
+  `first_sample` change for every NI session, against the plan's "unchanged". This was accepted: under 3b-3's R15
+  form each text must read true for `analog`. It is announced in `docs/pending-wl-works-amendments.md`.
+- A scoped re-review of the fix wave found every finding addressed. It also found that the new heading, "## Eye
+  placed by its analog copy", was prefix-matched by the tests' `_section("Eye")` helpers. Fixed in `a0246fa`: every
+  copy of the helper matches a heading exactly.
+- The first full suite after the fix wave failed three tests on each interpreter, all tests' own:
+  `test_intan_by_strobes.py` and `test_partial_sync_box.py` still pinned 3b-3's wording of the five NI texts
+  (`tests/nwb/test_writers.py` pins the new wording), and the report-line tests wrote `zz000001`, a value
+  `tests/identities.py` reserves. Fixed in `170c5ed`.
+
+The review's remaining minors are below, under "Final review".
 
 ## Deferred minors
 
@@ -338,6 +358,21 @@ FINAL_REVIEW
 - The new report section is not in `Readings`, following the precedent of `_eye_rows` and `_syncbox_restarts`.
 - `eye_span` keys on `time_source` alone; `_span_notes` also requires `fitted`. They agree in every real state.
 
+**Final review**
+- M1: `_next`'s band-edge shoulder can give a pair up to 50 ms off. It is dropped, but it uses the drop budget and
+  names a false stretch. Reject a band-edge peak unless it is a local maximum.
+- M2: `Copy.first_sample` and `Segment.first_sample` hold an eye row, though the column comment says native index
+  (the NWB text says row).
+- M4: the whole-channel re-anchor faces about 50 times the prefix's rivals, so with R13 a real copy may report
+  failed on a 12 h file. Seed it from the search's shift. Watch under hardware check 17.
+- M5: R17's note should also name the eye tables, which key on `pipeline.Session` and do not cascade.
+- M6: the unmeasured lag's note, "of the order of 4-5 ms", understates: 4-5 ms plus the filter, 7.1 ms of delay in
+  all on the synthetic copy. The text is the brief's, verbatim; revisit with hardware check 17.
+- No schema-level test of a null `search_unaimed`; every fixture is unstamped. A placement-level test covers it.
+- An unaimed reason that embeds a long eye-file stem is clipped at 255 characters and loses its tail.
+- The handoff's Task 5 and 6 ruling numbers come from the task reports, not the ledger.
+- The handoff's costs marked "by consequence" are inferences.
+
 **Found while writing these records**
 - The code still cites "amendment 85, draft" (`analog_copy.py:154`, `:755`;
   `tests/timebase/test_analog_copy_files.py:310`). Amendment 85 is now written. Fixed in the final review's fix
@@ -361,7 +396,13 @@ FINAL_REVIEW
 
 ## The suite
 
-SUITE_RESULTS
+The full suite (`tests/`), with every reference set (NSLR, BMD and Boost, Andersson, the OpenIris recording), at
+`170c5ed`:
+- **3.11:** 3441 passed, 2 skipped (U'n'Eye's numba OpenMP; no `WLPP_BHV2_SAMPLE`), 1 deselected (a `slow`-marked
+  test, excluded by `addopts`), 1 xfailed.
+- **3.13:** 3441 passed, 3 skipped (Kilosort not installed, twice; no `WLPP_BHV2_SAMPLE`), 1 xfailed.
+
+The same skips as 3b-3's merge. After it, only this handoff changed.
 
 ## Deploy
 
