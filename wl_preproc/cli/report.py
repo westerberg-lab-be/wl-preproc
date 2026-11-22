@@ -1599,15 +1599,21 @@ def _copy_rows(ingested_keys: set, prefix: str = DEFAULT_PREFIX) -> tuple[list[d
 
 def _copy_lines(rows: list[dict], history: list[dict]) -> list[str]:
     """What a person reading the report needs of the eye's analog copy
-    (amendments 77-80): each copy refused, with the matcher's own refusal and
-    what placed the file instead; and each lag measured in its own session
-    that is more than one frame period (`1 / nominal_rate_hz`) from the one
-    the same rig measured before it. The previous is the carry's
+    (amendments 77-80 and 85): each copy refused, with the matcher's own
+    refusal and what placed the file instead; each absent copy whose channel
+    search the two files' clocks did not aim (`search_unaimed`), and so could
+    not reach an eye file started far from the NI; each copy whose lag,
+    measured here, fails its checks (`timebase.copy_fails`), which makes the
+    session D, with no NWB file to say why; and each lag measured in its own
+    session that is more than one frame period (`1 / nominal_rate_hz`) from
+    the one the same rig measured before it. The previous is the carry's
     (`timebase._carried_lag`): the rig's latest lag measured in a session at
     or before this one, in `(session_datetime, subject)` order, whose copy
     passed its own checks. A lag carried from another session, or none, is
-    never compared, and an absent copy is not named."""
+    never compared; nor is one that fails its checks, named for that alone.
+    An absent copy whose search was aimed is not named."""
     from wl_preproc.schema.timebase import copy_fails
+    from wl_preproc.timebase.analog_copy import CLOCK_SLACK_S, LAG_CEILING_S, MIN_PAIRS, SEARCH_PREFIX_S, STEP_S
 
     def order(row):
         return (row["session_datetime"], row["subject"])
@@ -1622,6 +1628,28 @@ def _copy_lines(rows: list[dict], history: list[dict]) -> list[str]:
                       "no barcode placed the eye file, so it is rejected `no_analog_match`, which fails the session "
                       "(tier D)")
             lines.append(f"{head}the eye tracker's analog copy was refused: {row['refusal']}; {placed}")
+            continue
+        if row["outcome"] == "absent":
+            if row["search_unaimed"]:
+                before_s = SEARCH_PREFIX_S - MIN_PAIRS * STEP_S
+                lines.append(
+                    f"{head}no copy was found on the NI, but the search was not aimed by the two files' clocks "
+                    f"({row['search_unaimed']}), so a copy in an eye file started more than about {before_s:.0f} s "
+                    f"before the NI, or {before_s + CLOCK_SLACK_S:.0f} s after it, would not have been found")
+            continue
+        if copy_fails(row, row["nominal_rate_hz"]):
+            lag_ms, ceiling_ms = row["lag_s"] * 1e3, LAG_CEILING_S * 1e3
+            bound = ("is below 0, and a copy cannot lead its frame" if row["lag_s"] < 0.0 else
+                     f"is above the ceiling of {ceiling_ms:.2f} ms" if row["lag_s"] > LAG_CEILING_S else
+                     f"is within its bounds, 0 to {ceiling_ms:.2f} ms")
+            agreement = ""
+            if row["agreement_us"] is not None:
+                frame_us = 1e6 / row["nominal_rate_hz"]
+                relation = "more than" if row["agreement_us"] > frame_us else "within"
+                agreement = (f"; the corrected copy is {row['agreement_us'] / 1e3:.2f} ms from the eye file's "
+                             f"barcodes at worst, {relation} one frame, {frame_us / 1e3:.2f} ms")
+            lines.append(f"{head}the copy's lag, {lag_ms:.2f} ms measured here, {bound}{agreement}; "
+                         "so the session is tier D")
             continue
         if row["outcome"] != "placed" or not row["lag_measured"] or row["agreement_us"] is None or not row["rig"]:
             continue

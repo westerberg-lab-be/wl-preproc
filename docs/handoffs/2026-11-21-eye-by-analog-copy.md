@@ -55,7 +55,9 @@ By task, each with its commits.
   - `timebase/segments.py::NO_ANALOG_MATCH`. `schema/timebase.py::_TIME_SOURCE_ENUM` gains `analog`.
   - `SystemTimebase.Copy`, a part table: `outcome` (`placed`, `failed`, `absent`), `refusal`, `ni_channel`,
     `signal`, `n_pairs`, `n_dropped`, `lag_s`, `lag_measured`, `lag_source_datetime`, `agreement_us`, `offset_s`,
-    `residual_us`, `first_sample`, `placed_file`, `placed_rows`, `placed_bytes` and `rig`.
+    `residual_us`, `first_sample`, `placed_file`, `placed_rows`, `placed_bytes`, `search_unaimed` and `rig`.
+    `search_unaimed`, added in the final review's fix wave, is why the two files' clocks did not aim the channel
+    search (amendment 85), null where they did.
   - `SystemTimebase._make_by_copy` follows the outcome table of the plan's global constraints. Other systems take
     the barcode path, factored out as `_by_barcodes`.
   - The lag: `_cross_check` measures it over the eye file's own barcodes in the span (F4); otherwise
@@ -80,7 +82,9 @@ By task, each with its commits.
     dropped stretches, or the refusal and what placed the file instead. `_span_notes` no longer says a copy-placed
     eye's data outside the span is left out.
   - `cli/report.py`: the section "Eye placed by its analog copy (24 h)", built by `_copy_rows` and `_copy_lines`,
-    names each copy refused and each measured lag more than one frame from the rig's previous one.
+    names each copy refused and each measured lag more than one frame from the rig's previous one. The final
+    review's fix wave adds a line for each absent copy whose search was not aimed, and one for each copy whose
+    measured lag fails its checks (`copy_fails`), which makes the session D.
   - `Copy.dropped_stretches`, and `analog_copy.stretches_text`.
 - **Task 7: these records.** Amendments 85 and 86. Rows 15-18 and 16a of `docs/hardware-checks.md` cite the built
   constants and the `Copy` table, and rows 9a, 15a, 16b, 17a, 18a and 18b are new. The tier and `no_analog_match`
@@ -336,10 +340,12 @@ FINAL_REVIEW
 
 **Found while writing these records**
 - The code still cites "amendment 85, draft" (`analog_copy.py:154`, `:755`;
-  `tests/timebase/test_analog_copy_files.py:310`). Amendment 85 is now written.
+  `tests/timebase/test_analog_copy_files.py:310`). Amendment 85 is now written. Fixed in the final review's fix
+  wave.
 - The fallback's INFO line (`clock_offset_s`): by `place_eye_by_copy`'s own docstring, nothing in `wl_preproc`
   configures logging, so an INFO line is never seen. A session whose search fell back to `d = 0` says so nowhere a
-  person reads.
+  person reads. Fixed in the final review's fix wave: a WARNING, `Copy.search_unaimed`, and a report line for an
+  absent copy.
 
 ## Carried to later parts
 

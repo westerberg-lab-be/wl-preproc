@@ -374,6 +374,9 @@ class SystemTimebase(dj.Computed):
         # the file's offset, residual and first sample are kept here for
         # `Segment.make`, which writes them without matching the copy again,
         # for that file alone: the one `placed_*` names (`copy_identity`).
+        # `search_unaimed` is why the two files' clocks did not aim the channel
+        # search (amendment 85), null where they did: unaimed, an eye file far
+        # from the NI's start is reported absent though its copy is there.
         # Key: (subject, session_datetime, system).
         -> master
         ---
@@ -394,6 +397,7 @@ class SystemTimebase(dj.Computed):
         placed_file=null         : varchar(255)  # placed: the file it placed, relative to the session's folder
         placed_rows=null         : int unsigned  # placed: that file's rows
         placed_bytes=null        : bigint unsigned  # placed: that file's size
+        search_unaimed=null      : varchar(255)  # why the clocks did not aim the search (85); null where they did
         rig                      : varchar(64)   # the manifest's
         """
 
@@ -603,14 +607,15 @@ class SystemTimebase(dj.Computed):
         copy = {**key, "rig": _manifest_rig(session_dir)}
         try:
             placement = place_eye_by_copy(session_dir, scan.path)
-        except NoCopy:
+        except NoCopy as absent:
             self.insert1(by_barcodes)
-            self.Copy.insert1({**copy, "outcome": "absent"})
+            self.Copy.insert1({**copy, "outcome": "absent", "search_unaimed": _unaimed(absent.search_unaimed)})
             return
         except CopyRefused as refusal:
             self.insert1(by_barcodes if barcode_fit is not None else {
                 **row, "time_source": "analog", "fit_status": "unfittable", "nominal_rate_hz": nominal_rate_hz})
-            self.Copy.insert1({**copy, "outcome": "failed", "refusal": clipped(str(refusal))})
+            self.Copy.insert1({**copy, "outcome": "failed", "refusal": clipped(str(refusal)),
+                               "search_unaimed": _unaimed(refusal.search_unaimed)})
             return
 
         pairs = placement.match.pairs
@@ -644,7 +649,7 @@ class SystemTimebase(dj.Computed):
             "dropped_stretches": clipped(stretches_text(placement.match.dropped_stretches)) or None, "lag_s": lag_s,
             "lag_measured": source_datetime is not None, "lag_source_datetime": source_datetime,
             "agreement_us": agreement_us, "offset_s": offset.offset_s, "residual_us": offset.residual_us,
-            "first_sample": placement.first_sample,
+            "first_sample": placement.first_sample, "search_unaimed": _unaimed(placement.search_unaimed),
             **dict(zip(("placed_file", "placed_rows", "placed_bytes"), copy_identity(scan, session_dir), strict=True)),
         })
 
@@ -695,6 +700,13 @@ def copy_identity(scan, session_dir: Path) -> tuple[str, int, int]:
     leaves it out of the eye's start)."""
     return (str(scan.path.relative_to(session_dir)), int(scan.stream.n_samples - scan.n_frames_missing),
             int(scan.path.stat().st_size))
+
+
+def _unaimed(reason: str | None) -> str | None:
+    """`Copy.search_unaimed`: the reason, cut to its column, or None."""
+    from wl_preproc.timebase.clock import clipped
+
+    return None if reason is None else clipped(reason)
 
 
 def _manifest_rig(session_dir: Path) -> str:

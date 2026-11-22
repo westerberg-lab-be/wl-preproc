@@ -135,6 +135,8 @@ def test_a_session_with_a_copy_is_placed(session):
     assert abs(float(np.mean(errors))) <= MEAN_BOUND_S
     # No frame dropped: the eye sample at the first pair is the row of its frame.
     assert placement.first_sample == round(placement.match.pairs[0][1] * OHDPI_FPS)
+    # The synthetic name carries no stamp: placed, by a search the clocks did not aim, which says why.
+    assert placement.search_unaimed == f"{eye_path.stem!r} is not OpenIris's default name, OpenIris-YYYYMonDD-HHMMSS"
 
     # The families, in `FAMILIES`' order, from the file's own columns.
     eye_time_s, candidates = eye_candidates(eye_path)
@@ -286,6 +288,8 @@ def test_a_stalled_copy_is_refused_with_a_warning(tmp_path, caplog):
     assert _warned_about(caplog, eye_path)
     # Named by its channel and signal, as a match too short whole is.
     assert str(refused.value).startswith(f"channel XA{COPY.channel}'s 'Left P1-P4 (X, Y)': "), refused.value
+    # ... and carrying why its search was not aimed, for the `Copy` row.
+    assert "is not OpenIris's default name" in refused.value.search_unaimed
 
 
 def test_too_few_windows_over_the_whole_channel_is_a_refusal(session, monkeypatch, caplog):
@@ -307,7 +311,7 @@ def test_too_few_windows_over_the_whole_channel_is_a_refusal(session, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# The search aimed by the two files' clocks (amendment 85, draft): OpenIris's
+# The search aimed by the two files' clocks (amendment 85): OpenIris's
 # file-name stamp against SpikeGLX's `fileCreateTime`.
 #
 # A synthetic eye file starts 0.1 s after its NI file, and a recipe cannot move
@@ -404,6 +408,7 @@ def test_an_eye_file_started_well_after_the_ni_is_found_by_its_stamp(session, tm
     errors = ni_s - _truth_ni_s(device_s + dropped / OHDPI_FPS, COPY)
     assert np.max(np.abs(errors)) <= PAIR_BOUND_S
     assert abs(float(np.mean(errors))) <= MEAN_BOUND_S
+    assert placement.search_unaimed is None
 
 
 def test_an_eye_file_started_well_before_the_ni_is_found_by_its_stamp(session, tmp_path, small_search):
@@ -418,13 +423,16 @@ def test_an_eye_file_started_well_before_the_ni_is_found_by_its_stamp(session, t
     errors = ni_s + dropped / NIDQ_SAMPLE_RATE_HZ - _truth_ni_s(device_s, COPY)
     assert np.max(np.abs(errors)) <= PAIR_BOUND_S
     assert abs(float(np.mean(errors))) <= MEAN_BOUND_S
+    assert placement.search_unaimed is None
 
 
 @pytest.mark.parametrize("missing", ["stamp", "fileCreateTime"])
 def test_without_both_clocks_the_search_is_not_aimed(session, tmp_path, small_search, caplog, missing):
     """The same late eye file, its name unstamped or its NI meta without
     `fileCreateTime`: the search is not aimed, so the copy is beyond it
-    (`NoCopy`), and an INFO line names the eye file and why."""
+    (`NoCopy`). A WARNING names the eye file and why, since nothing in
+    `wl_preproc` configures logging and an INFO line would never be seen; and
+    the `NoCopy` carries why, for the `Copy` row (`search_unaimed`)."""
     session_dir, eye_path, eye_start_s, _ = _eye_starts_late(session, tmp_path)
     if missing == "fileCreateTime":
         eye_path = _stamped(eye_path, _ni_created(session_dir) + datetime.timedelta(seconds=math.floor(eye_start_s)))
@@ -432,11 +440,14 @@ def test_without_both_clocks_the_search_is_not_aimed(session, tmp_path, small_se
         kept = [line for line in meta.read_text(encoding="utf-8").splitlines() if not line.startswith("fileCreateTime=")]
         meta.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
-    with caplog.at_level(logging.INFO, logger=analog_copy.__name__), pytest.raises(NoCopy):
+    with caplog.at_level(logging.WARNING, logger=analog_copy.__name__), pytest.raises(NoCopy) as absent:
         place_eye_by_copy(session_dir, eye_path)
-    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and str(eye_path) in r.getMessage()]
-    assert len(infos) == 1
-    assert ("fileCreateTime" if missing == "fileCreateTime" else "OpenIris") in infos[0]
+    unaimed = [r.getMessage() for r in caplog.records
+               if r.levelno == logging.WARNING and str(eye_path) in r.getMessage() and "not aimed" in r.getMessage()]
+    assert len(unaimed) == 1
+    why = "fileCreateTime" if missing == "fileCreateTime" else "OpenIris"
+    assert why in unaimed[0]
+    assert why in absent.value.search_unaimed and absent.value.search_unaimed in unaimed[0]
 
 
 def test_the_aimed_search_reads_from_the_aimed_ni_start(session, tmp_path, small_search, monkeypatch):
@@ -476,11 +487,29 @@ def test_the_clock_offset_reads_both_clocks_in_one_zone(monkeypatch):
     eye_path = Path("OpenIris-2026Mar08-030100.txt")
     ni_created = datetime.datetime(2026, 3, 8, 1, 59, 0)
     monkeypatch.setattr(clock, "NIDQ_TIMEZONE", None)
-    assert analog_copy.clock_offset_s(eye_path, ni_created) == pytest.approx(62 * 60.0)
+    assert analog_copy.clock_offset_s(eye_path, ni_created) == (pytest.approx(62 * 60.0), None)
     # New York springs from 02:00 to 03:00 that night: two minutes apart.
     monkeypatch.setattr(clock, "NIDQ_TIMEZONE", "America/New_York")
-    assert analog_copy.clock_offset_s(eye_path, ni_created) == pytest.approx(120.0)
+    assert analog_copy.clock_offset_s(eye_path, ni_created) == (pytest.approx(120.0), None)
     # The eye's 03:01:00 read as UTC, whatever the zone: 90 s after 07:59:30
     # at UTC+5, which is 02:59:30 UTC.
     aware = datetime.datetime(2026, 3, 8, 7, 59, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
-    assert analog_copy.clock_offset_s(eye_path, aware) == pytest.approx(90.0)
+    assert analog_copy.clock_offset_s(eye_path, aware) == (pytest.approx(90.0), None)
+
+
+def test_without_both_clocks_the_offset_is_0_and_says_why(caplog):
+    """Either clock missing: `d` is 0, with the reason returned and logged as
+    one WARNING naming the eye file."""
+    ni_created = datetime.datetime(2026, 3, 8, 1, 59, 0)
+    unstamped = Path("renamed-by-hand.txt")
+    with caplog.at_level(logging.WARNING, logger=analog_copy.__name__):
+        offset_s, reason = analog_copy.clock_offset_s(unstamped, ni_created)
+    assert (offset_s, reason) == (0.0, "'renamed-by-hand' is not OpenIris's default name, OpenIris-YYYYMonDD-HHMMSS")
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING and str(unstamped) in record.getMessage() and reason in record.getMessage()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=analog_copy.__name__):
+        assert analog_copy.clock_offset_s(Path("OpenIris-2026Mar08-030100.txt"), None) == (
+            0.0, "the NI file's .meta has no fileCreateTime")
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING and "fileCreateTime" in record.getMessage()

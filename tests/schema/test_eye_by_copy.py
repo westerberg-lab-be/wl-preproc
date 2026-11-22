@@ -61,6 +61,9 @@ NEGATIVE_SHIFT_S = 0.004
 EARLIER_LAG_S, LATER_LAG_S = 0.008, 0.011
 #: Where `copy_two_files`' eye file is cut in two, eye seconds.
 SPLIT_S = 126.0
+#: Why no session here has its channel search aimed by the two files' clocks
+#: (amendment 85): the synthetic eye file's name carries no OpenIris stamp.
+UNSTAMPED = "'OpenIris-synthetic' is not OpenIris's default name, OpenIris-YYYYMonDD-HHMMSS"
 #: The bound on a lag the box measured (ruling P1), and on a placement whose
 #: lag is right (measured here, or carried).
 #: The sessions that hold calibration windows and fixations: the one a copy
@@ -401,6 +404,7 @@ def test_a_session_with_only_a_copy_is_tier_n(landed):
     assert (copy["lag_s"], bool(copy["lag_measured"]), copy["lag_source_datetime"]) == (0.0, False, None)
     assert copy["agreement_us"] is None
     assert copy["rig"] == "rig-copy_only"
+    assert copy["search_unaimed"] == UNSTAMPED
     recipe = landed.recipe("copy_only")
     late_s = _segment(key)["start_s"] - _session_s(recipe, 0.0)
     assert late_s == pytest.approx(_delay_s(recipe), abs=LAG_BOUND_S)
@@ -470,6 +474,8 @@ def test_no_copy_leaves_3b_3_unchanged(landed):
         copy = _copy(each)
         assert copy["outcome"] == "absent", copy
         assert (copy["ni_channel"], copy["signal"], copy["lag_s"]) == (None, None, None)
+        # The synthetic name carries no stamp, so the search was not aimed (amendment 85), and the row says why.
+        assert copy["search_unaimed"] == UNSTAMPED, copy
         fit = _fit(each)
         assert (fit["fit_status"], fit["time_source"]) == ("fitted", "barcode")
         assert _tier(each) == "N"
@@ -518,6 +524,7 @@ def test_a_failed_copy_with_no_barcodes_is_no_analog_match(landed):
     stretches = [(float(start), float(stop)) for start, stop in re.findall(r"(\d+\.\d)-(\d+\.\d) s", refusal)]
     assert any(start <= stall_s[0] + WINDOW_S and stall_s[1] - WINDOW_S <= stop for start, stop in stretches), refusal
     assert copy["lag_s"] is None and copy["n_pairs"] is None
+    assert copy["search_unaimed"] == UNSTAMPED
     fit = _fit(key)
     assert (fit["fit_status"], fit["time_source"]) == ("unfittable", "analog")
     assert (fit["fitted_rate_hz"], fit["drift_ppm"]) == (None, None)
@@ -1059,13 +1066,87 @@ def test_the_report_names_a_lag_that_jumps(landed, prefix):
     assert f"@ {landed.key('copy_carried')['session_datetime']:%Y-%m-%d %H:%M}" not in section
 
 
+def test_the_report_names_an_absent_copy_whose_search_was_not_aimed(landed, prefix):
+    """Amendment 85's fallback: no stamp, so the search was not aimed, and an
+    eye file far from the NI's start would be reported absent though its copy
+    is there. Absent, the line says so and why; placed (`copy_only`, by the
+    same unaimed search), nothing is said of the aim."""
+    from tests.cli.test_report import _line_for
+
+    key = landed.key("copy_absent")
+    line = _line_for(_report_section(landed, prefix, "copy_absent"), f"@ {key['session_datetime']:%Y-%m-%d %H:%M}")
+    assert line.endswith(
+        f"no copy was found on the NI, but the search was not aimed by the two files' clocks ({UNSTAMPED}), so a "
+        "copy in an eye file started more than about 400 s before the NI, or 520 s after it, would not have been found")
+    only = landed.key("copy_only")
+    assert f"@ {only['session_datetime']:%Y-%m-%d %H:%M}" not in _report_section(landed, prefix, "copy_only")
+
+
+@pytest.mark.parametrize("name", ["copy_disagree", "copy_negative"])
+def test_the_report_names_a_copy_whose_lag_fails_its_checks(landed, prefix, name):
+    """Amendment 79's checks failed make the session D, and no NWB file is
+    built for it: the report's line is where a person reads why."""
+    from tests.cli.test_report import _line_for
+
+    key, copy = landed.key(name), _copy(landed.key(name))
+    line = _line_for(_report_section(landed, prefix, name), f"@ {key['session_datetime']:%Y-%m-%d %H:%M}")
+    bound = ("is within its bounds, 0 to 30.00 ms" if name == "copy_disagree" else
+             "is below 0, and a copy cannot lead its frame")
+    relation = "more than" if name == "copy_disagree" else "within"
+    assert line.endswith(
+        f"the copy's lag, {copy['lag_s'] * 1e3:.2f} ms measured here, {bound}; the corrected copy is "
+        f"{copy['agreement_us'] / 1e3:.2f} ms from the eye file's barcodes at worst, {relation} one frame, 2.00 ms; "
+        "so the session is tier D"), line
+
+
 def _row(**fields) -> dict:
     import datetime
 
     return {"subject": "zz000001", "session_datetime": datetime.datetime(2026, 11, 1, 9), "session_dir": "/s/one",
             "rig": "rig-a", "outcome": "placed", "lag_s": 0.005, "lag_measured": 1, "agreement_us": 100.0,
             "nominal_rate_hz": 500.0, "refusal": "", "fit_status": "fitted", "time_source": "analog",
-            "n_barcodes_matched": 9, **fields}
+            "n_barcodes_matched": 9, "search_unaimed": None, **fields}
+
+
+def test_a_copy_whose_lag_fails_its_checks_is_named():
+    """A lag measured here outside [0, `LAG_CEILING_S`], or a corrected copy
+    more than a frame from the barcodes (`copy_fails`), makes the session D:
+    named, with the lag and the bound it broke, the agreement against a frame,
+    and the tier. 30 ms is within the bound (no line); 30.1 ms is past it."""
+    from wl_preproc.cli.report import _copy_lines
+
+    head = "- `one` — `zz000001` @ 2026-11-01 09:00 — "
+    within = "the corrected copy is 0.10 ms from the eye file's barcodes at worst, within one frame, 2.00 ms"
+    assert _copy_lines([_row(lag_s=0.0300)], []) == []
+    assert _copy_lines([_row(lag_s=0.0, agreement_us=2000.0)], []) == []
+    assert _copy_lines([_row(lag_s=0.0301)], []) == [
+        f"{head}the copy's lag, 30.10 ms measured here, is above the ceiling of 30.00 ms; {within}; "
+        "so the session is tier D"]
+    assert _copy_lines([_row(lag_s=-0.0019)], []) == [
+        f"{head}the copy's lag, -1.90 ms measured here, is below 0, and a copy cannot lead its frame; {within}; "
+        "so the session is tier D"]
+    assert _copy_lines([_row(lag_s=0.0071, agreement_us=2500.0)], []) == [
+        f"{head}the copy's lag, 7.10 ms measured here, is within its bounds, 0 to 30.00 ms; the corrected copy is "
+        "2.50 ms from the eye file's barcodes at worst, more than one frame, 2.00 ms; so the session is tier D"]
+    # A failed lag is named as one, not also as a jump from the rig's previous.
+    history = [_row(session_datetime=_row()["session_datetime"].replace(hour=6), lag_s=0.0050)]
+    (line,) = _copy_lines([_row(lag_s=0.0400)], history)
+    assert "ceiling" in line and "more than one frame period" not in line
+
+
+def test_an_absent_copy_is_named_only_where_its_search_was_not_aimed():
+    """Amendment 85's fallback, `d = 0`: an absent copy whose search the two
+    files' clocks did not aim is named, with why and how far it reaches; one
+    whose search was aimed, as an absence is expected, is not."""
+    from wl_preproc.cli.report import _copy_lines
+
+    assert _copy_lines([_row(outcome="absent")], []) == []
+    assert _copy_lines([_row(outcome="absent", search_unaimed="the NI file's .meta has no fileCreateTime")], []) == [
+        "- `one` — `zz000001` @ 2026-11-01 09:00 — no copy was found on the NI, but the search was not aimed by the "
+        "two files' clocks (the NI file's .meta has no fileCreateTime), so a copy in an eye file started more than "
+        "about 400 s before the NI, or 520 s after it, would not have been found"]
+    # Placed or failed, the aim is not named: the copy was found.
+    assert _copy_lines([_row(search_unaimed="x")], []) == []
 
 
 def test_a_lag_is_a_jump_only_beyond_one_frame_period_from_the_rigs_previous():

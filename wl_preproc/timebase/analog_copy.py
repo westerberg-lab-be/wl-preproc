@@ -151,7 +151,7 @@ MAX_DROPPED_FRACTION = 0.1
 #: saccades. Set on synthetic data; revisited on real traces (hardware check 17).
 LAG_CEILING_S = 0.03
 #: Either way of the start the two files' clocks give the eye file on the NI
-#: (amendment 85, draft), the search reads this much more of each channel:
+#: (amendment 85), the search reads this much more of each channel:
 #: two lab PCs' wall clocks, each written to the second, and the delay between
 #: a recording's start and its stamp. Set on synthetic data; revisited on real
 #: traces (`docs/hardware-checks.md` item 17).
@@ -207,12 +207,22 @@ _LOCAL_SPAN_WIDTHS = 3
 
 class NoCopy(Exception):
     """No copy: no channel, or no candidate, gives `MIN_PAIRS` distinct windows.
-    The eye file falls back to its barcodes (amendment 77's 'absent')."""
+    The eye file falls back to its barcodes (amendment 77's 'absent').
+
+    `search_unaimed` is set by `place_eye_by_copy`: why the two files' clocks
+    did not aim the search (`clock_offset_s`), or None where they did. An
+    absent copy is where it matters most: an eye file far from the NI's start
+    is reported absent by a search that was not aimed."""
+
+    search_unaimed: str | None = None
 
 
 class CopyRefused(Exception):
     """A copy was found but does not fit: too few pairs, or too many dropped
-    for the residual to be met. The message says which (amendment 77's 'failed')."""
+    for the residual to be met. The message says which (amendment 77's 'failed').
+    `search_unaimed` as `NoCopy`'s."""
+
+    search_unaimed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -739,10 +749,13 @@ class CopyPlacement:
     XA channel's index among the XA channels (`XA<k>`), and `match.signal` the
     family's name (`FAMILIES`). `first_sample` is the native index, in the eye
     file's rows, of the eye sample at the first pair: the row whose frame is
-    nearest the first pair's device time (the earlier at a tie)."""
+    nearest the first pair's device time (the earlier at a tie).
+    `search_unaimed` is why the two files' clocks did not aim the channel
+    search (`clock_offset_s`), or None where they did."""
 
     match: CopyMatch
     first_sample: int
+    search_unaimed: str | None = None
 
 
 def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
@@ -752,7 +765,7 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
     time. The channel is found on a stretch of every XA channel
     (`find_channel`), and only that channel is then read whole (`match_copy`).
 
-    **The search is aimed by the two files' clocks** (amendment 85, draft).
+    **The search is aimed by the two files' clocks** (amendment 85).
     `d`, the eye file's start less the NI's, is OpenIris's file-name stamp
     (`parse_openiris_stamp`) less SpikeGLX's `fileCreateTime`, both the lab
     PCs' local time, to the second (`clock_offset_s`). The eye's windows are
@@ -761,7 +774,8 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
     either way, clipped to the file. The clocks only aim the search: the match
     is the whole channel's, and its pairs are the copy's alone.
 
-    **Without both clocks, `d` is 0** (an INFO line says why): the eye file is
+    **Without both clocks, `d` is 0** (a WARNING says why, and the placement,
+    `NoCopy` or `CopyRefused` carries it as `search_unaimed`): the eye file is
     taken to start with the NI. Two files that started more than about
     `SEARCH_PREFIX_S - MIN_PAIRS * STEP_S` (400 s) apart, the eye file that
     much before the NI, or that much and `CLOCK_SLACK_S` after it, then share
@@ -786,7 +800,7 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
     meta = read_nidq_meta(ni_path.with_suffix(".meta"))
     _, fs_hz = _decimation(meta.sample_rate_hz)
     eye_time_s, candidates = eye_candidates(eye_path)
-    offset_s = clock_offset_s(eye_path, meta.file_created)
+    offset_s, unaimed = clock_offset_s(eye_path, meta.file_created)
     ni_from_s = max(offset_s, 0.0)
     try:
         _, stretches = read_xa_channels(
@@ -809,11 +823,12 @@ def place_eye_by_copy(session_dir: Path, eye_path: Path) -> CopyPlacement:
             # The matcher knows neither name; the daily report needs both.
             raise CopyRefused(f"channel XA{channel}'s {signal!r}: {refused}") from refused
     except (NoCopy, CopyRefused) as refusal:
+        refusal.search_unaimed = unaimed
         logger.warning("%s: %s", eye_path, refusal)
         raise
     pairs = tuple((start_s + ni_s, device_s) for ni_s, device_s in match.pairs)
     placed = dataclasses.replace(match, pairs=pairs, channel=channel, signal=signal)
-    return CopyPlacement(match=placed, first_sample=_nearest_row(eye_time_s, pairs[0][1]))
+    return CopyPlacement(match=placed, first_sample=_nearest_row(eye_time_s, pairs[0][1]), search_unaimed=unaimed)
 
 
 #: OpenIris's default file name: `OpenIris-YYYYMonDD-HHMMSS`, its recording's
@@ -842,10 +857,11 @@ def parse_openiris_stamp(name: str) -> datetime.datetime:
         raise ValueError(f"{name!r}: its stamp is not a time ({error})") from error
 
 
-def clock_offset_s(eye_path: Path, ni_created: datetime.datetime | None) -> float:
-    """The eye file's start less the NI file's, in seconds, by their clocks:
-    the eye's file-name stamp (`parse_openiris_stamp`) less `ni_created`, the
-    NI's `fileCreateTime`. Positive: the eye file started after the NI.
+def clock_offset_s(eye_path: Path, ni_created: datetime.datetime | None) -> tuple[float, str | None]:
+    """`(d, None)`: the eye file's start less the NI file's, in seconds, by
+    their clocks: the eye's file-name stamp (`parse_openiris_stamp`) less
+    `ni_created`, the NI's `fileCreateTime`. Positive: the eye file started
+    after the NI.
 
     Both are lab PCs' local time, so both are read in one zone: subtracted as
     they are, or in `clock.NIDQ_TIMEZONE` where it is set, so that a change
@@ -853,9 +869,12 @@ def clock_offset_s(eye_path: Path, ni_created: datetime.datetime | None) -> floa
     naive one is UTC (`clock.aware_utc`). Not the file's mtime, which marks the
     end of writing and which a copy resets (ruling R14).
 
-    0, with one INFO line naming the eye file and why, where either is
+    `(0, why)`, with one WARNING naming the eye file and why, where either is
     missing: the name carries no stamp, or one that is no time, or the NI has
-    no `fileCreateTime`."""
+    no `fileCreateTime`. A WARNING, not INFO: nothing in `wl_preproc`
+    configures logging, so an INFO line would never be seen, and until the rig
+    is known to keep OpenIris's name (`docs/hardware-checks.md` 18a) the
+    fallback may be the usual case."""
     from wl_preproc.timebase import clock
 
     try:
@@ -864,11 +883,11 @@ def clock_offset_s(eye_path: Path, ni_created: datetime.datetime | None) -> floa
         reason = str(missing)
     else:
         if ni_created is not None:
-            return _wall_difference_s(eye_started, ni_created, clock.NIDQ_TIMEZONE, clock.aware_utc)
+            return _wall_difference_s(eye_started, ni_created, clock.NIDQ_TIMEZONE, clock.aware_utc), None
         reason = "the NI file's .meta has no fileCreateTime"
-    logger.info("%s: the copy's search is not aimed by the clocks (the eye file is taken to start with the NI): %s",
-                eye_path, reason)
-    return 0.0
+    logger.warning("%s: the copy's search is not aimed by the clocks (the eye file is taken to start with the NI): %s",
+                   eye_path, reason)
+    return 0.0, reason
 
 
 def _wall_difference_s(later: datetime.datetime, earlier: datetime.datetime, zone: str | None, aware_utc) -> float:
