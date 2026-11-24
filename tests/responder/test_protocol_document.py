@@ -53,6 +53,16 @@ def test_the_404_row_names_every_path_and_both_query_paths():
     `/sessions` (design spec `2026-11-24-wl-works-requests-design.md` section 2.7)."""
     text = PROTOCOL.read_text(encoding="utf-8")
     row = next(line for line in text.splitlines() if line.startswith("| `404` |"))
-    for path in ("/health", "/jobs", "/nwb", "/nwb/active", "/sessions"):
+    for path in ("/health", "/jobs", "/nwb", "/nwb/active", "/positions", "/sessions"):
         assert f"`{path}`" in row
     assert "a query string on any path but `/nwb` and `/sessions`" in row
+
+
+def test_every_field_positions_carry_is_named_in_the_protocol():
+    from wl_preproc.contracts.protocol import PositionsRequest, PositionsResponse, ProbePosition
+
+    section = _section("`PUT /positions`")
+    missing = sorted(f"{model.__name__}.{name}"
+                     for model in (PositionsRequest, ProbePosition, PositionsResponse)
+                     for name in model.model_fields if f"`{name}`" not in section)
+    assert missing == []

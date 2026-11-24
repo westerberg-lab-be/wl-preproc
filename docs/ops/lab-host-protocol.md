@@ -612,6 +612,27 @@ read under the same `Content-Length` rules as `POST /jobs`. The answer is `202` 
 are kept: a dataset may be marked active before its files exist, and a file in the set
 publishes straight to the fast share.
 
+## `PUT /positions`
+
+*Added 2026-11-24, `2026-11-24-montages-design.md` section 4.1.* The **whole** set of one session's
+probe positions, every time. This host stores it as sent and derives nothing; the montages follow in
+the daemon's next pass. The highest `positions_seq` wins until the session's first accepted job
+request; sending the same set twice changes nothing.
+
+```json
+{"subject": "…", "session_datetime": "2027-06-01T09:00:00Z", "positions_seq": 4,
+ "positions": [{"serial": "19011110001", "insertion_number": 1,
+                "inserted_at": "2027-06-01T09:00:00Z", "ended_at": null, "end_kind": null,
+                "inserted_after_run": null, "ended_after_run": null}]}
+```
+
+Request fields: `subject`, `session_datetime`, `positions_seq` and `positions`. Each position carries
+`serial`, `insertion_number`, `inserted_at`, `ended_at`, `end_kind`, `inserted_after_run` and
+`ended_after_run`. The answer is `200` with `positions_seq` (the seq this host now holds) and `changed`
+(whether the set changed; a higher seq with the same set after the first accepted request records the
+seq alone, `changed: false`). The body is
+[`docs/schemas/positions_request.json`](../schemas/positions_request.json) once exported.
+
 ## `GET /sessions`
 
 *Added 2026-10-01 with the landed-session listing
@@ -754,12 +775,13 @@ Every code this host can return, on any endpoint.
 | `202` | `PUT /nwb/active` | `{"accepted": …, "unknown": […]}` | The active set is recorded; the daemon's next pass moves files. | — |
 | `400` | all | `{"error": "bad request"}` | Malformed request line, or an unparseable version such as `HTTP/9.9.9`. See the framing note below. | No — fix the client |
 | `401` | all | `{"error": "unauthorized"}` | Missing, wrong-scheme, or wrong token; or a verb no endpoint answers. | No — fix the credential |
-| `404` | all | `{"error": "not found"}` | Path is not one of `/health`, `/jobs`, `/nwb`, `/nwb/active`, `/sessions`; or a query string on any path but `/nwb` and `/sessions`. | No |
+| `404` | all | `{"error": "not found"}` | Path is not one of `/health`, `/jobs`, `/nwb`, `/nwb/active`, `/positions`, `/sessions`; or a query string on any path but `/nwb` and `/sessions`. | No |
 | `405` | all | `{"error": "method not allowed"}` | Known path, wrong verb — `GET /jobs`, `POST /health`, `GET /nwb/active`, authenticated `PUT /health`. | No |
-| `408` | `POST /jobs`, `PUT /nwb/active` | `{"error": "request timed out"}` | The declared body never fully arrived. | **Yes** |
+| `408` | `POST /jobs`, `PUT /nwb/active`, `PUT /positions` | `{"error": "request timed out"}` | The declared body never fully arrived. | **Yes** |
 | `409` | `POST /jobs` | `{"error": "<what differed>"}` | Idempotency key reused for materially different content; a replacement naming a canonical that is not the montage's current one; or a run named under a `works_run_id` other than the one recorded, or a `works_run_id` recorded for another run. | **No — needs a human** |
+| `409` | `PUT /positions` | `{"error": "<why>", "positions_seq": <the seq this host holds>}` | A `positions_seq` below the stored one; the stored seq with another set; or, after the session's first accepted request, a changed set (the message names that request's idempotency key). | No — send a higher seq, or the stored set |
 | `414` | all | `{"error": "request line too long"}` | Over-long request line. | No |
-| `422` | `POST /jobs`, `PUT /nwb/active`, `GET /nwb` and `GET /sessions` (a `since` that is not one non-negative integer, a `limit` that is not one positive integer, any other key, or a key sent twice) | `{"error": "…"}` or `{"error": "invalid request body", "detail": […]}` | The request is malformed, or asks for something this host cannot do — **including naming a session it has not ingested yet**. | No — fix and resend; for a not-yet-ingested session, resend once the transfer lands |
+| `422` | `POST /jobs`, `PUT /nwb/active`, `PUT /positions`, `GET /nwb` and `GET /sessions` (a `since` that is not one non-negative integer, a `limit` that is not one positive integer, any other key, or a key sent twice) | `{"error": "…"}` or `{"error": "invalid request body", "detail": […]}` | The request is malformed, or asks for something this host cannot do — **including naming a session it has not ingested yet**. | No — fix and resend; for a not-yet-ingested session, resend once the transfer lands |
 | `431` | all | `{"error": "request header fields too large"}` | Oversized header. | No |
 | `500` | all | `{"error": "<ExceptionType>: <message>"}` | This host's own fault, infrastructure included. | **Yes** |
 | `505` | all | `{"error": "http version not supported"}` | `HTTP/2.0` or later. See the framing note below. | No |

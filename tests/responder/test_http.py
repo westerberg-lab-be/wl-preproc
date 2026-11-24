@@ -2154,3 +2154,85 @@ def test_a_cursor_int_cannot_convert_is_a_422_not_a_dropped_connection(path, que
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# -- PUT /positions (design spec `2026-11-24-montages-design.md` section 4.1) ----------------------------------------
+
+_POSITIONS_BODY = {"subject": "s1", "session_datetime": "2027-06-01T09:00:00Z", "positions_seq": 4,
+                   "positions": [{"serial": "19011110001", "insertion_number": 1,
+                                  "inserted_at": "2027-06-01T09:00:00Z"}]}
+
+
+@contextlib.contextmanager
+def _positions_server(positions_fn):
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(TOKEN, _health_ok, _unused, positions_fn=positions_fn))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_put_positions_answers_200_with_the_seq():
+    seen = []
+
+    def positions(request):
+        seen.append(request)
+        return {"positions_seq": request.positions_seq, "changed": True}
+
+    with _positions_server(positions) as base:
+        status, body = _request(f"{base}/positions", method="PUT", token=TOKEN, body=_POSITIONS_BODY)
+    assert (status, json.loads(body)) == (200, {"positions_seq": 4, "changed": True})
+    assert [r.positions_seq for r in seen] == [4]
+
+
+def test_a_positions_conflict_is_a_409_carrying_the_seq():
+    from wl_preproc.responder.handler import PositionsConflict
+
+    def positions(request):
+        raise PositionsConflict("positions_seq 4 is below the 5 this host holds", 5)
+
+    with _positions_server(positions) as base:
+        status, body = _request(f"{base}/positions", method="PUT", token=TOKEN, body=_POSITIONS_BODY)
+    assert (status, json.loads(body)) == (409, {"error": "positions_seq 4 is below the 5 this host holds",
+                                                "positions_seq": 5})
+
+
+def test_an_unlanded_session_is_a_404():
+    from wl_preproc.responder.handler import NotFoundError
+
+    def positions(request):
+        raise NotFoundError("no session of subject 's1' has landed here")
+
+    with _positions_server(positions) as base:
+        status, body = _request(f"{base}/positions", method="PUT", token=TOKEN, body=_POSITIONS_BODY)
+    assert (status, json.loads(body)) == (404, {"error": "no session of subject 's1' has landed here"})
+
+
+def test_a_malformed_positions_body_is_a_422():
+    twice = {**_POSITIONS_BODY, "positions": [_POSITIONS_BODY["positions"][0],
+                                              {**_POSITIONS_BODY["positions"][0], "serial": "2"}]}
+    with _positions_server(_unused) as base:
+        status, body = _request(f"{base}/positions", method="PUT", token=TOKEN, body=twice)
+        bad_field = {**_POSITIONS_BODY, "positions": [{**_POSITIONS_BODY["positions"][0], "ended_after_run": 1}]}
+        field_status, field_body = _request(f"{base}/positions", method="PUT", token=TOKEN, body=bad_field)
+    assert status == 422
+    assert "insertion_number 1 is given twice" in json.dumps(json.loads(body)["detail"])
+    assert field_status == 422
+    assert "ended_after_run" in json.dumps(json.loads(field_body)["detail"])
+    assert "insertion_number 1" in json.dumps(json.loads(field_body)["detail"])
+
+
+def test_put_elsewhere_is_still_the_foreign_verb_answer():
+    with _positions_server(_unused) as base:
+        status, body = _request(f"{base}/positionsx", method="PUT", token=TOKEN, body=_POSITIONS_BODY)
+        assert (status, json.loads(body)) == (404, {"error": "not found"})
+        assert _request(f"{base}/positions", method="GET", token=TOKEN)[0] == 405
+    with ThreadingHTTPServer(("127.0.0.1", 0), make_handler(TOKEN, _health_ok, _unused)) as httpd:
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            assert _request(f"http://127.0.0.1:{httpd.server_address[1]}/positions", method="PUT", token=TOKEN,
+                            body=_POSITIONS_BODY)[0] == 404
+        finally:
+            httpd.shutdown()

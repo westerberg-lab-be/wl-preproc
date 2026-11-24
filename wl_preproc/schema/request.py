@@ -58,7 +58,7 @@ from collections.abc import Callable
 
 import datajoint as dj
 
-from wl_preproc.schema import DEFAULT_PREFIX, core
+from wl_preproc.schema import DEFAULT_PREFIX, core, pipeline
 
 schema = dj.Schema()
 
@@ -199,6 +199,45 @@ class ActivationProbeRun(dj.Manual):
     probe_serial : varchar(32)
     -> core.Run
     """
+
+
+@schema
+class PositionSet(dj.Manual):
+    definition = """
+    # One session's probe positions as wl.works last sent them (`PUT /positions`;
+    # design spec 2026-11-24-montages-design.md section 4.1): stored as received,
+    # nothing derived. The highest `positions_seq` wins until the session's first
+    # accepted request. Key: (subject, session_datetime).
+    -> pipeline.Session
+    ---
+    positions_seq : int unsigned
+    received_at   : datetime(6)  # naive UTC, when this host stored the seq
+    """
+
+    class Position(dj.Part):
+        definition = """
+        # One insertion of one probe, in naive UTC wall time. `*_after_run` names
+        # a gap between runs (0 is the gap before the first run), as wl.works
+        # chose it. Key: (subject, session_datetime, insertion_number).
+        -> master
+        insertion_number : tinyint unsigned
+        ---
+        probe_serial : varchar(32)
+        inserted_at : datetime(6)
+        ended_at = null : datetime(6)
+        end_kind = null : enum('withdrawn','moved')
+        inserted_after_run = null : smallint
+        ended_after_run = null : smallint
+        """
+
+
+def first_accepted_request(session_key: dict) -> str | None:
+    """The `request_key` of the session's earliest `Activation` by `created_at`,
+    or None when no request has been accepted for it."""
+    rows = (Activation & {k: session_key[k] for k in ("subject", "session_datetime")}).to_dicts()
+    if not rows:
+        return None
+    return min(rows, key=lambda r: (r["created_at"], r["montage_id"], r["activation_id"]))["request_key"]
 
 
 def selection_hash(task_type: str, run_numbers: list[int] | tuple[int, ...]) -> str:
