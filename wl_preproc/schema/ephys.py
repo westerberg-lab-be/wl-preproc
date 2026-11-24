@@ -671,7 +671,9 @@ def link_insertions(session_key: dict) -> int:
     spans a move joins both insertions. It is linked only when the census
     placed the serial's sites -- `ProbeInsertion` needs a `Probe`, and
     `SegmentConfig` a config. A position that covers no run has no time and
-    links nothing. The insertion's trajectory and aim come from the latest
+    links nothing, and so does a report with no placed position. A timed
+    position that overlaps no segment of its serial still creates a
+    `ProbeInsertion`, with no `SegmentConfig` rows. The insertion's trajectory and aim come from the latest
     `InsertionReport` for its number, when there is one.
 
     **It takes back only links it could have made.** An insertion numbered by

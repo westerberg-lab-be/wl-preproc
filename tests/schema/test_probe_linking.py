@@ -241,3 +241,39 @@ def test_an_insertion_no_report_and_no_position_made_is_left_alone(daemon_module
     assert _links(key) == {1: (serial, None, None, _recorded(key, serial)),
                            5: (serial, None, None, {})}
     assert not [error for error in report["errors"] if key["subject"] in error]
+
+
+def test_a_move_across_a_restart_links_each_insertion_only_the_files_its_position_overlaps(
+        daemon_module, prefix, tmp_path_factory):
+    """The restart is inside run 2, which starts 0.001 s after run 1 ends (9 s)
+    and spans both files: position 1 (run 1) overlaps the first file only, so
+    the second, starting at 11.5 s, stays unlinked from it; position 2 (run 2)
+    overlaps both."""
+    key, serial = _landed(tmp_path_factory, spikeglx_restart={**RESTART, "probe_bank": 1})
+    daemon_module.run_once(prefix=prefix)
+    put(key, [_position(serial, 1, before_t0(key), ended_at=before_t0(key, 0), end_kind="moved", ended_after_run=1),
+              _position(serial, 2, before_t0(key, 0), inserted_after_run=1)], prefix=prefix)
+    daemon_module.run_once(prefix=prefix)
+
+    first, second = sorted(_recorded(key, serial))  # file names sort in time order
+    links = _links(key)
+    assert set(links[1][3]) == {first}
+    assert set(links[2][3]) == {first, second}
+
+
+def test_a_position_moved_to_an_unrecorded_serial_takes_its_link_back(daemon_module, prefix, tmp_path_factory):
+    from wl_preproc.schema import core
+
+    key, serial = _landed(tmp_path_factory)
+    daemon_module.run_once(prefix=prefix)
+    put(key, [_position(serial, 1, before_t0(key))], seq=1, prefix=prefix)
+    daemon_module.run_once(prefix=prefix)
+    assert set(_links(key)) == {1}
+
+    stranger = new_serial()
+    put(key, [_position(stranger, 1, before_t0(key))], seq=2, prefix=prefix)
+    report = daemon_module.run_once(prefix=prefix)
+
+    assert (core.PlacedPosition & key).fetch1("probe_serial") == stranger
+    assert _links(key) == {}
+    assert not [error for error in report["errors"] if key["subject"] in error]
