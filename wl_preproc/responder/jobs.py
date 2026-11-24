@@ -120,6 +120,7 @@ import math
 from wl_preproc.contracts.protocol import JobRequest, MontageBoundary, ProbeEntry, RunEntry
 from wl_preproc.events import agreement
 from wl_preproc.ingest import landing
+from wl_preproc.listing import order
 from wl_preproc.schema import DEFAULT_PREFIX, core, pipeline
 from wl_preproc.schema import request as schema_request
 
@@ -255,6 +256,19 @@ def _run_numbers(value, *, name: str) -> list[int]:
     return value
 
 
+def _ends_before_start(run: dict) -> bool:
+    return order.ends_before_start(run["run_start_time"], run["run_stop_time"])
+
+
+def _left_out(run: dict) -> str:
+    """The run as `GET /sessions` names it when it leaves the run out."""
+    return order.run_message(run["run_number"], run["run_start_time"], run["run_stop_time"], where="listing")
+
+
+def _cannot_be_requested(run: dict) -> str:
+    return f"{_left_out(run)}; it cannot be requested"
+
+
 def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], run_numbers: list[int],
                 canonical: bool) -> tuple[list[int], list[dict]]:
     """The file's runs, and the `core.RunAssertion` rows to record, after
@@ -264,7 +278,12 @@ def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], 
 
     A canonical holds every measured run whose start lies in its montage's
     window, and each must be asserted here; a derivative holds the runs it
-    names, each measured, in the window, and asserted here or before."""
+    names, each measured, in the window, and asserted here or before.
+
+    **A run that ends before it starts is in neither** (design spec
+    `2026-11-24-wl-works-requests-design.md` section 4.5): `GET /sessions`
+    leaves it out, so wl.works can never assert it, and a canonical need not.
+    Asserting or naming one is a 422 that names it and both its times."""
     measured = {row["run_number"]: row for row in (core.Run & session_key).to_dicts()}
     if not measured:
         raise ValueError(
@@ -290,6 +309,8 @@ def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], 
         run = measured.get(number)
         if run is None:
             raise ValueError(f"run {number} is not a measured run of this session; {_REBUILD}")
+        if _ends_before_start(run):
+            raise ValueError(_cannot_be_requested(run))
         for end, asserted_s, measured_s in (("start", entry.start_s, run["run_start_time"]),
                                             ("end", entry.end_s, run["run_stop_time"])):
             if abs(asserted_s - measured_s) > agreement.RUN_AGREEMENT_TOLERANCE_S:
@@ -307,10 +328,15 @@ def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], 
             if works_run_id == row["works_run_id"] and number != row["run_number"]:
                 raise RunIdConflict(f"works_run_id {works_run_id!r} is recorded for run {number}; this request "
                                     f"names it for run {row['run_number']}")
-    window = [number for number, run in sorted(measured.items())
-              if montage_row["start_s"] <= run["run_start_time"] < montage_row["end_s"]]
+    in_window = [number for number, run in sorted(measured.items())
+                 if montage_row["start_s"] <= run["run_start_time"] < montage_row["end_s"]]
+    window = [number for number in in_window if not _ends_before_start(measured[number])]
     bounds = f"montage {montage_row['montage_id']}'s window [{montage_row['start_s']}, {montage_row['end_s']})"
     if canonical:
+        if not window and in_window:
+            # Review focus 5: refused, naming them, never an empty file.
+            raise ValueError(f"{bounds} holds no run that can be requested: "
+                             + "; ".join(_left_out(measured[number]) for number in in_window))
         if not window:
             raise ValueError(f"{bounds} holds no measured run; {_REBUILD}")
         missing = [number for number in window if number not in by_number]
@@ -319,6 +345,9 @@ def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], 
                              f"{_REBUILD}")
         return window, rows
     named = sorted(set(run_numbers))
+    for number in named:
+        if number in measured and _ends_before_start(measured[number]):
+            raise ValueError(_cannot_be_requested(measured[number]))
     for problem, numbers in (("are not measured runs of this session", [n for n in named if n not in measured]),
                              (f"outside {bounds}", [n for n in named if n in measured and n not in window]),
                              ("asserted neither in metadata.runs nor before",

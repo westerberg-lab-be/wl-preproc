@@ -227,6 +227,64 @@ def test_each_file_reads_its_own_requests_marks(activation, prefix, tmp_path_fac
     assert before[:2] == ([True, False], ["eye lost", ""])
 
 
+def test_the_file_leaves_out_what_ends_before_it_starts(activation, prefix, tmp_path_factory):
+    """Design spec `2026-11-24-wl-works-requests-design.md` section 4.5: for
+    one build run 2, run 1's block and a SpikeGLX file end before they start,
+    written into `core` after the session landed, and restored after. A
+    canonical asserting run 1 alone is accepted, and its file holds none of
+    the three and names each in its notes."""
+    from pynwb import NWBHDF5IO
+
+    from wl_preproc.nwb.build import build
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import core
+
+    session_key, _key, runs = activation
+    first, second = sorted(runs, key=lambda r: r["run_number"])
+    run = (core.Run & {**session_key, "run_number": second["run_number"]}).fetch1()
+    (block,) = [(core.BlockTime & {**session_key, "block_id": row["block_id"]}).fetch1()
+                for row in core.measured_blocks(session_key) if first["start_s"] <= row["start_s"] <= first["end_s"]]
+    ohdpi = (core.Segment & {**session_key, "system": "ohdpi"}).fetch1()
+    segment = {**ohdpi, "system": "spikeglx", "segment_id": "run_g0/run_g0_t0.imec0.ap.bin",
+               "start_s": first["start_s"] + 1.0, "end_s": first["start_s"] + 0.5}
+    core.AcquisitionSystem.insert1({**session_key, "system": "spikeglx"})
+    core.Segment.insert1(segment, allow_direct_insert=True)
+    core.Run.update1({**run, "run_stop_time": run["run_start_time"] - 0.25})
+    core.BlockTime.update1({**block, "stop_s": block["start_s"] - 0.5})
+    montage = {**_montage(runs), "montage_id": 7}
+    try:
+        key = accept(_request(session_key, "nwbstep1-reversed", montage, [first]), prefix=prefix)
+        result = build(key, tmp_path_factory.mktemp("nwb-reversed"))
+        assert result.status == "written", (result.reason, result.findings)
+        with NWBHDF5IO(str(result.path), "r") as handle:
+            nwb = handle.read()
+            run_numbers = nwb.intervals["runs"].to_dataframe()["run_number"].tolist()
+            blocks = ([] if "blocks" not in nwb.intervals
+                      else nwb.intervals["blocks"].to_dataframe()["block_number"].tolist())
+            trial_blocks = nwb.trials.to_dataframe()["block_id"].tolist()
+            files = nwb.processing["timebase"]["segments"].to_dataframe()["file_path"].tolist()
+    finally:
+        core.BlockTime.update1(block)
+        core.Run.update1(run)
+        (core.Segment & {name: segment[name] for name in core.Segment.primary_key}).delete_quick()
+        (core.AcquisitionSystem & {**session_key, "system": "spikeglx"}).delete_quick()
+        _forget_request(session_key, 7, "nwbstep1-reversed")
+    assert run_numbers == [first["run_number"]]
+    assert block["block_id"] not in blocks and block["block_id"] not in trial_blocks
+    assert trial_blocks and set(trial_blocks) == {-1}
+    assert segment["segment_id"] not in files and ohdpi["segment_id"] in files
+    assert [described["blocks"] for described in result.description["runs"]] == [[]]
+    left_out = [note for note in result.description["notes"] if note.endswith("left out of this file")]
+    assert left_out == [
+        f"file {segment['segment_id']} ends at {segment['end_s']:.3f} s, before its start at "
+        f"{segment['start_s']:.3f} s: left out of this file",
+        f"run {run['run_number']} ends at {run['run_start_time'] - 0.25:.3f} s, before its start at "
+        f"{run['run_start_time']:.3f} s: left out of this file",
+        f"block {block['block_id']} of run {first['run_number']} ends at {block['start_s'] - 0.5:.3f} s, before "
+        f"its start at {block['start_s']:.3f} s: left out of this file",
+    ]
+
+
 def test_a_synthetic_sessions_clock_falls_back_to_the_manifest(activation, built):
     """Section 4.2's fallback, end to end: the synthetic sync box's barcodes
     are counters from 1,000,000, not seconds since 2020, so they disagree

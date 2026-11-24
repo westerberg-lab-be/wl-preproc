@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from wl_preproc.eye.span import eye_span
+from wl_preproc.listing import order
 from wl_preproc.nwb.describe import task_name
 from wl_preproc.nwb.eye_events import MEASUREMENTS
 from wl_preproc.nwb.trim import BlockSet
@@ -74,6 +75,11 @@ class Gathered:
     # NI recorded (design spec `2026-10-18-training-records-and-backup-clock-
     # design.md`, amendments 57, 58 and 63). Empty otherwise. See `_span_notes`.
     span_notes: list[str] = dataclasses.field(default_factory=list)
+    # Each run, block and SpikeGLX file the file leaves out because it ends
+    # before it starts, with both its times, as `GET /sessions` leaves it out
+    # of the listing (design spec `2026-11-24-wl-works-requests-design.md`
+    # section 4.5). See `_order_notes`.
+    order_notes: list[str] = dataclasses.field(default_factory=list)
 
 
 def _run_set(activation_key: dict, session_key: dict) -> list[dict]:
@@ -90,8 +96,18 @@ def _run_set(activation_key: dict, session_key: dict) -> list[dict]:
              "end_s": float(row["run_stop_time"]), "task_type": row["task_type"], "task": tasks.get(row["run_number"]),
              "works_run_id": works.get(row["run_number"]), "closed": bool(row["closed"]),
              "calibration": calibrations.get(row["run_number"])}
-            for row in (core.Run & session_key).to_dicts() if row["run_number"] in numbers]
+            for row in (core.Run & session_key).to_dicts()
+            if row["run_number"] in numbers and not _reversed_run(row)]
     return sorted(rows, key=lambda row: row["start_s"])
+
+
+def _reversed_run(row: dict) -> bool:
+    return order.ends_before_start(row["run_start_time"], row["run_stop_time"])
+
+
+def _reversed(row: dict, end: str = "stop_s") -> bool:
+    """A measured block (`stop_s`) or a segment (`end_s`) that ends before it starts."""
+    return order.ends_before_start(row["start_s"], row[end])
 
 
 def _request_marks(activation_key: dict) -> dict[int, tuple[bool, str]]:
@@ -279,21 +295,23 @@ def _runs(run_rows: list[dict], session_key: dict) -> list[dict]:
 
 def _blocks(run_rows: list[dict], session_key: dict) -> list[dict]:
     """The measured blocks inside the file's runs (`core.BlockTime`), each with
-    its run, its order there, its block type and whether it closed."""
+    its run, its order there, its block type and whether it closed. A block
+    that ends before it starts is left out, and `block_in_run` counts only the
+    blocks the file holds, as the listing numbers them (`_order_notes`)."""
     from wl_preproc.events.runs import run_of
     from wl_preproc.schema import core, pipeline
 
     attributes: dict = {}
     for row in (pipeline.trial.Block.Attribute & session_key).to_dicts():
         attributes.setdefault(row["block_id"], {})[row["attribute_name"]] = row["attribute_value"]
-    out, order = [], {}
+    out, in_run = [], {}
     for row in sorted(core.measured_blocks(session_key), key=lambda row: row["start_s"]):
         run_number = run_of(row["start_s"], run_rows)
-        if run_number is None:
+        if run_number is None or _reversed(row):
             continue
-        order[run_number] = order.get(run_number, 0) + 1
+        in_run[run_number] = in_run.get(run_number, 0) + 1
         found = attributes.get(row["block_id"], {})
-        out.append({"block_number": row["block_id"], "run_number": run_number, "block_in_run": order[run_number],
+        out.append({"block_number": row["block_id"], "run_number": run_number, "block_in_run": in_run[run_number],
                     "block_type": found.get("block_type"), "start_s": float(row["start_s"]),
                     "stop_s": float(row["stop_s"]),
                     "closed": None if "closed" not in found else found["closed"] == "1"})
@@ -302,11 +320,14 @@ def _blocks(run_rows: list[dict], session_key: dict) -> list[dict]:
 
 def _trials(run_rows: list[dict], session_key: dict) -> list[dict]:
     """The trials whose start lies in one of the file's runs, each with its
-    run and its measured block."""
+    run and its measured block: none, when the file leaves its block out
+    because it ends before it starts."""
     from wl_preproc.events.runs import run_of
     from wl_preproc.schema import core, coverage, pipeline
 
-    block_of = {row["trial_id"]: row["block_id"] for row in (pipeline.trial.BlockTrial & session_key).to_dicts()}
+    left_out = {row["block_id"] for row in core.measured_blocks(session_key) if _reversed(row)}
+    block_of = {row["trial_id"]: row["block_id"] for row in (pipeline.trial.BlockTrial & session_key).to_dicts()
+                if row["block_id"] not in left_out}
     cover = _coverage(coverage.TrialCoverage, "trial_id", session_key)
     trials = []
     for row in core.measured_trials(session_key):
@@ -400,12 +421,53 @@ def _outside_runs_notes(key: dict, session_key: dict, role: str) -> list[str]:
                    if montage["start_s"] <= row["start_s"] < montage["end_s"] and run_of(row["start_s"], runs) is None)
 
     trials = outside(core.measured_trials(session_key))
-    blocks = outside(core.measured_blocks(session_key))
+    # A block that ends before it starts is named in `_order_notes` instead,
+    # as the listing flags it `ends_before_start`, not `block_outside_runs`.
+    blocks = outside([row for row in core.measured_blocks(session_key) if not _reversed(row)])
     if not trials and not blocks:
         return []
     return [f"{trials} trial(s) and {blocks} block(s) start in montage {key['montage_id']}'s window but in no "
             "measured run, so the file leaves them out: their run's RUN_START was lost, or they were strobed "
             "outside a run"]
+
+
+def _order_notes(key: dict, session_key: dict, role: str, run_rows: list[dict]) -> list[str]:
+    """Each run, block and SpikeGLX file the file leaves out because it ends
+    before it starts, named with both its times (design spec
+    `2026-11-24-wl-works-requests-design.md` section 4.5): every such file of
+    the session, since the file's `timebase/segments` places every file; each
+    such run the file would otherwise hold (its run set's, and in a canonical
+    those whose start lies in its montage's window); and each such block
+    whose start lies in one of the file's runs or, in a canonical, in its
+    window. Files by start, runs by number, blocks by start, as the listing
+    orders its flags."""
+    from wl_preproc.events.runs import run_of
+    from wl_preproc.schema import core, request
+
+    notes = [order.segment_message(row["segment_id"], row["start_s"], row["end_s"], where="file")
+             for row in sorted((core.Segment & session_key & {"system": "spikeglx"}).to_dicts(),
+                               key=lambda row: (row["start_s"], row["segment_id"]))
+             if _reversed(row, "end_s")]
+    if role == "canonical":
+        montage = (core.Montage & {name: key[name] for name in ("subject", "session_datetime", "montage_id")}).fetch1()
+
+        def in_window(time_s: float) -> bool:
+            return montage["start_s"] <= time_s < montage["end_s"]
+    else:
+        def in_window(time_s: float) -> bool:
+            return False
+    numbers = {int(number) for number in (request.ActivationRun & key).to_arrays("run_number")}
+    notes += [order.run_message(row["run_number"], row["run_start_time"], row["run_stop_time"], where="file")
+              for row in (core.Run & session_key).to_dicts(order_by="run_number")
+              if _reversed_run(row) and (row["run_number"] in numbers or in_window(row["run_start_time"]))]
+    for row in sorted(core.measured_blocks(session_key), key=lambda row: (row["start_s"], row["block_id"])):
+        if not _reversed(row):
+            continue
+        run_number = run_of(row["start_s"], run_rows)
+        if run_number is not None or in_window(row["start_s"]):
+            notes.append(order.block_message(row["block_id"], run_number, float(row["start_s"]),
+                                             float(row["stop_s"]), where="file"))
+    return notes
 
 
 def _conditions(trials: list[dict], events: list[dict], runs: list[dict], record,
@@ -464,7 +526,8 @@ def _timebase(session_key: dict, provenance: dict, clock: dict, session_clock: s
             row[field] = np.nan if row[field] is None else float(row[field])
     segments = [{**{field: row[field] for field in ("system", "first_sample", "offset_s", "start_s", "end_s", "n_samples")},
                  "file_path": row["segment_id"]}
-                for row in (core.Segment & session_key).to_dicts()]
+                for row in (core.Segment & session_key).to_dicts()
+                if not (row["system"] == "spikeglx" and _reversed(row, "end_s"))]
     return {
         "provenance": {field: (np.nan if provenance[field] is None else provenance[field])
                        for field in ("tier", "n_systems_aligned", "n_segments", "n_rejected_segments",
@@ -785,7 +848,8 @@ def _probes(key: dict, session_key: dict, run_rows: list[dict]) -> tuple[list[di
     segments = {
         row["segment_id"]: row
         for row in (core.Segment & session_key & {"system": "spikeglx"}).to_dicts()
-        if any(row["start_s"] < run["end_s"] and row["end_s"] > run["start_s"] for run in run_rows)
+        if not _reversed(row, "end_s")
+        and any(row["start_s"] < run["end_s"] and row["end_s"] > run["start_s"] for run in run_rows)
     }
     parts = [{**part, "problem": ephys.probe_problem(part["problem"])}
              for part in (ephys.ProbeCensus.Probe & session_key).to_dicts(order_by=("segment_id", "stream"))
@@ -951,4 +1015,5 @@ def gather(activation_key: dict) -> Gathered:
         rig_record=rig_record,
         rig_tables=rig_tables,
         span_notes=[*_span_notes(session_key, provenance[0]), *_copy_notes(session_key)],
+        order_notes=_order_notes(key, session_key, activation["role"], run_rows),
     )

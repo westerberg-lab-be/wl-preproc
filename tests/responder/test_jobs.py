@@ -1307,3 +1307,60 @@ def test_a_replacement_of_a_refused_canonical_is_accepted(landed_session, prefix
     row = (schema_request.Activation & {**session_key, "montage_id": 0, "activation_id": new_id}).fetch1()
     assert (row["role"], row["supersedes"]) == ("canonical", first["activation_id"])
     assert new_id == first["activation_id"] + 1
+
+
+# --- What ends before it starts (design spec `2026-11-24-wl-works-requests-design.md`
+# section 4.5): `GET /sessions` leaves such a run out, so wl.works can never assert it. ---------
+
+# Run 2 ends before it starts; its start lies in montage 0's window [0, 12).
+_REVERSED = [(1, 0.0, 4.0), (2, 11.0, 5.0), (3, 13.0, 16.0)]
+_RUN_2_LEFT_OUT = ("run 2 ends at 5.000 s, before its start at 11.000 s: left out of this listing; "
+                   "it cannot be requested")
+
+
+def test_a_canonical_need_not_assert_a_reversed_run(landed_session, prefix):
+    """A canonical asserting the window's other runs is accepted, and its
+    file's runs leave run 2 out."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+
+    key = _landed_with_runs(landed_session, "jbrev01", 1, runs=_REVERSED)
+    activation = accept(_runs_job(key, "jbrev01-k1", runs=[_REVERSED[0], _REVERSED[2]], probe_runs={_SERIAL: [1]}),
+                        prefix=prefix)
+    assert _run_rows(schema_request.ActivationRun, activation) == [(1,)]
+
+
+@pytest.mark.parametrize("subject, runs, selection", [
+    # Asserted in metadata.runs, with the times the listing would have given.
+    ("jbrev02", _asserted(_REVERSED), {"probe_runs": {_SERIAL: [1]}}),
+    # Named in a derivative's run_numbers, and not asserted.
+    ("jbrev03", _asserted([_REVERSED[0], _REVERSED[2]]), {"run_numbers": [2]}),
+])
+def test_naming_a_reversed_run_is_a_422(landed_session, prefix, subject, runs, selection):
+    """The 422 names the run and both its times, and nothing is written."""
+    from wl_preproc.schema import core
+    from wl_preproc.schema import request as schema_request
+
+    key = _landed_with_runs(landed_session, subject, 2, runs=_REVERSED)
+    body = _job_body(subject, key["session_datetime"], f"{subject}-k1", runs=runs, **selection)
+    body["metadata"]["probes"] = [{"serial": _SERIAL, "insertion_number": 1}]
+    status, answer = _post_job(body, prefix=prefix)
+    assert status == 422, answer
+    assert _RUN_2_LEFT_OUT in json.dumps(answer)
+    assert (len(core.RunAssertion & key), len(schema_request.Activation & key)) == (0, 0)
+
+
+def test_a_window_of_only_reversed_runs_is_a_422(landed_session, prefix):
+    """Review focus 5: a canonical whose window holds only runs that end
+    before they start is refused, naming them; it is not an empty file."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+
+    measured = [(1, 4.0, 0.0), (2, 11.0, 5.0), (3, 13.0, 16.0)]
+    key = _landed_with_runs(landed_session, "jbrev04", 4, runs=measured)
+    expect = ("montage 0's window [0.0, 12.0) holds no run that can be requested: "
+              "run 1 ends at 0.000 s, before its start at 4.000 s: left out of this listing; "
+              "run 2 ends at 5.000 s, before its start at 11.000 s: left out of this listing")
+    with pytest.raises(ValueError, match=re.escape(expect)):
+        accept(_runs_job(key, "jbrev04-k1", runs=[measured[2]], probe_runs={_SERIAL: []}), prefix=prefix)
+    assert not schema_request.Activation & key
