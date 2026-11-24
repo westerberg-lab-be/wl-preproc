@@ -158,6 +158,75 @@ def test_a_stub_nickname_is_not_stated(activation, tmp_path_factory, stored):
     assert nickname is None
 
 
+def _marked_request(key, idempotency_key, montage, runs, marks, **selection):
+    """`_request`, its runs carrying `marks` ({run_number: reason})."""
+    marked = [{**run, "marked_bad": True, "bad_reason": marks[run["run_number"]]} if run["run_number"] in marks
+              else run for run in runs]
+    request = _request(key, idempotency_key, montage, marked)
+    request.selection.update(selection)
+    return request
+
+
+def _marks_of(result):
+    from pynwb import NWBHDF5IO
+
+    assert result.status == "written", result.findings
+    with NWBHDF5IO(str(result.path), "r") as handle:
+        stored = handle.read().intervals["runs"].to_dataframe()
+    described = [(run["run_number"], run["marked_bad"], run["bad_reason"]) for run in result.description["runs"]]
+    return stored["marked_bad"].tolist(), stored["bad_reason"].tolist(), described
+
+
+def _forget_request(session_key, montage_id, *request_keys):
+    """Drop what a test's own requests left, so the stage tests that count
+    the session's activations are unmoved: its montage (and with it its
+    activations) and the requests."""
+    from wl_preproc.schema import core, request
+
+    (core.Montage & {**session_key, "montage_id": montage_id}).delete(prompt=False)
+    for request_key in request_keys:
+        (request.Request & {"idempotency_key": request_key}).delete(prompt=False)
+
+
+def test_a_marked_run_is_marked_in_its_file(activation, prefix, tmp_path_factory):
+    """Design spec `2026-11-24-wl-works-requests-design.md` section 4.1: the
+    file's runs table and description carry the marks of its own request."""
+    from wl_preproc.nwb.build import build
+    from wl_preproc.responder.jobs import accept
+
+    session_key, _key, runs = activation
+    montage = {**_montage(runs), "montage_id": 5}
+    key = accept(_marked_request(session_key, "nwbstep1-marked", montage, runs, {1: "eye lost"}), prefix=prefix)
+    try:
+        flags, reasons, described = _marks_of(build(key, tmp_path_factory.mktemp("nwb-marked")))
+    finally:
+        _forget_request(session_key, 5, "nwbstep1-marked")
+    assert (flags, reasons) == ([True, False], ["eye lost", ""])
+    assert described == [(1, True, "eye lost"), (2, False, None)]
+
+
+def test_each_file_reads_its_own_requests_marks(activation, prefix, tmp_path_factory):
+    """Review focus 2: the replacement, sent unmarked, builds a file reading
+    none; the first file's marks are unchanged."""
+    from wl_preproc.nwb.build import build
+    from wl_preproc.responder.jobs import accept
+
+    session_key, _key, runs = activation
+    montage = {**_montage(runs), "montage_id": 6}
+    first = accept(_marked_request(session_key, "nwbstep1-marks-first", montage, runs, {1: "eye lost"}),
+                   prefix=prefix)
+    second = accept(_marked_request(session_key, "nwbstep1-marks-second", montage, runs, {}, role="canonical",
+                                    supersedes_activation_id=first["activation_id"]), prefix=prefix)
+    try:
+        assert second["activation_id"] != first["activation_id"]
+        after = _marks_of(build(second, tmp_path_factory.mktemp("nwb-marks-second")))
+        before = _marks_of(build(first, tmp_path_factory.mktemp("nwb-marks-first")))
+    finally:
+        _forget_request(session_key, 6, "nwbstep1-marks-first", "nwbstep1-marks-second")
+    assert after[:2] == ([False, False], ["", ""])
+    assert before[:2] == ([True, False], ["eye lost", ""])
+
+
 def test_a_synthetic_sessions_clock_falls_back_to_the_manifest(activation, built):
     """Section 4.2's fallback, end to end: the synthetic sync box's barcodes
     are counters from 1,000,000, not seconds since 2020, so they disagree

@@ -53,7 +53,12 @@ RUN_COLUMNS: dict[str, tuple[str, str]] = {
                        "draw with equal ends is the whole turn ('' if none)."),
     "generated": ("generated", "The conditions each block type's factorial generated, as JSON text ('[]' if no "
                                "block type of the run makes any, '' if its row does not say)."),
+    # Not the rig's: wl.works' request's, written for every run (`MARK_FIELDS`).
+    "marked_bad": ("marked_bad", "Whether wl.works' record marks the run bad for behaviour, as the request "
+                                 "stated it."),
+    "bad_reason": ("bad_reason", "Why, as wl.works' record gives it ('' if not marked)."),
 }
+MARK_FIELDS = ("marked_bad", "bad_reason")
 BLOCK_COLUMNS: dict[str, str] = {
     "ended": "How the block ended: rule, time, fall_back, next, back, run_time or run ('' if not recorded).",
     "ended_by": "Who moved the run on or back, by kind only: box or member ('' for nobody, or if not recorded).",
@@ -124,7 +129,9 @@ def run_record(runs: list[dict], blocks: list[dict], rig_runs: RigRuns | None,
         run["plan"] = None if rig is None else rig.plan
         run["end_reason"] = None if rig is None else rig.end_reason
         run["record"] = {column: _run_value(field, rig) for field, (column, _) in RUN_COLUMNS.items()
-                         if field in carried}
+                         if field in carried and field not in MARK_FIELDS}
+        run["record"]["marked_bad"] = bool(run.get("marked_bad", False))
+        run["record"]["bad_reason"] = run.get("bad_reason") or ""
         if rig is None:
             continue
         number = run["run_number"]

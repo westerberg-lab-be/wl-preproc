@@ -255,6 +255,23 @@ def test_a_description_without_a_nickname_reads():
     assert NwbDescription.model_validate(out).subject.nickname is None
 
 
+def test_a_description_without_marks_reads():
+    """`marked_bad` and `bad_reason` were added within version 3: a run
+    without them validates with the defaults, and a marked one says why."""
+    from wl_preproc.contracts.nwb_description import NwbDescription
+    from wl_preproc.nwb.describe import describe
+
+    out = describe(_gathered(), status="written", n_critical=0, checksums=[CHECKSUM], built_at=BUILT_AT)
+    assert (out["runs"][0]["marked_bad"], out["runs"][0]["bad_reason"]) == (False, None)
+    for name in ("marked_bad", "bad_reason"):
+        out["runs"][0].pop(name)
+    run = NwbDescription.model_validate(out).runs[0]
+    assert (run.marked_bad, run.bad_reason) == (False, None)
+    out = describe(_gathered(runs=({**RUN, "marked_bad": True, "bad_reason": "eye lost"},)), status="written",
+                   n_critical=0, checksums=[CHECKSUM], built_at=BUILT_AT)
+    assert (out["runs"][0]["marked_bad"], out["runs"][0]["bad_reason"]) == (True, "eye lost")
+
+
 def test_a_run_says_its_plan_and_end_reason_and_a_block_how_it_ended():
     """Design spec `2026-11-07-rig-record-fields-design.md` section 8: within
     version 3, each defaulted to null where the rig's record says none."""

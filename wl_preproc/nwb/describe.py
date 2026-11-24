@@ -142,6 +142,8 @@ def describe(data, *, status: str, n_critical: int, checksums: list[dict], built
             "calibration": run.get("calibration"),
             "plan": run.get("plan"),
             "end_reason": run.get("end_reason"),
+            "marked_bad": bool(run.get("marked_bad", False)),
+            "bad_reason": (run.get("bad_reason") or None) if run.get("marked_bad") else None,
         } for run in data.runs],
         "quality": {
             "timing_tier": session["timing_tier"],

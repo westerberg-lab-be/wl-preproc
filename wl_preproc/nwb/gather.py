@@ -94,6 +94,22 @@ def _run_set(activation_key: dict, session_key: dict) -> list[dict]:
     return sorted(rows, key=lambda row: row["start_s"])
 
 
+def _request_marks(activation_key: dict) -> dict[int, tuple[bool, str]]:
+    """Each run wl.works' job request marks bad, `{run_number: (marked_bad,
+    reason)}`, read from the stored request this activation came from (its
+    `request_key`), so each file states its own request's marks (design spec
+    `2026-11-24-wl-works-requests-design.md` section 4.1). A payload stored
+    before the marks existed, or one holding no runs, reads as none; a run
+    the request does not list is `(False, "")` at the caller."""
+    from wl_preproc.schema import request
+
+    request_key = (request.Activation & activation_key).fetch1("request_key")
+    payload = (request.Request & {"idempotency_key": request_key}).fetch1("payload") or {}
+    runs = (payload.get("metadata") or {}).get("runs") or []
+    return {int(run["run_number"]): (bool(run.get("marked_bad", False)), run.get("bad_reason") or "")
+            for run in runs}
+
+
 def _rig_record(session_key: dict, run_numbers: set[int]) -> dict | None:
     """What wl-xcon's record says the session was (`core.SessionRecord`,
     `core.AcceptedWarning`), and its training records (`core.ParameterChange`,
@@ -844,6 +860,9 @@ def gather(activation_key: dict) -> Gathered:
     run_rows = _run_set(key, session_key)
     if not run_rows:
         raise Refused(f"no runs in the {activation['role']} activation's run set")
+    marks = _request_marks(key)
+    for row in run_rows:
+        row["marked_bad"], row["bad_reason"] = marks.get(row["run_number"], (False, ""))
     extent = BlockSet.of(run_rows)
     probes, probe_notes = _probes(key, session_key, run_rows)
     sorted_runs: dict[str, list[int]] = {}
