@@ -366,3 +366,41 @@ ends before it starts, for all three callers.
 - [ ] **Step 3:** Edit the documents.
 - [ ] **Step 4:** Run `tests/responder/test_protocol_document.py`. Expected: PASS.
 - [ ] **Step 5: Commit** `docs: the wl.works-facing piece's records`.
+
+## Added during the build
+
+Tasks 9, 10 and 11 were added after the plan was written, by the controller's rulings P4, P5 and P7 (the
+ledger, `.superpowers/sdd/2026-11-24-wl-works-requests/progress.md`). **The executed order was 1-7, 9, 10, 11, 8**
+(ruling P6): the records last, so they describe everything. The briefs are in the same directory, as `task-9-brief.md`
+to `task-11-brief.md`; what follows is the delivered shape.
+
+### Task 9: Request bounds, and retries across versions (ruling P4; `0ef5001`)
+
+wl.works found that a retry of a request stored before a field was added is refused as key reuse: `accept()` stores
+`request.model_dump(mode="json")`, defaults included, and the retried body dumps with the new field's default.
+- `JobRequest.idempotency_key` is 1 to 64 characters (`request.Request.idempotency_key` is `varchar(64)`), a 422.
+- `schema/request.py::_reject_key_reuse`, and `submit`, `submit_replacement` and `submit_derivative`, take an optional
+  `read_stored_payload`, so the module imports no contract. `responder/jobs.py::_as_current_payload` re-reads the
+  stored payload through `JobRequest` (`model_validate`, then `model_dump(mode="json")`) before comparing, and
+  returns it as stored when the model refuses it. So a field *removed* since storing still makes an honest retry a 409.
+- Files: `contracts/protocol.py`, `schema/request.py`, `responder/jobs.py`, `docs/schemas/job_request.json`.
+
+### Task 10: t = 0's wall time, stored once and listed (ruling P5, the requester's choice of 2026-11-24; `2d45c5a`, `8934473`)
+
+- The new `dj.Computed` `timebase.ClockReference` (keyed on `SessionClock` and `pipeline.event.BehaviorRecording`)
+  stores `reference_time`, `reference_source` and `started_at_difference_s`, from the existing
+  `Clock.wall_reference`, once per session. The NWB build reads it, and waits ("waiting on ClockReference") where
+  it is not stored; the events stage's redo deletes it by cascade.
+- `SessionEntry.t0_datetime` (naive UTC, microseconds) and `t0_source` (`barcode`, `rig_clock`, `nidq_meta`,
+  `manifest`; null until stored), from the stored row. `session_listing.json` regenerated.
+- After the task's review (ruling P9), `wlpp nwb build` no longer takes `--nidq-timezone`; the re-time route is
+  written in `docs/ops/lab-host-protocol.md`.
+
+### Task 11: The rig as an actor (ruling P7, the requester's choices of 2026-11-24; `d8d1c3b`, `f69cbe6`)
+
+- `ListedTrainingRecords.pauses` counts pause rows whose `by_kind` is not `"system"` (null included); the new
+  `system_pauses: int = 0` counts those whose `by_kind` is `"system"`. `listing/entry.py` gathers both.
+- The texts that said "box or member" (`nwb/run_record.py`, `nwb/rig_record.py`, `schema/core.py`'s column
+  comments, the `ListedActor` docstring and its schema description) say "box, member or system (the rig itself)".
+- wl-xcon's build E's actor `{"kind": "system", "name": "display"}` is accepted as written. `session_listing.json`
+  regenerated.

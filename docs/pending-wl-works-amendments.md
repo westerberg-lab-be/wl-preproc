@@ -1,9 +1,92 @@
 # Amendments to wl-works
 
-**Twelve are outstanding: two opened 2026-08-22, one 2026-09-28, one 2026-09-29, two 2026-09-30, one 2026-10-01, one 2026-10-05, one 2026-10-14, one 2026-10-18, one 2026-11-07, one 2026-11-20.** The earlier two
+**Thirteen are outstanding: two opened 2026-08-22, one 2026-09-28, one 2026-09-29, two 2026-09-30, one 2026-10-01, one 2026-10-05, one 2026-10-14, one 2026-10-18, one 2026-11-07, one 2026-11-20, one 2026-11-24.** The earlier two
 batches are closed; their records are kept below, because
 [`specs/2026-08-12-wl-preproc-design.md`](superpowers/specs/2026-08-12-wl-preproc-design.md)
 §14 items 10–11 point at it and a reference that dead-ends teaches nothing.
+
+---
+
+# OPEN — the wl.works-facing piece: what a request may send, and what both listings now carry
+
+**Added by the wl.works-facing piece (2026-11-24).** Opened with
+[`specs/2026-11-24-wl-works-requests-design.md`](superpowers/specs/2026-11-24-wl-works-requests-design.md)
+(the requests agreed with wl.works, sessions wl-works-ea and wl-works-78, 2026-11-20 to 2026-11-24, in its Plan 20 §15;
+the requester's choices of 2026-11-24 for ordered times, `t0_datetime` and the rig as an actor). It is built for
+wl.works' plan 20b-1b, so that it can send every field in its first version and **pin at one merge of ours**.
+**Shipped at that merge**, not before. Three schema files change, and a copy vendored before the merge refuses
+what is new: **`docs/schemas/job_request.json`, `docs/schemas/session_listing.json` and
+`docs/schemas/nwb_description.json` must be taken at or after it.** `nwb_description` stays at version 3; every
+field below was added within a version, with a default, so a description or listing written before reads
+unchanged.
+
+**`POST /jobs`: `docs/schemas/job_request.json`**
+- **`metadata.runs[].marked_bad`** (boolean, default `false`) **and `bad_reason`** (string of at most 1000
+  characters, default null). They go together: a mark with no reason (empty or white space) or a reason with no
+  mark is a `422` naming the run. **Send null, not `""`, as the reason of an unmarked run.** The request keeps
+  them as received. The NWB file's runs table gains `marked_bad` and `bad_reason` columns, and its description
+  gains the same two fields on each run, from the file's own request; a later mark reaches a file through a
+  replacement, not by correcting it in place. A run the request does not list reads as not marked.
+- **`metadata.subject_details.nickname`** (1 to 64 characters, default null; longer or empty is a `422`). It is
+  stored as the animal's nickname and written into the file's subject, in `/general/subject/description`, and
+  the description's `subject.nickname`. A request without one leaves the stored one as it was. A changed
+  nickname does not correct a file already built; a replacement carries it.
+- **`metadata.experimenter` is at most 64 characters** (a `422`; it failed at the database before). Empty is
+  still accepted.
+- **`idempotency_key` is 1 to 64 characters** (a `422`). `wlw-act-` and a 36-character uuid is 44.
+- **A retry of a request stored before a field was added is the same request.** The stored payload is read
+  again through today's `JobRequest` before the comparison, so the new defaults are not a difference. A field
+  **removed** since storing still makes an honest retry a `409`, since today's model cannot read the stored
+  payload and the two are compared as stored. No field is removed here.
+- **Naming a run that ends before it starts is a `422`**, asserting it in `metadata.runs` or naming it in a
+  derivative's `run_numbers`: the message names the run and both its times. The listing leaves such a run out,
+  so a copy of the listing never holds one. **A canonical need not assert it**: it is left out of the runs the
+  montage's window requires; a window whose every run is of this kind is a `422`, never an empty file.
+
+**`GET /sessions` and `GET /nwb`: paging**
+- **`limit` may now be sent**: `?since=<cursor>&limit=<n>`, one positive integer with no upper bound; absent,
+  the whole page is returned as before. **Send `limit` only after this merge**: before it, a `limit` is a `422`.
+  Any other key, a repeat, or a malformed value is a `422` on both.
+- **The cursor** is the latest `change_seq` on the page, or `since` (0 without it) on an empty page. A page of
+  fewer than `limit` entries means caught up. Only the sessions or files on the page are built.
+- **`GET /nwb`'s order changed**: files are ordered by each file's latest `change_seq`; they were ordered by
+  activation key. An unpaged call returns the same files and the same `cursor`. A reader that took the order from the
+  key must sort.
+
+**`GET /sessions`: `docs/schemas/session_listing.json`**
+- **`ListedRun.task_hash`** (string or null): the content hash (`sha256:` and its digest) of the task file the
+  run ran, from the run's start row in wl-xcon's record; null where the rig named none or named a path. wl.works'
+  task pages key on it.
+- **A run, block or file that ends before it starts is left out of the entry and flagged.** The flag code is
+  `ends_before_start`; `ListedFlag` gains `segment_id` (string or null, beside `run_number` and `block_number`),
+  which names a file. Its message names the item and both times. **It is the one flag that means something was
+  withheld**; every other flag is a hint. Equal start and end is listed. The listed run, block and segment
+  models also refuse an end before a start, so a copy that validates takes the same check. The rest of the session is listed.
+- **`t0_datetime`** (naive UTC, microseconds, or null) **and `t0_source`** (`barcode`, `rig_clock`, `nidq_meta`
+  or `manifest`, or null): the wall-clock time of session t = 0, and where it came from. `manifest` is the
+  imprecise case, the manifest's `started_at` (what `session_datetime` is), taken when no other source falls
+  within 60 s of it. Both are null until the daemon stores them, and they are fixed then: the NWB file holds
+  the same value for every file built since. This is what lets a person's move time of day be placed between
+  runs. `wlpp nwb build` no longer takes `--nidq-timezone`; the re-time route is in `docs/ops/lab-host-protocol.md`.
+- **`training_records.system_pauses`** (integer, default 0): the rig's own pauses, sent when its display process
+  died. **`training_records.pauses` now counts a person's pauses only** (a pause row with no actor still counts as
+  a person's). A copy that summed or compared `pauses` over time sees it fall for a session with a rig pause.
+- **`ListedActor.kind` may be `system`** (the rig itself, by its process's name, no account), beside `box` and
+  `member`. wl-xcon's build E sends `{"kind": "system", "name": "display"}`, accepted as written (the requester,
+  2026-11-24). `kind` is a plain string in the schema, so no copy refuses it; a reader that names each kind
+  needs the new one.
+
+**`GET /nwb`: `docs/schemas/nwb_description.json`**
+- Each run gains `marked_bad` (boolean, default `false`) and `bad_reason` (string or null). `subject` gains
+  `nickname` (string or null).
+
+**When it ships**
+- **Every listed session is listed once more.** Each flag now carries `segment_id`, each run `task_hash`, each
+  session `t0_datetime`, `t0_source` and `system_pauses`, so each digest changes once.
+- **Every NWB file built before this stays as it is.** None is rebuilt for it, and none carries a mark or a
+  nickname unless a later request does.
+- **To tell wl.works at the merge:** `limit` may be sent; the new fields above; that `GET /nwb`'s order changed;
+  that an unmarked run's reason is null; and its plan 20b-1b's pin.
 
 ---
 
@@ -101,8 +184,10 @@ last run, SpikeGLX's NI keeps the time. **Shipped at 3b-1's merge**, not before.
 - **`rig_record_problem` flags also say a run row's new field that could not be read**, once per field per
   session ("2 run rows: `seed` is not a whole number or null, so it is read as none"), beside the run rows' other
   problems; the run is kept.
-- **A question:** should the listing's runs carry `plan` and `end_reason`? `ListedRun` refuses unknown fields,
-  so nothing is added until wl.works says yes. *wl.works' answer, 2026-11-07, its reading of its own specs and
+- **A question, closed 2026-11-24:** should the listing's runs carry `plan` and `end_reason`? `ListedRun` refuses
+  unknown fields, so nothing is added until wl.works says yes. **wl.works said on 2026-11-21 that it is not
+  needed, so nothing is added** (design spec `2026-11-24-wl-works-requests-design.md` §2.7). What follows is
+  the answer it gave on 2026-11-07, kept as it was. *wl.works' answer, 2026-11-07, its reading of its own specs and
   not its owner's ruling:* `end_reason` has a consumer (the January canonical-NWB spec's runs-by-probes grid,
   where wl-xcon's stop reason is a hint beside each run), and `plan` has none; its plan 20b-1, which reads the
   listing's runs, confirms or reverses this. Nothing is added until it does. That grid's "wl-xcon's stop reason"
