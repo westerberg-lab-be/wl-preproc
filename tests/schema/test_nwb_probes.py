@@ -42,7 +42,9 @@ def _canonical(daemon_module, prefix, key, idempotency_key, probes, run_numbers=
     """wl.works' canonical over the session's measured runs, as
     `tests/schema/test_nwb_build.py`'s fixture asks for it, every probe's
     sort covering every run, then a pass. With `run_numbers`, a derivative
-    over those runs instead."""
+    over those runs instead. Montage 0 is stored first, as this host would
+    list it, after the session's last pass (`tests/positions.py::seed_montage`)."""
+    from tests.positions import seed_montage
     from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
     from wl_preproc.responder.jobs import accept
     from wl_preproc.schema import core
@@ -51,13 +53,13 @@ def _canonical(daemon_module, prefix, key, idempotency_key, probes, run_numbers=
              "works_run_id": f"wr-{row['run_number']}"}
             for row in (core.Run & key).to_dicts(order_by="run_number")]
     every = {probe["serial"]: [run["run_number"] for run in runs] for probe in probes}
+    seed_montage(key, {"montage_id": 0, "start_s": 0.0, "end_s": 16.0})
     activation = accept(JobRequest(
         domain="neural", parameters={}, idempotency_key=idempotency_key,
         selection={"session_datetime": key["session_datetime"].replace(tzinfo=datetime.UTC), "montage_id": 0,
                    **({"probe_runs": every} if run_numbers is None else {"run_numbers": run_numbers})},
         metadata=MetadataBundle(
-            blocks=[], runs=runs, montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 16.0}], probes=probes,
-            experimenter="jw", subject=key["subject"], task_types=[],
+            blocks=[], runs=runs, probes=probes, experimenter="jw", subject=key["subject"], task_types=[],
             subject_details={"species": "Macaca mulatta", "sex": "F", "date_of_birth": datetime.date(2016, 3, 2)}),
     ), prefix=prefix)
     daemon_module.run_once(prefix=prefix)

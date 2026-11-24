@@ -88,9 +88,12 @@
           "type": "string"
         },
         "montage_boundaries": {
+          "default": [],
+          "deprecated": true,
           "items": {
             "$ref": "#/$defs/MontageBoundary"
           },
+          "maxItems": 0,
           "title": "Montage Boundaries",
           "type": "array"
         },
@@ -133,7 +136,6 @@
         }
       },
       "required": [
-        "montage_boundaries",
         "probes",
         "experimenter",
         "subject",
@@ -144,7 +146,7 @@
     },
     "MontageBoundary": {
       "additionalProperties": false,
-      "description": "One maximal interval with no probe movement and no bank change, as\nwl.works asserts it -- design spec section 8.3's \"recording montage\".\n\nTyped rather than `dict[str, Any]` because this payload is a frozen\ninterface with a second implementer: section 11.2 records that wl.works'\n18b tests are contract tests against a *fake* wl-preproc, and a fake can\nonly be built from what the contract writes down. An untyped list exports\nto `{\"type\": \"object\", \"additionalProperties\": true}`, which tells that\nimplementer nothing at all -- while `responder/jobs.py` validated these\nfields anyway, in a module no other repository reads.",
+      "description": "One maximal interval with no probe movement and no bank change, as\nwl.works asserts it -- design spec section 8.3's \"recording montage\".\nRetired from requests with `MetadataBundle.montage_boundaries` (design\nspec `2026-11-24-montages-design.md` section 4.6): this host derives a\nsession's montages. Kept so the field keeps its shape in the schema.\n\nTyped rather than `dict[str, Any]` because this payload is a frozen\ninterface with a second implementer: section 11.2 records that wl.works'\n18b tests are contract tests against a *fake* wl-preproc, and a fake can\nonly be built from what the contract writes down. An untyped list exports\nto `{\"type\": \"object\", \"additionalProperties\": true}`, which tells that\nimplementer nothing at all -- while `responder/jobs.py` validated these\nfields anyway, in a module no other repository reads.",
       "properties": {
         "end_s": {
           "title": "End S",

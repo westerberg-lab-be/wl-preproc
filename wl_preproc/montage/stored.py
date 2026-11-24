@@ -3,6 +3,15 @@ request checks and the NWB build read (spec section 5's "one definition"), never
 
 `StoredMontages` is what `stage.to_stored` builds from a derivation and what `read_stored` reads back, in one shape,
 so the stage compares the two and rewrites a session only when they differ. `derived_at` is written, never compared.
+
+**The derivation's row is the session's lock.** `write()` rewrites a session's montages, and `responder/jobs.py::
+accept` writes an activation that freezes them (plan decision D8); each takes the session's `MontageDerivation` row
+`FOR UPDATE` (`lock_derivation`) in its own transaction before anything else, so the two never interleave. `write()`
+then looks again for an accepted request and writes nothing when one has been, and `accept()` checks that the
+derivation it read is still the one stored (`derivation_row`), so an activation never lands on montages it was not
+checked against. `write()` reads in `READ COMMITTED`, because DataJoint begins every transaction `WITH CONSISTENT
+SNAPSHOT`: a snapshot taken before the lock was granted would not show the activation of the transaction that held
+it (`tests/schema/test_montage_stage.py::test_a_request_accepted_while_the_write_waits_for_its_lock_is_seen`).
 """
 
 from __future__ import annotations
@@ -120,16 +129,61 @@ def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
-def write(session_key: dict, stored: StoredMontages) -> None:
-    """Replace the session's rows with `stored`'s, in one transaction. A montage a request's activation names
-    cannot be deleted (its foreign key), so a session with one is refused here whole rather than rewritten under
-    it: the stage never reaches this for such a session (plan decision D8)."""
+def _derivation_query(session_key: dict, lock: str) -> dict | None:
     import datajoint as dj
 
     from wl_preproc.schema import core
 
     key = {name: session_key[name] for name in _SESSION}
-    with dj.conn().transaction:
+    # Raw rows, as `schema/request.py::_locking_read_one` reads one: DataJoint's fetch cannot lock. None of these
+    # columns is a blob, so nothing is left undecoded.
+    sql = (core.MontageDerivation & key).proj("positions_status", "positions_seq", "derived_at").make_sql()
+    rows = list(dj.conn().query(sql + lock, as_dict=True).fetchall())
+    if not rows:
+        return None
+    row = rows[0]
+    return {"positions_status": str(row["positions_status"]), "positions_seq": _int(row["positions_seq"]),
+            "derived_at": row["derived_at"]}
+
+
+def derivation_row(session_key: dict) -> dict | None:
+    """The session's stored derivation, `{positions_status, positions_seq, derived_at}`, or None when it has none.
+    Every write of the session's rows gives it a new `derived_at`, so a row read before a check and equal to the
+    row `lock_derivation` takes after it means nothing was rewritten in between."""
+    return _derivation_query(session_key, "")
+
+
+def lock_derivation(session_key: dict) -> dict | None:
+    """`derivation_row`, read `FOR UPDATE`: the latest committed row, held until the caller's transaction ends. An
+    exact primary-key match, so the lock is the one row's alone (`schema/request.py::_locking_read_one` says why a
+    range would deadlock). Raises outside a transaction, where the lock would end with the statement."""
+    import datajoint as dj
+
+    if not dj.conn().in_transaction:
+        raise dj.DataJointError("lock_derivation() holds its lock only inside a transaction; call it in one")
+    return _derivation_query(session_key, " FOR UPDATE")
+
+
+def write(session_key: dict, stored: StoredMontages) -> bool:
+    """Replace the session's rows with `stored`'s, in one transaction, unless a request has been accepted for the
+    session (plan decision D8). True when it wrote.
+
+    The stage looks for an accepted request before it derives, and one can be accepted between that look and this
+    write; so the write takes the derivation's lock and looks again (the module docstring). A montage an
+    activation names could not be deleted anyway (its foreign key), but the session would fail on every pass."""
+    import datajoint as dj
+
+    from wl_preproc.schema import core, request
+
+    key = {name: session_key[name] for name in _SESSION}
+    connection = dj.conn()
+    # For this one transaction (the module docstring). Lost with a reconnect before it begins, which leaves the
+    # snapshot read and, at worst, the foreign key's refusal: never a rewrite under an activation.
+    connection.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+    with connection.transaction:
+        lock_derivation(key)
+        if request.first_accepted_request(key) is not None:
+            return False
         # Children before parents: `delete_quick` does not cascade, so a row something else still names stops it.
         for table in (core.SharedGroup.SortableRun, core.SharedGroup.Member, core.SharedGroup,
                       core.MontageSortableRun, core.MontageProbe, core.PlacedPosition, core.MontageDerivation.Flag,
@@ -161,3 +215,4 @@ def write(session_key: dict, stored: StoredMontages) -> None:
                                         for g in stored.groups for montage_id in g["montage_ids"]])
         core.SharedGroup.SortableRun.insert([{**key, "group_id": g["group_id"], "run_number": run}
                                              for g in stored.groups for run in g["sortable_runs"]])
+    return True

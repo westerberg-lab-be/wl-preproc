@@ -145,6 +145,9 @@ _SessionSeconds = Annotated[float, Field(allow_inf_nan=False)]
 class MontageBoundary(BaseModel):
     """One maximal interval with no probe movement and no bank change, as
     wl.works asserts it -- design spec section 8.3's "recording montage".
+    Retired from requests with `MetadataBundle.montage_boundaries` (design
+    spec `2026-11-24-montages-design.md` section 4.6): this host derives a
+    session's montages. Kept so the field keeps its shape in the schema.
 
     Typed rather than `dict[str, Any]` because this payload is a frozen
     interface with a second implementer: section 11.2 records that wl.works'
@@ -302,7 +305,12 @@ class MetadataBundle(BaseModel):
     # than that the field is unknown; an empty list, which every request sent
     # while the field was required, says nothing and is accepted.
     blocks: list[dict[str, Any]] = Field(default=[], json_schema_extra={"maxItems": 0, "deprecated": True})
-    montage_boundaries: list[MontageBoundary]
+    # Retired as `blocks` is (design spec `2026-11-24-montages-design.md`
+    # section 4.6): this host derives a session's montages from `PUT
+    # /positions` and lists them in `GET /sessions`, and a request names one
+    # in `selection.montage_id`. An empty list says nothing and is accepted.
+    montage_boundaries: list[MontageBoundary] = Field(default=[], json_schema_extra={"maxItems": 0,
+                                                                                    "deprecated": True})
     probes: list[ProbeEntry]
     experimenter: Annotated[str, Field(max_length=64)]
     subject: str
@@ -324,6 +332,18 @@ class MetadataBundle(BaseModel):
                 "retired_field", "metadata.blocks is retired: a request asserts its runs in metadata.runs, each "
                 "with its works_run_id, as GET /sessions lists them")
         return blocks
+
+    @field_validator("montage_boundaries", mode="before")
+    @classmethod
+    def _montage_boundaries_are_retired(cls, boundaries: Any) -> Any:
+        # Before the items are read: a sender still sending boundaries is told
+        # the field is retired, whatever its boundaries hold. A
+        # `PydanticCustomError`, for the reason `_blocks_are_retired` gives.
+        if isinstance(boundaries, list) and boundaries:
+            raise PydanticCustomError(
+                "retired_field", "metadata.montage_boundaries is retired: this host derives a session's montages "
+                "from PUT /positions and lists them in GET /sessions; a request names one in selection.montage_id")
+        return boundaries
 
 
 class JobRequest(BaseModel):

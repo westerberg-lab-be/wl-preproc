@@ -225,7 +225,6 @@ def _valid_job_payload() -> dict:
         "parameters": {},
         "idempotency_key": "http-probe-key-1",
         "metadata": {
-            "montage_boundaries": [],
             "probes": [],
             "experimenter": "jw",
             "subject": "htprobe",
@@ -1422,7 +1421,9 @@ def landed_session(dj_conn, prefix):
     this is a local copy since pytest fixtures do not cross test modules
     without living in a shared `conftest.py`, and duplicating four lines
     here was judged cheaper than relocating a fixture Task 7 did not need
-    to share)."""
+    to share). Montage 0 is stored for it as this host would list it
+    (`tests/positions.py::seed_montage`): every request here names it."""
+    from tests.positions import seed_montage
     from wl_preproc.schema import core, pipeline
     from wl_preproc.schema import request as schema_request
 
@@ -1447,6 +1448,7 @@ def landed_session(dj_conn, prefix):
         core.Run.insert([{**key, "run_number": number, "task_type": 0, "run_start_time": start,
                           "run_stop_time": stop, "closed": 1} for number, start, stop in _RUNS],
                         skip_duplicates=True)
+        seed_montage(key, {"montage_id": 0, "start_s": 0.0, "end_s": 12.0})
 
     return _land
 
@@ -1460,7 +1462,6 @@ def _real_job_payload(*, subject: str, session_datetime_iso: str, idempotency_ke
         "metadata": {
             "runs": [{"run_number": number, "start_s": start, "end_s": stop, "works_run_id": f"wr-{number}"}
                      for number, start, stop in _RUNS],
-            "montage_boundaries": [{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
             "probes": [],
             "experimenter": "jw",
             "subject": subject,

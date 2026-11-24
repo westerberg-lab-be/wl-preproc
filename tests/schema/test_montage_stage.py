@@ -245,8 +245,7 @@ def test_an_accepted_request_fixes_the_derivation(daemon_module, prefix, tmp_pat
     accept(JobRequest(
         domain="neural", parameters={}, idempotency_key=f"{key['subject']}-canonical",
         selection={"session_datetime": key["session_datetime"].replace(tzinfo=datetime.UTC), "montage_id": 1},
-        metadata=MetadataBundle(runs=runs, montage_boundaries=[], probes=[], experimenter="jw",
-                                subject=key["subject"], task_types=[]),
+        metadata=MetadataBundle(runs=runs, probes=[], experimenter="jw", subject=key["subject"], task_types=[]),
     ), prefix=prefix)
     assert request.first_accepted_request(key) == f"{key['subject']}-canonical"
     stored = _rows(key)
@@ -258,6 +257,83 @@ def test_an_accepted_request_fixes_the_derivation(daemon_module, prefix, tmp_pat
     _pass(daemon_module, prefix, key)
 
     assert _rows(key) == stored
+
+
+def _placed_and_listed(daemon, prefix, tmp_path_factory) -> dict:
+    """A session placed with one montage and listed, no request yet accepted for it; returns its key."""
+    key, serial = _landed(tmp_path_factory)
+    _pass(daemon, prefix, key)
+    put(key, [_position(serial, 1, before_t0(key))], seq=1, prefix=prefix)
+    _pass(daemon, prefix, key)
+    assert _derivation(key) == ("placed", 1) and [m[0] for m in _montages(key)] == [1]
+    return key
+
+
+def _request_row(key, idempotency_key: str) -> None:
+    """The `Request` an `Activation` names, as `accept()` would have stored it."""
+    from wl_preproc.schema import request
+
+    request.Request.insert1({"idempotency_key": idempotency_key, "task_type": "neural", "origin": "wl_works",
+                             "payload": {}, "requested_by": "jw",
+                             "requested_at": datetime.datetime(2027, 1, 1, 9, 0)})
+
+
+def _rederived():
+    from wl_preproc.montage.stored import StoredMontages
+
+    return StoredMontages(status="waiting", positions_seq=2, flags=(), montages=(), groups=())
+
+
+def test_a_session_given_an_accepted_request_before_its_write_is_not_rewritten(
+        daemon_module, prefix, tmp_path_factory):
+    """D8 at the write itself: the stage checks for an accepted request before it derives, and a request can be
+    accepted between that check and the write. `write()` checks again under the derivation's lock, and writes
+    nothing."""
+    from wl_preproc.montage.stored import write
+    from wl_preproc.schema import request
+
+    key = _placed_and_listed(daemon_module, prefix, tmp_path_factory)
+    _request_row(key, f"{key['subject']}-k1")
+    request.Activation.insert1({**key, "montage_id": 1, "activation_id": 0, "role": "canonical",
+                                "request_key": f"{key['subject']}-k1",
+                                "created_at": datetime.datetime(2027, 1, 1, 9, 0)})
+    stored = _rows(key)
+
+    assert write(key, _rederived()) is False
+    assert _rows(key) == stored
+
+
+def test_a_request_accepted_while_the_write_waits_for_its_lock_is_seen(daemon_module, prefix, tmp_path_factory,
+                                                                       monkeypatch):
+    """The same race with real timing: the request's transaction commits on another connection after the write's
+    transaction has begun and before it holds the derivation's lock, as when `accept()` held that lock first. A
+    transaction reading from the snapshot it began with would not see the activation, and would try to rewrite the
+    session under it."""
+    from tests.schema.test_request import _raw_connection
+    from wl_preproc.montage import stored as stored_module
+    from wl_preproc.schema import request
+
+    key = _placed_and_listed(daemon_module, prefix, tmp_path_factory)
+    _request_row(key, f"{key['subject']}-k1")
+    before = _rows(key)
+    locked = stored_module.lock_derivation
+
+    def accepted_meanwhile(session_key):
+        connection = _raw_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"INSERT INTO {request.Activation.full_table_name} (subject, session_datetime, montage_id, "
+                    "activation_id, role, request_key, created_at) VALUES (%s, %s, 1, 0, 'canonical', %s, %s)",
+                    (key["subject"], key["session_datetime"], f"{key['subject']}-k1",
+                     datetime.datetime(2027, 1, 1, 9, 0)))
+        finally:
+            connection.close()
+        return locked(session_key)
+
+    monkeypatch.setattr(stored_module, "lock_derivation", accepted_meanwhile)
+    assert stored_module.write(key, _rederived()) is False
+    assert _rows(key) == before
 
 
 def test_the_derivation_changes_only_when_its_result_does(daemon_module, prefix, tmp_path_factory):

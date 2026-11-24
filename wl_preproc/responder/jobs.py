@@ -13,9 +13,27 @@ needs from the ELN arrives in the request payload." `core.Montage`'s own
 comment says it is "Sourced from wl.works `item_insertion` and nothing else".
 So recording a montage here is not measuring or guessing at a boundary; it is
 wl.works' own authored record, arriving by the exact route its frozen
-contract already describes. A run is the other way round: `core.Run` is this
-host's measurement, and what arrives is wl.works' copy of it and its id for
-it, checked against the measurement and kept in `core.RunAssertion`.
+contract already describes. *True when written.* A run is the other way
+round: `core.Run` is this host's measurement, and what arrives is wl.works'
+copy of it and its id for it, checked against the measurement and kept in
+`core.RunAssertion`.
+
+**What replaced the boundaries** (design spec `2026-11-24-montages-design.md`
+sections 4.4, 4.6 and 5). This host now derives a session's montages from
+wl.works' probe positions (`PUT /positions`) and its own census, and the
+daemon's montage stage stores them (`montage/stage.py`), which `GET
+/sessions` lists. `metadata.montage_boundaries` is retired as
+`metadata.blocks` was, and a request names a listed montage in
+`selection.montage_id`: `_listed_montage` reads it from the stored rows,
+never deriving it again, and a montage that is not stored is a 422 naming
+the session's `positions_status`, never created. Each probe's runs are among
+the ones the montage lists as sortable for it, and with positions stored each
+of `metadata.probes` names one of them (plan decision D14; `_check_probes`,
+`_check_probe_runs`). The stage rewrites a session's montages only until its
+first accepted request, and the activation's transaction holds the
+derivation's lock and finds it unchanged since the checks read it
+(`_hold_derivation`), so an activation never covers montages it was not
+checked against.
 
 **Two corrections carried from Task 4's review, applied here rather than
 re-derived:**
@@ -25,13 +43,16 @@ re-derived:**
    raise -- DataJoint transactions do not nest -- and `submit()`'s own
    docstring says directly that neither the ingest watcher nor the responder
    may wrap it to bundle it with other writes. So `accept()` builds and
-   checks the `Montage` and `RunAssertion` rows and hands them to
-   `submit*()`, which writes them, insert-if-absent, inside the transaction it
-   opens and owns for the `Request`+`Activation` pair: a request refused there
-   with a 409 records none of them (Plan B's final review, M1, and the
-   leftovers' review). See `test_accept_refuses_to_run_inside_a_transaction`.
-   *Until then `accept()` wrote `Montage` itself, as an un-transacted
-   insert-if-absent before calling `submit*()`; true when written.*
+   checks the `RunAssertion` rows and hands them to `submit*()`, which writes
+   them, insert-if-absent, inside the transaction it opens and owns for the
+   `Request`+`Activation` pair: a request refused there with a 409 records
+   none of them (Plan B's final review, M1, and the leftovers' review). See
+   `test_accept_refuses_to_run_inside_a_transaction`. *Until then `accept()`
+   wrote `Montage` itself, as an un-transacted insert-if-absent before
+   calling `submit*()`, and then handed `submit*()` the `Montage` rows too,
+   until a request stopped sending them; true when written.* What it hands
+   `submit*()` now besides is `_hold_derivation`, which `submit*()` calls
+   first inside that transaction.
 2. **`accept()` owns the montage window.** The window between a montage's
    `[start_s, end_s)` and the runs a file holds is checked here -- a check
    `submit_derivative` itself does not make, having no `Montage`/`Run`
@@ -41,7 +62,8 @@ re-derived:**
 `skip_duplicates=True`: wl.works owns this record, and a later request naming
 different boundaries for a montage already on file is wl.works correcting its
 own record -- their call to make explicitly, not something to infer from
-whichever payload happened to arrive most recently. A run already asserted
+whichever payload happened to arrive most recently. *True when written; a
+request writes no `Montage` now.* A run already asserted
 under one `works_run_id` and named under another, or an id already recorded
 for one run named for another, is a `RunIdConflict`, a `409`: the two
 disagree about which run it is. The same id for two runs within one request
@@ -57,9 +79,12 @@ is a `422`.
   it refused to replace. `accept()` now builds every candidate row, checks
   montage existence and every run against those candidates PLUS whatever is
   already on record, and only writes anything once every check has passed --
-  so a rejected request leaves no residue at all. See
-  `test_a_rejected_request_leaves_no_montage_or_run_assertion_and_a_
-  correction_then_succeeds`.
+  so a rejected request leaves no residue at all. *Its montage half went with
+  the boundaries: the montage is read from the stored rows, and the checks of
+  the probes against it run here too, before anything is written.* Its test
+  went with the boundaries; `test_a_request_from_a_stale_listing_is_a_run_
+  mismatch_and_writes_nothing` and the montage refusals' `_nothing_written`
+  in `tests/responder/test_jobs.py` hold it now.
 - **C2 -- `selection["session_datetime"]` is coerced, not assumed to already
   be a `datetime`.** JSON has no datetime type and `docs/schemas/
   job_request.json` declares `selection` as a bare
@@ -89,7 +114,9 @@ is a `422`.
   special-case"). The `montage_id` range is checked against the real column
   bound before any insert is attempted; the montage's and each run's own
   bounds now live on `contracts.protocol.MontageBoundary` and `RunEntry`, so
-  a request breaking them cannot be built.
+  a request breaking them cannot be built. *True when written; a request
+  sends no montage now, and `selection.montage_id` is still checked against
+  the column before it is read.*
 
 **The whole-branch review (2026-08-16) found one more, fixed here:**
 
@@ -98,7 +125,8 @@ is a `422`.
   validated montage existence, the window, subject length,
   every column bound and the DATETIME floor -- but not that `Session`
   itself exists, so `core.Montage.insert` hit the foreign key and the
-  resulting `IntegrityError` became a retryable `500`. Creating the session
+  resulting `IntegrityError` became a retryable `500` (*true when written;
+  this module writes no `Montage` now, and the check still comes first*). Creating the session
   is still not this function's job; DETECTING its absence now is. See
   `_require_landed_session` for the full reasoning, the measured
   before/after, and why the answer is `422` rather than `409`.
@@ -119,10 +147,12 @@ import math
 
 from pydantic import ValidationError
 
-from wl_preproc.contracts.protocol import JobRequest, MontageBoundary, ProbeEntry, RunEntry
+from wl_preproc.contracts.protocol import JobRequest, ProbeEntry, RunEntry
 from wl_preproc.events import agreement
 from wl_preproc.ingest import landing
 from wl_preproc.listing import order
+from wl_preproc.montage import stored as stored_montages
+from wl_preproc.responder.positions import stored_positions
 from wl_preproc.schema import DEFAULT_PREFIX, core, pipeline
 from wl_preproc.schema import request as schema_request
 
@@ -359,11 +389,39 @@ def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], 
     return named, rows
 
 
-def _check_probe_runs(probes: list[ProbeEntry], probe_runs, file_runs: list[int]) -> None:
+def _check_probes(session_key: dict, probes: list[ProbeEntry]) -> None:
+    """With positions stored, each of `metadata.probes` names one of them: the
+    same serial at the same insertion number (plan decision D14). With none
+    stored (a session with no ephys), probes are recorded as they come."""
+    stored = stored_positions(session_key)
+    if stored is None:
+        return
+    _seq, positions = stored
+    held = {(position["serial"], position["insertion_number"]) for position in positions}
+    for probe in probes:
+        if (probe.serial, probe.insertion_number) not in held:
+            named = ", ".join(f"probe {serial} at insertion_number {number}"
+                              for serial, number in sorted(held)) or "none"
+            raise ValueError(
+                f"metadata.probes names probe {probe.serial} at insertion_number {probe.insertion_number}, and no "
+                f"stored position is that probe at that insertion: the positions stored for "
+                f"{session_key['subject']}/{session_key['session_datetime'].isoformat()} are {named}; send PUT "
+                f"/positions, or {_REBUILD}")
+
+
+def _check_probe_runs(probes: list[ProbeEntry], probe_runs, file_runs: list[int], montage_probes: dict[str, dict],
+                      positioned: bool, *, montage_id: int) -> None:
     """Every probe's runs are stated in full, and only the file's (design
     spec `2026-10-01-session-listing-and-run-requests-design.md` section 3.1;
     wl.works' Plan 20 rule: the record is the run set each probe resolved
-    to, not the exclusions)."""
+    to, not the exclusions).
+
+    Each is also among the runs the montage lists as sortable for that probe
+    (`montage_probes`, by serial; design spec `2026-11-24-montages-design.md`
+    section 4.4). With positions stored (`positioned`), a probe the montage
+    does not list holds no position in it and sorts no run there (plan
+    decision D14). A derivative's runs are each of its probes', so it is
+    checked here as a canonical stating them is: never narrowed."""
     serials = sorted({probe.serial for probe in probes})
     if probe_runs is None:
         if serials:
@@ -378,6 +436,19 @@ def _check_probe_runs(probes: list[ProbeEntry], probe_runs, file_runs: list[int]
         outside = sorted(set(_run_numbers(numbers, name=f"selection.probe_runs[{serial!r}]")) - set(file_runs))
         if outside:
             raise ValueError(f"probe {serial}'s runs {outside} are not among the file's runs {file_runs}")
+    for serial, numbers in sorted(probe_runs.items()):
+        listed = montage_probes.get(serial)
+        if listed is None and not positioned:
+            continue
+        sortable = sorted(listed["sortable_runs"]) if listed is not None else []
+        unsortable = sorted(set(numbers) - set(sortable))
+        if not unsortable:
+            continue
+        if listed is None:
+            raise ValueError(f"probe {serial} holds no position in montage {montage_id}, so it sorts no run there; "
+                             f"the request gives it run(s) {unsortable}")
+        raise ValueError(f"probe {serial}'s run(s) {unsortable} are not among its sortable runs {sortable} in "
+                         f"montage {montage_id}")
 
 
 def _reject_out_of_range_int(value, *, name: str, bounds: tuple[int, int]) -> None:
@@ -399,8 +470,9 @@ def _require_landed_session(session_key: dict) -> None:
     database: `core.Montage.insert` below carries a foreign key to
     `pipeline.Session`, so without this check the very next write raises
     `IntegrityError`, which `handler.py` maps -- correctly, for every other
-    member of that family -- to a `500`. Measured live over a real socket
-    before this check existed:
+    member of that family -- to a `500` (*true when written; the writes that
+    carry that foreign key now are `RunAssertion`'s and the request's own*).
+    Measured live over a real socket before this check existed:
 
     ```
     POST /jobs, subject/session_datetime never ingested
@@ -450,34 +522,6 @@ def _require_landed_session(session_key: dict) -> None:
             "lands here; until ingest has landed it, this host cannot accept "
             "a job for it. Resend once the transfer has completed."
         )
-
-
-def _build_montage_rows(
-    session_key: dict, montage_boundaries: list[MontageBoundary]
-) -> list[dict]:
-    """`Montage` rows this request WOULD write -- not yet inserted. See
-    `accept()`'s two-phase structure (review C1).
-
-    **The three field validations this function used to perform are gone, and
-    they were not dropped.** `contracts.protocol.MontageBoundary` now carries
-    the tinyint bound and both finite-number checks, so a boundary violating
-    any of them cannot be constructed and can never reach here. Keeping the
-    calls would have been a check that cannot fire, reading as protection while
-    protecting nothing. The status on the wire is unchanged: `handler.py` maps
-    `pydantic.ValidationError` and this module's `ValueError` to the same `422`
-    -- and `ValidationError` IS a `ValueError` subclass, so even a caller
-    catching the old type still catches the new one. What the move buys is that
-    `docs/schemas/job_request.json` now carries the constraints, where the
-    other implementer of this protocol can read them."""
-    return [
-        {
-            **session_key,
-            "montage_id": boundary.montage_id,
-            "start_s": boundary.start_s,
-            "end_s": boundary.end_s,
-        }
-        for boundary in montage_boundaries
-    ]
 
 
 def _record_subject_details(subject: str, details) -> None:
@@ -539,6 +583,45 @@ def _record_probe_reports(session_key: dict, probes, prefix: str) -> None:
             )
 
 
+def _listed_montage(session_key: dict, montage_id: int) -> tuple[dict | None, dict]:
+    """The session's stored derivation (`stored_montages.derivation_row`) and
+    the montage `montage_id` as this host lists it (`{montage_id, start_s,
+    end_s, probes}`), from the stored rows and never derived again (design
+    spec `2026-11-24-montages-design.md` section 5). A `ValueError` (a 422)
+    naming the session's `positions_status` when no such montage is stored:
+    the stage stores montages only at `placed` and `not_needed`, the statuses
+    `GET /sessions` lists them at (plan decision D13), so a stored montage is
+    a listed one.
+
+    The derivation is read first: a rewrite committed after it changes the
+    row `_hold_derivation` compares it with, whatever was read after it."""
+    derivation = stored_montages.derivation_row(session_key)
+    stored = stored_montages.read_stored([session_key]).get((session_key["subject"],
+                                                              session_key["session_datetime"]))
+    montage = next((m for m in (stored.montages if stored else ()) if m["montage_id"] == montage_id), None)
+    if montage is None:
+        status = stored.status if stored else "waiting"
+        raise ValueError(f"no montage {montage_id} is listed for {session_key['subject']}/"
+                         f"{session_key['session_datetime'].isoformat()}: positions_status is {status}; send PUT "
+                         f"/positions, or {_REBUILD}")
+    return derivation, montage
+
+
+def _hold_derivation(session_key: dict, derivation: dict | None) -> None:
+    """Inside the activation's transaction, before it writes: take the
+    session's derivation lock and refuse the request if the derivation is not
+    the one its checks read. Until this transaction ends the montage stage
+    cannot rewrite the session (`montage/stored.py`'s module docstring), and
+    once it has ended with an activation the stage never will (plan decision
+    D8), so what the checks read is what the activation covers."""
+    held = stored_montages.lock_derivation(session_key)
+    if held != derivation:
+        status = held["positions_status"] if held else "waiting"
+        raise ValueError(f"the montages of {session_key['subject']}/{session_key['session_datetime'].isoformat()} "
+                         f"were derived again while this request was checked: positions_status is {status}; "
+                         f"{_REBUILD}")
+
+
 def _as_current_payload(stored: dict) -> dict:
     """A payload recorded under an earlier contract, as today's `JobRequest` would dump it.
 
@@ -555,11 +638,12 @@ def _as_current_payload(stored: dict) -> dict:
 
 
 def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
-    """A validated `JobRequest` becomes `Montage`/`RunAssertion`/`Request`/
-    `Activation` rows, with the activation's runs and each probe's. Design
-    spec section 6.1, and design spec
-    `2026-10-01-session-listing-and-run-requests-design.md` section 3.
-    Returns the `Activation` primary key.
+    """A validated `JobRequest` becomes `RunAssertion`/`Request`/`Activation`
+    rows, with the activation's runs and each probe's, over a montage this
+    host listed. Design spec section 6.1, and design specs
+    `2026-10-01-session-listing-and-run-requests-design.md` section 3 and
+    `2026-11-24-montages-design.md` section 4.6. Returns the `Activation`
+    primary key.
 
     Raises `ValueError` for a request that cannot be honoured: a `selection`
     missing `session_datetime` or `montage_id`; the retired
@@ -570,13 +654,15 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
     (`_require_landed_session` -- the ordinary ELN-before-transfer case,
     which used to reach the database and come back as a `500` telling
     wl.works to retry forever); a `montage_id` that cannot fit its column; a
-    `montage_id` with no boundary on record and none supplied in this request
-    either; or any run that does not match what this host measured
-    (`_check_runs`, `_check_probe_runs`), including one `works_run_id`
-    named for two runs. Raises `RunIdConflict` for a run already asserted
+    `montage_id` this host has not listed (`_listed_montage`); a probe that
+    names no stored position, or runs a probe cannot be sorted on in the
+    montage (`_check_probes`, `_check_probe_runs`); a derivation rewritten
+    while the request was checked (`_hold_derivation`); or any run that does
+    not match what this host measured (`_check_runs`, `_check_probe_runs`),
+    including one `works_run_id` named for two runs. Raises `RunIdConflict` for a run already asserted
     under another `works_run_id`, or an id already recorded for another run. All of these are checked
     against BUILT-BUT-NOT-YET-WRITTEN candidate rows before anything is
-    actually inserted (review C1): a rejected request leaves no `Montage` or
+    actually inserted (review C1): a rejected request leaves no
     `RunAssertion` residue behind for a later, corrected request to trip
     over.
 
@@ -629,38 +715,38 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
     # against them plus what already exists, before writing anything at all
     # (review C1). ----
 
-    montage_rows = _build_montage_rows(session_key, metadata.montage_boundaries)
-    candidate_montages = {row["montage_id"]: row for row in montage_rows}
-
     schema_request.activate(prefix=prefix)
 
     _require_landed_session(session_key)
 
-    existing_montage_row = (
-        (core.Montage & montage_key).fetch1() if (core.Montage & montage_key) else None
-    )
-    montage_row = existing_montage_row or candidate_montages.get(montage_id)
-    if montage_row is None:
-        raise ValueError(
-            f"no montage {montage_id} is on record for {session_key} and "
-            "metadata.montage_boundaries did not supply one either"
-        )
+    # The montage this host listed, never one the request describes (design
+    # spec `2026-11-24-montages-design.md` section 4.6).
+    derivation, montage = _listed_montage(session_key, montage_id)
 
     # Correction 2: accept() owns the montage window (module docstring).
-    file_runs, run_assertion_rows = _check_runs(session_key, montage_row, metadata.runs, run_numbers, canonical)
-    if canonical:
-        _check_probe_runs(metadata.probes, probe_runs, file_runs)
+    file_runs, run_assertion_rows = _check_runs(session_key, montage, metadata.runs, run_numbers, canonical)
+    _check_probes(session_key, metadata.probes)
+    if not canonical:
+        # A derivative is the unit a sort runs over (decision 3), so each
+        # probe the request names covers all of its runs; the request
+        # states no per-probe list for one (Plan B's final review, I1).
+        probe_runs = {probe.serial: file_runs for probe in metadata.probes}
+    _check_probe_runs(metadata.probes, probe_runs, file_runs, {p["serial"]: p for p in montage["probes"]},
+                      stored_positions(session_key) is not None, montage_id=montage_id)
 
     # ---- Phase 2: every check above passed. Only now does anything get
     # written. ----
 
     _record_subject_details(metadata.subject, metadata.subject_details)
     _record_probe_reports(session_key, metadata.probes, prefix)
-    # Steps 1 and 2 (design spec section 6.1): the Montage rows, and wl.works'
-    # id and copy of each run it asserts, insert-if-absent, are written by
-    # `submit*()` inside its own transaction, so a request it refuses (a 409)
-    # records none of them; `_check_runs` has already refused a run named
-    # under a second id.
+    # Step 2 (design spec section 6.1): wl.works' id and copy of each run it
+    # asserts, insert-if-absent, are written by `submit*()` inside its own
+    # transaction, so a request it refuses (a 409) records none of them;
+    # `_check_runs` has already refused a run named under a second id. That
+    # transaction first holds the derivation the checks above read
+    # (`_hold_derivation`).
+    def hold() -> None:
+        _hold_derivation(session_key, derivation)
 
     # The payload stored as evidence ("the request as received", Request's
     # own comment). mode="json" -- this project's own existing convention in
@@ -696,13 +782,10 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
             run_numbers=file_runs,
             payload=payload,
             requested_by=metadata.experimenter,
-            # A derivative is the unit a sort runs over (decision 3), so each
-            # probe the request names covers all of its runs; the request
-            # states no per-probe list for one (Plan B's final review, I1).
-            probe_runs={probe.serial: file_runs for probe in metadata.probes},
-            montages=montage_rows,
+            probe_runs=probe_runs,
             run_assertions=run_assertion_rows,
             read_stored_payload=_as_current_payload,
+            guard=hold,
         )
 
     if selection.get("supersedes_activation_id") is not None:
@@ -716,9 +799,9 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
             supersedes_activation_id=selection["supersedes_activation_id"],
             run_numbers=file_runs,
             probe_runs=probe_runs,
-            montages=montage_rows,
             run_assertions=run_assertion_rows,
             read_stored_payload=_as_current_payload,
+            guard=hold,
         )
     return schema_request.submit(
         idempotency_key=request.idempotency_key,
@@ -729,7 +812,7 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
         requested_by=metadata.experimenter,
         run_numbers=file_runs,
         probe_runs=probe_runs,
-        montages=montage_rows,
         run_assertions=run_assertion_rows,
         read_stored_payload=_as_current_payload,
+        guard=hold,
     )

@@ -119,7 +119,6 @@ def test_job_request_carries_the_metadata_bundle():
         idempotency_key="a1b2c3",
         metadata=MetadataBundle(
             runs=[{"run_number": 1, "start_s": 0.0, "end_s": 1800.0, "works_run_id": "wr-1"}],
-            montage_boundaries=[{"montage_id": 1, "start_s": 0.0, "end_s": 3600.0}],
             probes=[{"serial": "NP-1234", "insertion_number": 1}],
             experimenter="jw",
             subject="pico",
@@ -127,7 +126,7 @@ def test_job_request_carries_the_metadata_bundle():
         ),
     )
     assert request.metadata.subject == "pico"
-    assert request.metadata.montage_boundaries[0].montage_id == 1
+    assert request.metadata.probes[0].serial == "NP-1234"
 
 
 def test_job_request_rejects_unknown_key():
@@ -140,7 +139,6 @@ def test_job_request_rejects_unknown_key():
                 "idempotency_key": "x",
                 "metadata": {
                     "blocks": [],
-                    "montage_boundaries": [],
                     "probes": [],
                     "experimenter": "jw",
                     "subject": "pico",
@@ -160,14 +158,14 @@ def test_job_request_rejects_unknown_key():
 # 18b tests are contract tests against a FAKE wl-preproc, and a fake can only be
 # built from what the contract writes down. An untyped list exports to
 # `{"type": "object", "additionalProperties": true}` -- which is to say, it
-# exports nothing.
+# exports nothing. The montage boundaries were one of the two; they are retired
+# now (the retirement test below), and the probes are the other.
 
 
 def _bundle(**overrides):
     """A minimal valid bundle, so each test below varies exactly one thing."""
     return {
         "blocks": [],
-        "montage_boundaries": [{"montage_id": 1, "start_s": 0.0, "end_s": 3600.0}],
         "probes": [{"serial": "NP-1234", "insertion_number": 1}],
         "experimenter": "jw",
         "subject": "pico",
@@ -176,50 +174,29 @@ def _bundle(**overrides):
     }
 
 
-def test_a_montage_boundary_is_a_model_not_a_bare_dict():
-    bundle = MetadataBundle.model_validate(_bundle())
-    assert bundle.montage_boundaries[0].montage_id == 1
-    assert bundle.montage_boundaries[0].start_s == 0.0
-    assert bundle.montage_boundaries[0].end_s == 3600.0
+_BOUNDARIES_RETIRED = ("metadata.montage_boundaries is retired: this host derives a session's montages from PUT "
+                       "/positions and lists them in GET /sessions; a request names one in selection.montage_id")
 
 
-def test_a_montage_id_beyond_tinyint_is_refused_at_the_contract():
-    """`core.Montage.montage_id` is a tinyint. 128 does not fit, and the
-    refusal belongs in the exported schema where wl.works can see it -- not
-    only in `responder/jobs.py`, which nobody outside this repository reads."""
-    with pytest.raises(ValidationError):
-        MetadataBundle.model_validate(
-            _bundle(montage_boundaries=[{"montage_id": 128, "start_s": 0.0, "end_s": 1.0}])
-        )
-
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
-def test_a_non_finite_montage_boundary_is_refused(bad):
-    with pytest.raises(ValidationError):
-        MetadataBundle.model_validate(
-            _bundle(montage_boundaries=[{"montage_id": 0, "start_s": bad, "end_s": 1.0}])
-        )
-
-
-def test_a_montage_boundary_missing_a_field_is_refused():
-    with pytest.raises(ValidationError):
-        MetadataBundle.model_validate(
-            _bundle(montage_boundaries=[{"montage_id": 0, "start_s": 0.0}])
-        )
-
-
-def test_an_unknown_key_on_a_montage_boundary_is_refused():
-    """`extra="forbid"` everywhere else in this module. A frozen interface that
-    silently swallows a key it does not know is how two implementations drift
-    apart while both look correct."""
-    with pytest.raises(ValidationError):
-        MetadataBundle.model_validate(
-            _bundle(
-                montage_boundaries=[
-                    {"montage_id": 0, "start_s": 0.0, "end_s": 1.0, "bank": "A"}
-                ]
-            )
-        )
+@pytest.mark.parametrize("boundaries", [
+    [{"montage_id": 1, "start_s": 0.0, "end_s": 3600.0}],
+    # A boundary its model would refuse is told the same: the field, not its items, is what changed.
+    [{"montage_id": 128, "start_s": 0.0, "end_s": float("inf"), "bank": "A"}],
+])
+def test_montage_boundaries_is_retired(boundaries):
+    """Design spec `2026-11-24-montages-design.md` section 4.6: this host derives a session's montages, and a
+    request names one it listed. A request still sending boundaries is told what replaced them, as one still
+    sending blocks is; an empty list, which every request sent while the field was required, says nothing."""
+    with pytest.raises(ValidationError) as refused:
+        MetadataBundle.model_validate(_bundle(montage_boundaries=boundaries))
+    (error,) = refused.value.errors()
+    assert (error["type"], error["msg"]) == ("retired_field", _BOUNDARIES_RETIRED)
+    assert MetadataBundle.model_validate(_bundle(montage_boundaries=[])).montage_boundaries == []
+    assert MetadataBundle.model_validate(_bundle()).montage_boundaries == []
+    schema = MetadataBundle.model_json_schema()
+    field = schema["properties"]["montage_boundaries"]
+    assert "montage_boundaries" not in schema["required"]
+    assert (field["maxItems"], field["deprecated"]) == (0, True)
 
 
 def test_a_probe_entry_carries_the_trajectory_it_ran_against():
@@ -464,8 +441,8 @@ def test_idempotency_key_is_one_to_sixty_four_characters():
     """`request.Request.idempotency_key` is varchar(64); wl.works' own are `wlw-act-` plus a uuid (44)."""
     def request(key):
         return JobRequest(domain="neural", selection={}, parameters={}, idempotency_key=key,
-                          metadata=MetadataBundle(montage_boundaries=[], runs=[], probes=[], experimenter="jw",
-                                                  subject="s", task_types=[]))
+                          metadata=MetadataBundle(runs=[], probes=[], experimenter="jw", subject="s",
+                                                  task_types=[]))
 
     for refused in ("", "k" * 65):
         with pytest.raises(ValidationError):

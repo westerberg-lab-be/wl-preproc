@@ -19,6 +19,30 @@ def put(key: dict, positions: list[dict], seq: int = 1, prefix: str = "t_") -> d
     return put_positions(request, prefix=prefix)
 
 
+def seed_montage(key: dict, montage: dict, probes: list[dict] = (), status: str = "placed") -> None:
+    """Store `montage` ({montage_id, start_s, end_s}) for the session `key` as the montage stage would list it:
+    its `core.Montage` row, a `MontageProbe` and its `MontageSortableRun` rows for each of `probes` ({serial,
+    insertion_number, sortable_runs, and optionally electrode_config_hash and probe_type}), and a
+    `MontageDerivation` at `status` if the session has none. A row already stored is kept.
+
+    Call it after the session's last daemon pass before `accept()`: until a request is accepted, a pass derives
+    the session again and replaces whatever does not match its own result, this montage with it."""
+    from wl_preproc.schema import core
+
+    session = {"subject": key["subject"], "session_datetime": key["session_datetime"]}
+    if not core.MontageDerivation & session:
+        core.MontageDerivation.insert1({**session, "positions_status": status, "positions_seq": None,
+                                        "derived_at": datetime.datetime.now(datetime.UTC).replace(tzinfo=None)})
+    where = {**session, "montage_id": montage["montage_id"]}
+    core.Montage.insert1({**where, "start_s": montage["start_s"], "end_s": montage["end_s"]}, skip_duplicates=True)
+    core.MontageProbe.insert([
+        {**where, "probe_serial": probe["serial"], "insertion_number": probe["insertion_number"],
+         "electrode_config_hash": probe.get("electrode_config_hash"), "probe_type": probe.get("probe_type")}
+        for probe in probes], skip_duplicates=True)
+    core.MontageSortableRun.insert([{**where, "probe_serial": probe["serial"], "run_number": run}
+                                    for probe in probes for run in probe["sortable_runs"]], skip_duplicates=True)
+
+
 def before_t0(key: dict, minutes: int = 10) -> datetime.datetime:
     """The session's stored `ClockReference.reference_time`, floored to its minute, less `minutes` (naive UTC)."""
     from wl_preproc.schema import timebase

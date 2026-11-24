@@ -195,8 +195,8 @@ def derive_session(session_key: dict) -> bool:
     stored = to_stored(derivation, groups, facts.runs)
     if read_stored([key]).get((key["subject"], key["session_datetime"])) == stored:
         return False
-    write(key, stored)
-    return True
+    # False when a request was accepted since the look above: `write` looks again, under the lock.
+    return write(key, stored)
 
 
 def run_stage() -> tuple[int, list[str]]:

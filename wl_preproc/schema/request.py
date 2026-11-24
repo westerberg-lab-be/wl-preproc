@@ -297,16 +297,14 @@ def selection_hash(task_type: str, run_numbers: list[int] | tuple[int, ...]) -> 
     return hashlib.blake2b(payload.encode("utf-8"), digest_size=16).hexdigest()
 
 
-def _record_assertions(montages, run_assertions) -> None:
+def _record_assertions(run_assertions) -> None:
     """What the request asserts, insert-if-absent, inside the submission's own
-    transaction: wl.works' montage boundaries (`core.Montage`), and its id
-    and copy of each run (`core.RunAssertion`, built and checked by
-    `responder/jobs.py::_check_runs`). A request refused there, by key reuse
-    or a stale supersede, records none of them (Plan B's final review, M1,
-    and the leftovers' review). A `Montage` is never overwritten, so one
-    recorded from a refused request would have fixed its boundaries for good."""
-    if montages:
-        core.Montage.insert(list(montages), skip_duplicates=True)
+    transaction: wl.works' id and copy of each run (`core.RunAssertion`,
+    built and checked by `responder/jobs.py::_check_runs`). A request refused
+    there, by key reuse or a stale supersede, records none of them (Plan B's
+    final review, M1, and the leftovers' review). *It recorded wl.works'
+    montage boundaries (`core.Montage`) too, until this host derived them
+    (design spec `2026-11-24-montages-design.md` section 4.6).*"""
     if run_assertions:
         core.RunAssertion.insert(list(run_assertions), skip_duplicates=True)
 
@@ -498,14 +496,17 @@ def submit(
     requested_by: str | None = None,
     run_numbers: list[int] | tuple[int, ...] = (),
     probe_runs: dict[str, list[int]] | None = None,
-    montages: list[dict] | tuple[dict, ...] = (),
     run_assertions: list[dict] | tuple[dict, ...] = (),
     read_stored_payload: Callable[[dict], dict] | None = None,
+    guard: Callable[[], None] | None = None,
 ) -> dict:
     """Record a request and the canonical activation it selects, atomically,
     with its runs and each probe's (`_record_run_sets`), and what the request
-    asserts, its montages and run ids (`_record_assertions`), on every path
-    that returns.
+    asserts, its run ids (`_record_assertions`), on every path that returns.
+
+    ``guard``, when given, is called first inside the transaction; what it
+    raises refuses the request with nothing written. ``responder/jobs.py``
+    takes the session's montage lock there (``_hold_derivation``).
 
     Returns the ``Activation`` key. Both rows land or neither does: a ``Request``
     without its ``Activation`` is an accepted request that will never run, which
@@ -575,6 +576,8 @@ def submit(
     canonical_selection_key = {**selection_key, "role": "canonical"}
 
     with dj.conn().transaction:
+        if guard is not None:
+            guard()
         # Read before writing, rather than `insert1(..., skip_duplicates=True)`:
         # skip_duplicates cannot tell a retry from key reuse, and silently chose
         # "retry" for both. See _reject_key_reuse.
@@ -621,7 +624,7 @@ def submit(
         # The CURRENT canonical, not any canonical row: once a replacement
         # exists the montage has two, and a fetch1() here raised (design
         # spec `2026-09-30-canonical-lifecycle-design.md` section 3, case 2).
-        _record_assertions(montages, run_assertions)
+        _record_assertions(run_assertions)
         existing = current_canonical(selection_key)
         if existing is not None:
             return {k: existing[k] for k in Activation.primary_key}
@@ -720,15 +723,16 @@ def submit_replacement(
     supersedes_activation_id: int,
     run_numbers: list[int] | tuple[int, ...] = (),
     probe_runs: dict[str, list[int]] | None = None,
-    montages: list[dict] | tuple[dict, ...] = (),
     run_assertions: list[dict] | tuple[dict, ...] = (),
     read_stored_payload: Callable[[dict], dict] | None = None,
+    guard: Callable[[], None] | None = None,
 ) -> dict:
     """Record a request and the canonical activation that replaces the
     montage's current one, `supersedes_activation_id`: at the montage's next free
     activation id, with `supersedes` set, and its runs and each probe's
     (design spec `2026-09-30-canonical-lifecycle-design.md` section 3, case
     3). The superseded activation and its file are left exactly as they are.
+    ``guard`` is `submit()`'s, called once the montage's lock is confirmed.
 
     A retry under the same idempotency key returns the same activation
     (case 4). Naming anything but the current canonical raises
@@ -777,6 +781,8 @@ def submit_replacement(
             # that does not hold it: refuse rather than run unserialised (M7).
             if not _holds_lock(connection, lock):
                 raise dj.DataJointError(f"lost the montage lock {lock} (a reconnect?); try again")
+            if guard is not None:
+                guard()
             prior = Request & {"idempotency_key": idempotency_key}
             if prior:
                 _reject_key_reuse(
@@ -811,7 +817,7 @@ def submit_replacement(
                         "requested_at": _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None),
                     }
                 )
-            _record_assertions(montages, run_assertions)
+            _record_assertions(run_assertions)
             used = (Activation & montage_key).to_arrays("activation_id")
             activation_id = int(max(used) + 1) if len(used) else 1
             for _ in range(_MAX_DERIVATIVE_ALLOCATE_ATTEMPTS):
@@ -978,11 +984,12 @@ def submit_derivative(
     payload: dict,
     requested_by: str | None = None,
     probe_runs: dict[str, list[int]] | None = None,
-    montages: list[dict] | tuple[dict, ...] = (),
     run_assertions: list[dict] | tuple[dict, ...] = (),
     read_stored_payload: Callable[[dict], dict] | None = None,
+    guard: Callable[[], None] | None = None,
 ) -> dict:
     """Record a request and the derivative activation its run set selects.
+    ``guard`` is `submit()`'s, called first inside the transaction.
 
     Mirrors ``submit()``'s structure — the activation guard, the no-nesting
     guard, ``_reject_key_reuse``, one transaction — and differs in exactly
@@ -1109,8 +1116,8 @@ def submit_derivative(
     ``ActivationProbeRun``, the runs each probe's sort covers, which the
     responder states as the whole run set for every probe the request names.
     Before any of that, and on its dedupe paths too, what the request asserts
-    (``_record_assertions``): its ``Montage`` boundaries and its
-    ``RunAssertion`` rows, so a refusal in this transaction leaves none.
+    (``_record_assertions``): its ``RunAssertion`` rows, so a refusal in this
+    transaction leaves none.
 
     **A derivative never supersedes a canonical.** ``supersedes`` is written
     nowhere in this function, and nowhere else in this codebase. It exists on
@@ -1164,6 +1171,8 @@ def submit_derivative(
     selection_key = {**montage_key, "selection_hash": digest}
 
     with dj.conn().transaction:
+        if guard is not None:
+            guard()
         # Read before writing, rather than `insert1(..., skip_duplicates=True)`:
         # skip_duplicates cannot tell a retry from key reuse. See
         # _reject_key_reuse, including what the derivative-specific
@@ -1197,7 +1206,7 @@ def submit_derivative(
                 }
             )
 
-        _record_assertions(montages, run_assertions)
+        _record_assertions(run_assertions)
         existing = Activation & selection_key
         if existing:
             # One fetch1() for the whole row rather than one per key

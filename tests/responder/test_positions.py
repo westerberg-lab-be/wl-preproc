@@ -6,7 +6,7 @@ import datetime
 
 import pytest
 
-from tests.positions import put
+from tests.positions import put, seed_montage
 
 _AT = datetime.datetime(2027, 6, 1, 9, 0)
 
@@ -144,14 +144,14 @@ def test_after_the_first_request_the_set_is_fixed(landed_session, prefix):
 
     key = landed_session("pstfixed", _AT)
     put(key, _two(), seq=2, prefix=prefix)
+    seed_montage(key, {"montage_id": 0, "start_s": 0.0, "end_s": 12.0})
     job = JobRequest(
         domain="neural", selection={"session_datetime": _AT.replace(tzinfo=datetime.UTC), "montage_id": 0},
         parameters={}, idempotency_key="pstfixed-k1",
         metadata=MetadataBundle(
             runs=[{"run_number": n, "start_s": a, "end_s": b, "works_run_id": f"wr-{n}"}
                   for n, a, b in ((1, 0.0, 4.0), (2, 5.0, 11.0))],
-            montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}], probes=[],
-            experimenter="jw", subject="pstfixed", task_types=[], subject_details=None))
+            probes=[], experimenter="jw", subject="pstfixed", task_types=[], subject_details=None))
     accept(job, prefix=prefix)
 
     with pytest.raises(PositionsConflict) as raised:
