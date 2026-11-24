@@ -143,16 +143,31 @@ Named checks the task reviews carried forward:
 
 ### The whole-branch review
 
-FINAL_REVIEW
+The final review (Opus, `ec4ab12..29adc4f`) found 0 Critical, 1 Important and 6 Minor. It closed the NaN check
+as unreachable: requests refuse NaN (`allow_inf_nan=False`), and MySQL refuses NaN in the non-null double columns
+the times are read from.
+- **Fixed in one wave** (`afdaac7`; a scoped re-review found all four addressed and nothing broken):
+  - **I1:** a `limit`, or a `since`, of more than 4300 digits is now a 422, not a dropped connection.
+  - **M2:** `_span_notes` leaves reversed SpikeGLX segments out, so it keeps the one rule for what ends before it
+    starts.
+  - **M4:** the re-time route in `docs/ops/lab-host-protocol.md` covers a freed session (rehydrate it first).
+  - **M5:** a nickname of only white space is a 422, as a `bad_reason` of only white space is.
+- **Ruled to stand, M6:** a `bad_reason` of `""` on an unmarked run is a 422. The protocol and the amendments block
+  say so, and wl.works is told to send null. Loosening it is a contract change wl.works would re-pin.
+- **Deferred:** M3 and M7, below.
 
 ## Deferred minors
 
-DEFERRED_MINORS
-
-The ledger records these meanwhile.
+The ledger holds the full wording of each. The final review's fix wave closed three earlier ones: Task 7's
+long `limit` (I1), Task 6's `_span_notes` (M2), and Task 1's white-space nickname (M5).
+- **Final review:** M3, `_timebase` leaves reversed SpikeGLX segments out, but `provenance.n_segments` still counts
+  them (its notes say why); M7, long lines (`entry.py:255`, the `ListedTrainingRecords` docstring).
+- **Task 8:** the protocol's "timebase/clock_reference's reference_datetime" (~:702) uses the NWB-side name, where
+  the table's column is `reference_time`; this handoff's "Four things" counts the marks and the nickname as one;
+  the amendments keep a stale "Nothing is added until it does" beside the closure.
 - **Task 1:** `_post_job` re-imports `json` and duplicates `test_http.py`'s server start-up; `match="run_number|run 7"`
-  is a redundant alternation; `marked_bad=False` with `bad_reason=""` is refused and a white-space nickname is
-  accepted, both untested.
+  is a redundant alternation; `marked_bad=False` with `bad_reason=""` is refused, untested (a white-space
+  nickname is now refused, M5).
 - **Task 2:** the `described_subject` docstring should say the nickname is deliberately absent; `session.py`'s
   `new_file` docstring omits it.
 - **Task 3:** no direct test of `_request_marks` on a payload lacking `metadata`, the mark keys or a run;
@@ -174,7 +189,7 @@ The ledger records these meanwhile.
 
 ## Carried to later parts
 
-- **The moved-probe join** (the requester's next piece; see the choice above, with his requirement verbatim). It
+- **The moved-probe join** (the requester's next piece; see the choice above, with their requirement verbatim). It
   needs a design before a plan: montage as position and channel selection, and partial overlap.
 - **Automatic reclamation** (the requester, 2026-11-21: not in this piece; it stays in the queue).
 - **Then XC-513 and XC-543's reader, and part 2's bridges**, which this piece was moved ahead of.
@@ -183,7 +198,13 @@ The ledger records these meanwhile.
 
 ## The suite
 
-SUITE_RESULTS
+At `afdaac7`, with every reference set (NSLR, BMD and Boost, Andersson, the OpenIris recording), run one
+interpreter after the other:
+- **Python 3.11:** 3520 passed, 2 skipped, 1 deselected, 1 xfailed, in 1:03:48. The skips: U'n'Eye (numba cannot
+  load OpenMP here) and the `.bhv2` sample (`WLPP_BHV2_SAMPLE` unset).
+- **Python 3.13:** 3520 passed, 3 skipped, 1 xfailed, in 1:02:22. The skips: two Kilosort tests (not installed
+  in that venv) and the `.bhv2` sample.
+- The two `test_http.py` timeouts seen under load during the build did not recur.
 
 ## Deploy
 
