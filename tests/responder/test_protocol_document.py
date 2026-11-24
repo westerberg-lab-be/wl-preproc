@@ -67,3 +67,17 @@ def test_every_field_positions_carry_is_named_in_the_protocol():
                      for model in (PositionsRequest, ProbePosition, PositionsResponse)
                      for name in model.model_fields if f"`{name}`" not in section)
     assert missing == []
+
+
+def test_the_shared_role_and_the_retired_boundaries_are_documented():
+    """The montages piece (`2026-11-24-montages-design.md` section 4.6): `montage_boundaries` is retired, and a
+    request may name a shared group. wl.works builds its request from this section, and its 409 and 404 rows
+    answer `PUT /positions` too."""
+    section = _section("`POST /jobs`")
+    assert "`shared`" in section and "`group_id`" in section
+    assert "`montage_boundaries` is retired" in section
+    text = PROTOCOL.read_text(encoding="utf-8")
+    rows = [line for line in text.splitlines() if line.startswith("| `409` |")]
+    assert any("`PUT /positions`" in row for row in rows)
+    assert "(Task 12" not in text
+    assert "recorded **if absent**" not in text and "records it **if absent**" not in text
