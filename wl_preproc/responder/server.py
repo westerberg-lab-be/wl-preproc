@@ -223,9 +223,9 @@ def serve(
 
     # GET /nwb and PUT /nwb/active (design spec
     # `2026-09-29-nwb-publishing-design.md` section 6), under the same lock.
-    def locked_nwb_list_fn(since):
+    def locked_nwb_list_fn(since, limit):
         with lock:
-            return nwb_endpoints.list_files(since, prefix=prefix)
+            return nwb_endpoints.list_files(since, limit, prefix=prefix)
 
     def locked_nwb_active_fn(request):
         with lock:
@@ -234,9 +234,9 @@ def serve(
     # GET /sessions (design spec
     # `2026-10-01-session-listing-and-run-requests-design.md` section 2),
     # under the same lock.
-    def locked_sessions_list_fn(since):
+    def locked_sessions_list_fn(since, limit):
         with lock:
-            return sessions_endpoint.list_sessions(since, prefix=prefix)
+            return sessions_endpoint.list_sessions(since, limit, prefix=prefix)
 
     handler_cls = make_handler(token, locked_health_fn, locked_accept_fn, locked_nwb_list_fn,
                                locked_nwb_active_fn, locked_sessions_list_fn)

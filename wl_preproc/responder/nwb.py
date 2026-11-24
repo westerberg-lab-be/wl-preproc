@@ -23,9 +23,11 @@ def _key_json(key: dict) -> dict:
             "montage_id": int(key["montage_id"]), "activation_id": int(key["activation_id"])}
 
 
-def list_files(since: int | None, prefix: str = DEFAULT_PREFIX) -> dict:
+def list_files(since: int | None, limit: int | None = None, prefix: str = DEFAULT_PREFIX) -> dict:
     """Every activation whose file changed after `since` (all of them when
-    None): its status, where its file is now, and its description."""
+    None): its status, where its file is now, and its description. Ordered by
+    each file's latest change; `limit` keeps the first of them, and the cursor
+    is the latest `change_seq` on the page (`since`, or 0, on an empty one)."""
     from wl_preproc.nwb.publish import activation_tuple, key_of, placement_history
     from wl_preproc.schema import nwb as nwb_schema
     from wl_preproc.schema import request as request_schema
@@ -33,8 +35,15 @@ def list_files(since: int | None, prefix: str = DEFAULT_PREFIX) -> dict:
     nwb_schema.activate(prefix=prefix)
     changes = nwb_schema.NwbChange.proj(*_KEY).to_dicts() if since is None else \
         (nwb_schema.NwbChange & f"change_seq > {int(since)}").proj(*_KEY).to_dicts()
-    cursor = max((change["change_seq"] for change in changes), default=since or 0)
-    keys = list({activation_tuple(change): key_of(change) for change in changes}.values())
+    latest_seq: dict[tuple, int] = {}
+    for change in changes:
+        moment = activation_tuple(change)
+        latest_seq[moment] = max(latest_seq.get(moment, 0), change["change_seq"])
+    page = sorted(latest_seq, key=latest_seq.get)[:limit]
+    cursor = max((latest_seq[moment] for moment in page), default=since or 0)
+    on_page = set(page)
+    keys = list({activation_tuple(change): key_of(change) for change in changes
+                 if activation_tuple(change) in on_page}.values())
     # Two queries for the whole listing, not two per file, and only the
     # columns it returns (the final review's M2).
     rows = {activation_tuple(row): row for row in (nwb_schema.NwbFile & keys).proj(
@@ -50,7 +59,7 @@ def list_files(since: int | None, prefix: str = DEFAULT_PREFIX) -> dict:
                 row["activation_id"]
     latest = {activation: history[-1] for activation, history in placement_history(keys).items()}
     files = []
-    for moment in sorted(rows):
+    for moment in page:
         row, placement, key = rows[moment], latest.get(moment), key_of(rows[moment])
         files.append({
             "activation": _key_json(key),

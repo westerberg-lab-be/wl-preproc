@@ -2106,3 +2106,30 @@ def test_a_partial_aim_is_refused_over_http(start_server):
 
     assert status == 422
     assert any(entry["loc"][-1] == "atlas_level" for entry in json.loads(body)["detail"])
+
+
+@pytest.mark.parametrize("path", ["/nwb", "/sessions"])
+@pytest.mark.parametrize("query", ["limit=0", "limit=-1", "limit=1.5", "limit=", "limit=1&limit=2",
+                                   "since=1&limit=1&x=1"])
+def test_paging_parameters_are_checked(path, query):
+    """`limit` is one positive integer, `since` one non-negative one, each at most once; `limit=01`
+    passes 1 (design spec `2026-11-24-wl-works-requests-design.md` section 4.4)."""
+    calls = []
+
+    def listing(since, limit):
+        calls.append((since, limit))
+        return {"cursor": 0, "files": [], "sessions": []}
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(
+        TOKEN, _health_ok, _unused, nwb_list_fn=listing, sessions_list_fn=listing))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        status, body = _request(f"{base}{path}?{query}", method="GET", token=TOKEN)
+        assert (status, json.loads(body)) == (422, {"error": "the only parameters are since, one non-negative "
+                                                             "integer, and limit, one positive integer"})
+        assert _request(f"{base}{path}?limit=01", method="GET", token=TOKEN)[0] == 200
+        assert calls == [(None, 1)]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
