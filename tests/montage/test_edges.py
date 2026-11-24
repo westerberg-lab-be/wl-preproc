@@ -16,6 +16,13 @@ def test_a_time_with_seconds_stands_for_that_second():
     assert window(datetime(2025, 6, 10, 9, 5, 30, 250000), T0, 0.0) == (330.0, 331.0)
 
 
+def test_seconds_are_truncated_on_the_wall_clock_not_the_session_clock():
+    t0 = datetime(2025, 6, 10, 9, 0, 0, 250000)
+    lo, hi = window(datetime(2025, 6, 10, 9, 5, 30, 900000), t0, 0.0)
+    assert lo == pytest.approx(329.75)
+    assert hi == pytest.approx(330.75)
+
+
 def test_the_manifests_t0_widens_by_a_minute_each_side():
     assert window(datetime(2025, 6, 10, 9, 6), T0, 60.0) == (300.0, 480.0)
     assert widen_for("manifest") == 60.0
@@ -72,6 +79,12 @@ def test_a_whole_minute_does_not_touch_a_run_starting_at_its_end():
     lo, hi = window(datetime(2025, 6, 10, 9, 6), T0, 0.0)
     assert (lo, hi) == (360.0, 420.0)
     assert place(lo, hi, runs) == Placement("gap", gap=1)
+
+
+def test_with_overlapping_runs_the_first_that_holds_the_window_wins():
+    runs = (RunSpan(1, 0.0, 100.0), RunSpan(2, 50.0, 150.0))
+    assert place(90.0, 120.0, runs) == Placement("inside", gap=2, run_number=2)
+    assert place(40.0, 120.0, runs) == Placement("gap", gap=1)
 
 
 def test_a_non_finite_value_is_refused_by_name():

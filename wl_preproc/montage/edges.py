@@ -41,12 +41,13 @@ def widen_for(t0_source: str | None) -> float:
 
 def window(at: datetime, t0: datetime, widen_s: float) -> tuple[float, float]:
     """`[lo, hi)` in session seconds for a time `at` (naive UTC). A whole minute stands for sixty seconds; a time with
-    seconds stands for the second it falls in."""
-    seconds = (at - t0).total_seconds()
+    seconds stands for the wall-clock second it falls in."""
     if at.second == 0 and at.microsecond == 0:
-        lo, hi = seconds, seconds + 60.0
+        lo = (at - t0).total_seconds()
+        hi = lo + 60.0
     else:
-        lo = float(math.floor(seconds))
+        # The time is truncated to its wall second; t0 may carry microseconds, so session seconds are not floored.
+        lo = (at.replace(microsecond=0) - t0).total_seconds()
         hi = lo + 1.0
     return lo - widen_s, hi + widen_s
 
