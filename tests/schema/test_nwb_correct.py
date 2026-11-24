@@ -105,6 +105,20 @@ def test_a_written_file_is_stale_once_its_subjects_details_change(published):
     assert not _is_stale(key)
 
 
+def test_a_changed_nickname_marks_no_file_stale(published):
+    """Spec section 4.2: a nickname corrects no built file."""
+    from wl_preproc.nwb.correct import stale_files
+    from wl_preproc.schema import pipeline
+
+    _session_key, _key, _runs, _root = published
+    before = (pipeline.subject.Subject & {"subject": _SUBJECT}).fetch1("subject_nickname")
+    pipeline.subject.Subject.update1({"subject": _SUBJECT, "subject_nickname": "Pico"})
+    try:
+        assert not [stale for stale in stale_files() if stale["subject"] == _SUBJECT]
+    finally:
+        pipeline.subject.Subject.update1({"subject": _SUBJECT, "subject_nickname": before})
+
+
 def test_a_derivative_and_a_superseded_file_are_stale_too(published, daemon_module, prefix, shares):
     """Spec section 2: every written file of the animal, whatever its role
     or whether a replacement superseded it."""
@@ -206,6 +220,27 @@ def test_a_published_file_is_corrected_where_it_is_with_its_annotations(publishe
     finally:
         _restore(key, shares)
     assert file_subject(live)["date_of_birth"] == _BIRTH
+
+
+def test_a_corrected_files_description_keeps_the_nickname_its_subject_states(published, shares):
+    """The nickname is not corrected (spec section 4.2) but the description
+    rebuilt from the file must still carry it. The fixture's file was built
+    without one, so its record is given the nickname a build would have
+    stated."""
+    from wl_preproc.nwb.correct import correct
+    from wl_preproc.schema import nwb as nwb_schema
+
+    _session_key, key, _runs, _root = published
+    row = (nwb_schema.NwbFile & key).fetch1()
+    stated = {**row["description"], "subject": {**row["description"]["subject"], "nickname": "Pico"}}
+    nwb_schema.NwbFile.update1({**key, "description": stated})
+    _set_birth(datetime.date(2016, 3, 1))
+    try:
+        correct(key, shares, _DAY)
+        assert (nwb_schema.NwbFile & key).fetch1("description")["subject"]["nickname"] == "Pico"
+    finally:
+        _set_birth(_BIRTH)
+        correct(key, shares, _DAY)
 
 
 def test_a_file_not_yet_published_is_corrected_in_scratch(published, daemon_module, prefix, tmp_path_factory):

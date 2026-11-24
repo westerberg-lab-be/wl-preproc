@@ -372,7 +372,7 @@ def test_an_ni_session_builds_an_nwb_file_saying_the_ni_kept_time(landed, ni_nwb
     its t = 0 came from is one of the four sources."""
     from pynwb import NWBHDF5IO
 
-    from wl_preproc.schema import core
+    from wl_preproc.schema import core, timebase
 
     _recipe, _truth, session_key, _session_dir = landed["ni"]
     _activation, row, _report = ni_nwb
@@ -385,6 +385,10 @@ def test_an_ni_session_builds_an_nwb_file_saying_the_ni_kept_time(landed, ni_nwb
     started_at = session_key["session_datetime"].replace(tzinfo=datetime.timezone.utc)
     assert row["reference_source"] == "manifest"
     assert row["started_at_difference_s"] == pytest.approx(started_at.timestamp() - rig_at_zero, abs=1e-6)
+    # As the daemon stored it, and `GET /sessions` lists it.
+    stored = (timebase.ClockReference & session_key).fetch1()
+    assert (row["reference_time"], row["reference_source"], row["started_at_difference_s"]) == (
+        stored["reference_time"], stored["reference_source"], stored["started_at_difference_s"])
     description = row["description"]
     assert description["quality"]["clock"] == "nidq"
     assert description["quality"]["timing_tier"] == "N"
@@ -397,6 +401,8 @@ def test_an_ni_session_builds_an_nwb_file_saying_the_ni_kept_time(landed, ni_nwb
         assert module["timing_provenance"].to_dataframe()["tier"].tolist() == ["N"]
         reference = module["clock_reference"].to_dataframe()
         assert reference["source"].tolist() == [row["reference_source"]]
+        assert reference["reference_datetime"].tolist() == [
+            stored["reference_time"].replace(tzinfo=datetime.timezone.utc).isoformat()]
         assert nwb.session_start_time == row["reference_time"].replace(tzinfo=datetime.timezone.utc)
 
 

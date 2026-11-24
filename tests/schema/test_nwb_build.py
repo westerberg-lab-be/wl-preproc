@@ -122,6 +122,169 @@ def test_the_file_is_written_valid_and_describes_the_activation(built):
     assert (built.path.parent.parent.name, built.path.parent.name) == ("nwbstep1", "2025-07-20_01")
 
 
+def _built_with_nickname(activation, tmp_path_factory, nickname):
+    """A fresh build of the activation while `Subject.subject_nickname` holds
+    `nickname`; the subject's row is restored after."""
+    from pynwb import NWBHDF5IO
+
+    from wl_preproc.nwb.build import build
+    from wl_preproc.schema import pipeline
+
+    _session_key, key, _runs = activation
+    restrict = {"subject": _SUBJECT}
+    before = (pipeline.subject.Subject & restrict).fetch1("subject_nickname")
+    pipeline.subject.Subject.update1({**restrict, "subject_nickname": nickname})
+    try:
+        result = build(key, tmp_path_factory.mktemp("nwb-nick"))
+    finally:
+        pipeline.subject.Subject.update1({**restrict, "subject_nickname": before})
+    assert result.status == "written", result.findings
+    with NWBHDF5IO(str(result.path), "r") as handle:
+        return result.description["subject"]["nickname"], handle.read().subject.description
+
+
+def test_the_file_states_the_animals_nickname(activation, tmp_path_factory):
+    nickname, text = _built_with_nickname(activation, tmp_path_factory, "Pico")
+    assert text == ("Nickname Pico, as wl.works' record gives it. "
+                    "As wl.works' job request stated it (design spec section 9).")
+    assert nickname == "Pico"
+
+
+@pytest.mark.parametrize("stored", [None, _SUBJECT])
+def test_a_stub_nickname_is_not_stated(activation, tmp_path_factory, stored):
+    """No nickname sent, or one equal to the subject id (the landing stub)."""
+    nickname, text = _built_with_nickname(activation, tmp_path_factory, stored)
+    assert text == "As wl.works' job request stated it (design spec section 9)."
+    assert nickname is None
+
+
+def _marked_request(key, idempotency_key, montage, runs, marks, **selection):
+    """`_request`, its runs carrying `marks` ({run_number: reason})."""
+    marked = [{**run, "marked_bad": True, "bad_reason": marks[run["run_number"]]} if run["run_number"] in marks
+              else run for run in runs]
+    request = _request(key, idempotency_key, montage, marked)
+    request.selection.update(selection)
+    return request
+
+
+def _marks_of(result):
+    from pynwb import NWBHDF5IO
+
+    assert result.status == "written", result.findings
+    with NWBHDF5IO(str(result.path), "r") as handle:
+        stored = handle.read().intervals["runs"].to_dataframe()
+    described = [(run["run_number"], run["marked_bad"], run["bad_reason"]) for run in result.description["runs"]]
+    return stored["marked_bad"].tolist(), stored["bad_reason"].tolist(), described
+
+
+def _forget_request(session_key, montage_id, *request_keys):
+    """Drop what a test's own requests left, so the stage tests that count
+    the session's activations are unmoved: its montage (and with it its
+    activations) and the requests."""
+    from wl_preproc.schema import core, request
+
+    (core.Montage & {**session_key, "montage_id": montage_id}).delete(prompt=False)
+    for request_key in request_keys:
+        (request.Request & {"idempotency_key": request_key}).delete(prompt=False)
+
+
+def test_a_marked_run_is_marked_in_its_file(activation, prefix, tmp_path_factory):
+    """Design spec `2026-11-24-wl-works-requests-design.md` section 4.1: the
+    file's runs table and description carry the marks of its own request."""
+    from wl_preproc.nwb.build import build
+    from wl_preproc.responder.jobs import accept
+
+    session_key, _key, runs = activation
+    montage = {**_montage(runs), "montage_id": 5}
+    key = accept(_marked_request(session_key, "nwbstep1-marked", montage, runs, {1: "eye lost"}), prefix=prefix)
+    try:
+        flags, reasons, described = _marks_of(build(key, tmp_path_factory.mktemp("nwb-marked")))
+    finally:
+        _forget_request(session_key, 5, "nwbstep1-marked")
+    assert (flags, reasons) == ([True, False], ["eye lost", ""])
+    assert described == [(1, True, "eye lost"), (2, False, None)]
+
+
+def test_each_file_reads_its_own_requests_marks(activation, prefix, tmp_path_factory):
+    """Review focus 2: the replacement, sent unmarked, builds a file reading
+    none; the first file's marks are unchanged."""
+    from wl_preproc.nwb.build import build
+    from wl_preproc.responder.jobs import accept
+
+    session_key, _key, runs = activation
+    montage = {**_montage(runs), "montage_id": 6}
+    first = accept(_marked_request(session_key, "nwbstep1-marks-first", montage, runs, {1: "eye lost"}),
+                   prefix=prefix)
+    second = accept(_marked_request(session_key, "nwbstep1-marks-second", montage, runs, {}, role="canonical",
+                                    supersedes_activation_id=first["activation_id"]), prefix=prefix)
+    try:
+        assert second["activation_id"] != first["activation_id"]
+        after = _marks_of(build(second, tmp_path_factory.mktemp("nwb-marks-second")))
+        before = _marks_of(build(first, tmp_path_factory.mktemp("nwb-marks-first")))
+    finally:
+        _forget_request(session_key, 6, "nwbstep1-marks-first", "nwbstep1-marks-second")
+    assert after[:2] == ([False, False], ["", ""])
+    assert before[:2] == ([True, False], ["eye lost", ""])
+
+
+def test_the_file_leaves_out_what_ends_before_it_starts(activation, prefix, tmp_path_factory):
+    """Design spec `2026-11-24-wl-works-requests-design.md` section 4.5: for
+    one build run 2, run 1's block and a SpikeGLX file end before they start,
+    written into `core` after the session landed, and restored after. A
+    canonical asserting run 1 alone is accepted, and its file holds none of
+    the three and names each in its notes."""
+    from pynwb import NWBHDF5IO
+
+    from wl_preproc.nwb.build import build
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import core
+
+    session_key, _key, runs = activation
+    first, second = sorted(runs, key=lambda r: r["run_number"])
+    run = (core.Run & {**session_key, "run_number": second["run_number"]}).fetch1()
+    (block,) = [(core.BlockTime & {**session_key, "block_id": row["block_id"]}).fetch1()
+                for row in core.measured_blocks(session_key) if first["start_s"] <= row["start_s"] <= first["end_s"]]
+    ohdpi = (core.Segment & {**session_key, "system": "ohdpi"}).fetch1()
+    segment = {**ohdpi, "system": "spikeglx", "segment_id": "run_g0/run_g0_t0.imec0.ap.bin",
+               "start_s": first["start_s"] + 1.0, "end_s": first["start_s"] + 0.5}
+    core.AcquisitionSystem.insert1({**session_key, "system": "spikeglx"})
+    core.Segment.insert1(segment, allow_direct_insert=True)
+    core.Run.update1({**run, "run_stop_time": run["run_start_time"] - 0.25})
+    core.BlockTime.update1({**block, "stop_s": block["start_s"] - 0.5})
+    montage = {**_montage(runs), "montage_id": 7}
+    try:
+        key = accept(_request(session_key, "nwbstep1-reversed", montage, [first]), prefix=prefix)
+        result = build(key, tmp_path_factory.mktemp("nwb-reversed"))
+        assert result.status == "written", (result.reason, result.findings)
+        with NWBHDF5IO(str(result.path), "r") as handle:
+            nwb = handle.read()
+            run_numbers = nwb.intervals["runs"].to_dataframe()["run_number"].tolist()
+            blocks = ([] if "blocks" not in nwb.intervals
+                      else nwb.intervals["blocks"].to_dataframe()["block_number"].tolist())
+            trial_blocks = nwb.trials.to_dataframe()["block_id"].tolist()
+            files = nwb.processing["timebase"]["segments"].to_dataframe()["file_path"].tolist()
+    finally:
+        core.BlockTime.update1(block)
+        core.Run.update1(run)
+        (core.Segment & {name: segment[name] for name in core.Segment.primary_key}).delete_quick()
+        (core.AcquisitionSystem & {**session_key, "system": "spikeglx"}).delete_quick()
+        _forget_request(session_key, 7, "nwbstep1-reversed")
+    assert run_numbers == [first["run_number"]]
+    assert block["block_id"] not in blocks and block["block_id"] not in trial_blocks
+    assert trial_blocks and set(trial_blocks) == {-1}
+    assert segment["segment_id"] not in files and ohdpi["segment_id"] in files
+    assert [described["blocks"] for described in result.description["runs"]] == [[]]
+    left_out = [note for note in result.description["notes"] if note.endswith("left out of this file")]
+    assert left_out == [
+        f"file {segment['segment_id']} ends at {segment['end_s']:.3f} s, before its start at "
+        f"{segment['start_s']:.3f} s: left out of this file",
+        f"run {run['run_number']} ends at {run['run_start_time'] - 0.25:.3f} s, before its start at "
+        f"{run['run_start_time']:.3f} s: left out of this file",
+        f"block {block['block_id']} of run {first['run_number']} ends at {block['start_s'] - 0.5:.3f} s, before "
+        f"its start at {block['start_s']:.3f} s: left out of this file",
+    ]
+
+
 def test_a_synthetic_sessions_clock_falls_back_to_the_manifest(activation, built):
     """Section 4.2's fallback, end to end: the synthetic sync box's barcodes
     are counters from 1,000,000, not seconds since 2020, so they disagree
@@ -129,6 +292,37 @@ def test_a_synthetic_sessions_clock_falls_back_to_the_manifest(activation, built
     assert built.clock["source"] == "manifest"
     assert built.clock["reference_time"] == _SESSION_DATETIME.replace(tzinfo=datetime.timezone.utc)
     assert abs(built.clock["started_at_difference_s"]) > 60.0
+
+
+def test_the_file_places_t0_as_stored(activation, tmp_path_factory):
+    """The build reads t = 0's wall time as the daemon stored it
+    (`timebase.ClockReference`), never working it out again, so a file and
+    `GET /sessions` cannot disagree: a stored value moved by a few
+    microseconds is the file's, in `timebase/clock_reference` and as its
+    start time, and in what `record` stores."""
+    from pynwb import NWBHDF5IO
+
+    from wl_preproc.nwb.build import build
+    from wl_preproc.schema import timebase
+
+    session_key, key, _runs = activation
+    stored = (timebase.ClockReference & session_key).fetch1()
+    moved = stored["reference_time"] + datetime.timedelta(seconds=1, microseconds=250017)
+    timebase.ClockReference.update1({**session_key, "reference_time": moved})
+    try:
+        result = build(key, tmp_path_factory.mktemp("nwb-t0"))
+    finally:
+        timebase.ClockReference.update1({**session_key, "reference_time": stored["reference_time"]})
+    assert result.status == "written", result.findings
+    placed = moved.replace(tzinfo=datetime.timezone.utc)
+    assert (result.clock["reference_time"], result.clock["source"], result.clock["started_at_difference_s"]) == (
+        placed, stored["reference_source"], stored["started_at_difference_s"])
+    with NWBHDF5IO(str(result.path), "r") as handle:
+        nwb = handle.read()
+        reference = nwb.processing["timebase"]["clock_reference"].to_dataframe()
+        assert reference["reference_datetime"].tolist() == [placed.isoformat()]
+        assert reference["source"].tolist() == [stored["reference_source"]]
+        assert nwb.session_start_time == placed
 
 
 def test_runs_blocks_trials_and_events_carry_the_tables_times(activation, built):
@@ -465,7 +659,7 @@ def test_the_daemon_stage_records_every_activation(activation, daemon_module, pr
     """`run_once(nwb_root=...)`: one `NwbFile` row per activation, with its
     datasets; without a root the stage is skipped and says so."""
     from wl_preproc.schema import nwb as nwb_schema
-    from wl_preproc.schema import request
+    from wl_preproc.schema import request, timebase
 
     assert daemon_module.run_once(prefix=prefix)["nwb"] is None
     report = daemon_module.run_once(prefix=prefix, nwb_root=tmp_path_factory.mktemp("nwb-daemon"))
@@ -475,6 +669,10 @@ def test_the_daemon_stage_records_every_activation(activation, daemon_module, pr
     assert set(rows) == {(r["montage_id"], r["activation_id"]) for r in (request.Activation & session_key).to_dicts()}
     canonical = rows[(key["montage_id"], key["activation_id"])]
     assert canonical["status"] == "written" and canonical["reference_source"] == "manifest"
+    # The stored t = 0, as `GET /sessions` lists it (`timebase.ClockReference`).
+    stored = (timebase.ClockReference & session_key).fetch1()
+    assert (canonical["reference_time"], canonical["reference_source"], canonical["started_at_difference_s"]) == (
+        stored["reference_time"], stored["reference_source"], stored["started_at_difference_s"])
     assert canonical["description"]["identity"]["identifier"] == canonical["nwb_identifier"]
     assert len(nwb_schema.NwbFile.Dataset & canonical) > 50
     assert rows[(1, 0)]["status"] == "refused"
@@ -1671,3 +1869,29 @@ def test_the_masks_screen_region_is_the_sessions_field_plus_its_margin(activatio
     width, height = RIG_SETUP["half_field_deg"]
     assert rows and {(row["region_half_width_deg"], row["region_half_height_deg"], row["region_from_setup"])
                      for row in rows} == {(width + 2.0, height + 2.0, 1)}
+
+
+def test_the_span_note_uses_only_the_spikeglx_files_the_file_keeps(activation):
+    """A SpikeGLX file that ends before it starts is left out of the file, so its times do not move the
+    "eye data outside the covered span" note."""
+    from wl_preproc.nwb.gather import _span_notes
+    from wl_preproc.schema import core
+
+    session_key, _key, _runs = activation
+    ohdpi = (core.Segment & {**session_key, "system": "ohdpi"}).fetch1()
+    kept = {**ohdpi, "system": "spikeglx", "segment_id": "span_g0/span_g0_t0.imec0.ap.bin",
+            "start_s": 0.0, "end_s": 100.0}
+    reversed_ = {**kept, "segment_id": "span_g0/span_g0_t1.imec0.ap.bin", "start_s": -50.0, "end_s": -60.0}
+    core.AcquisitionSystem.insert1({**session_key, "system": "spikeglx"}, skip_duplicates=True)
+    core.Segment.insert([kept, reversed_], allow_direct_insert=True)
+    try:
+        notes = _span_notes(session_key, {"covered_start_s": 10.0, "covered_end_s": 90.0})
+    finally:
+        for added in (kept, reversed_):
+            (core.Segment & {name: added[name] for name in core.Segment.primary_key}).delete_quick()
+        (core.AcquisitionSystem & {**session_key, "system": "spikeglx"}).delete_quick()
+    eye = [note for note in notes if note.startswith("eye data outside")]
+    assert eye == [
+        "eye data outside the sync box's covered span, 0.000 s to 10.000 s, is left out: no barcode placed it",
+        "eye data outside the sync box's covered span, 90.000 s to 100.000 s, is left out: no barcode placed it",
+    ]

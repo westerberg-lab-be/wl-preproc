@@ -34,7 +34,8 @@ def _facts(**changes):
         census=[_probe("100.nidq.bin", "a" * 32)],
         electrodes={("a" * 32, "NP1000"): [0, 1, 2]},
         strobed_runs=[1, 2], strobed_blocks=[1, 2], censused=frozenset({"100.nidq.bin"}), rig_problems=[],
-        rig_session=None, run_calibrations={}, warnings=[], parameter_changes=0, control_kinds={}, clock="syncbox",
+        rig_session=None, run_calibrations={}, warnings=[], parameter_changes=0, control_kinds={}, system_pauses=0, clock="syncbox",
+        reference=None,
     )
     return dataclasses.replace(facts, **changes)
 
@@ -285,10 +286,38 @@ def test_a_session_lists_how_many_training_records_it_has_and_its_clock():
 
     entry = build_entry(_facts(rig_session={"session_kind": "training"}, parameter_changes=3,
                                control_kinds={"pause": 2, "resume": 3, "reward": 1, "note": 4}))
-    assert entry["training_records"] == {"parameter_changes": 3, "pauses": 2, "manual_rewards": 1}
+    assert entry["training_records"] == {"parameter_changes": 3, "pauses": 2, "manual_rewards": 1,
+                                         "system_pauses": 0}
     assert entry["clock"] == "syncbox"
     plain = build_entry(_facts(clock=None))
     assert (plain["training_records"], plain["clock"]) == (None, None)
+
+
+def test_a_session_lists_t0s_wall_time_as_stored():
+    """The wall-clock time of session t = 0, as `timebase.ClockReference`
+    stored it, naive UTC with its microseconds, and where it came from; both
+    null until it is stored (the requester's choice of 2026-11-24)."""
+    from wl_preproc.listing.entry import build_entry
+
+    stored = {"reference_time": datetime.datetime(2027, 7, 22, 9, 0, 12, 504318), "reference_source": "rig_clock"}
+    entry = build_entry(_facts(reference=stored))
+    assert (entry["t0_datetime"], entry["t0_source"]) == ("2027-07-22T09:00:12.504318", "rig_clock")
+    assert entry["session_datetime"] == "2027-07-22T09:00:00"
+    plain = build_entry(_facts())
+    assert (plain["t0_datetime"], plain["t0_source"]) == (None, None)
+
+
+def test_the_entrys_digest_changes_when_the_stored_t0_does():
+    """The listing stage hashes `build_entry`'s output, so a stored value
+    that changes, or one stored for the first time, appends a change."""
+    from wl_preproc.listing.entry import build_entry
+    from wl_preproc.listing.stage import digest
+
+    stored = {"reference_time": datetime.datetime(2027, 7, 22, 9, 0, 12, 504318), "reference_source": "rig_clock"}
+    digests = {digest(build_entry(_facts(reference=reference))) for reference in (
+        None, stored, {**stored, "reference_time": stored["reference_time"] + datetime.timedelta(microseconds=1)},
+        {**stored, "reference_source": "nidq_meta"})}
+    assert len(digests) == 4
 
 
 def test_a_session_read_before_its_training_records_were_kept_lists_zeros():
@@ -298,4 +327,113 @@ def test_a_session_read_before_its_training_records_were_kept_lists_zeros():
     from wl_preproc.listing.entry import build_entry
 
     entry = build_entry(_facts(rig_session={"session_kind": "training"}))
-    assert entry["training_records"] == {"parameter_changes": 0, "pauses": 0, "manual_rewards": 0}
+    assert entry["training_records"] == {"parameter_changes": 0, "pauses": 0, "manual_rewards": 0,
+                                         "system_pauses": 0}
+
+
+def test_a_listed_run_carries_its_task_hash():
+    from wl_preproc.listing.entry import build_entry
+
+    digest = "sha256:" + "cd34" * 16
+    records = {1: {"task": "rf_map", "stopped_because": None, "stop_kind": None, "task_hash": digest},
+               2: {"task": "fixation", "stopped_because": None, "stop_kind": None, "task_hash": None}}
+    first, second = build_entry(_facts(records=records))["runs"]
+    assert (first["task_hash"], second["task_hash"]) == (digest, None)
+    (without,) = [run for run in build_entry(_facts(records={}))["runs"] if run["run_number"] == 1]
+    assert without["task_hash"] is None
+
+
+# --- What ends before it starts is left out, flagged, and breaks no page. ---------------------------
+# Design spec `2026-11-24-wl-works-requests-design.md` section 4.5.
+
+
+def _where(flags):
+    return [(flag["code"], flag["run_number"], flag["block_number"], flag["segment_id"]) for flag in flags]
+
+
+def test_a_reversed_file_is_left_out_and_flagged():
+    from wl_preproc.listing.entry import build_entry
+
+    reversed_file = {"segment_id": "200.nidq.bin", "start_s": 15.0, "end_s": 14.0}
+    entry = build_entry(_facts(segments=[*_facts().segments, reversed_file]))
+    assert [segment["segment_id"] for segment in entry["segments"]] == ["100.nidq.bin"]
+    assert [run["segments"] for run in entry["runs"]] == [["100.nidq.bin"], ["100.nidq.bin"]]
+    assert _where(entry["flags"]) == [("ends_before_start", None, None, "200.nidq.bin")]
+    assert entry["flags"][0]["message"] == (
+        "file 200.nidq.bin ends at 14.000 s, before its start at 15.000 s: left out of this listing")
+
+
+def test_a_reversed_run_is_left_out_and_flagged():
+    """Its block starts between its stop and its start, so lies in no run
+    that is listed: the run's blocks are not dropped with it."""
+    from wl_preproc.listing.entry import build_entry
+
+    runs = [_facts().runs[0], {"run_number": 2, "task_type": 0, "run_start_time": 20.0, "run_stop_time": 12.0,
+                               "closed": 1}]
+    entry = build_entry(_facts(runs=runs))
+    assert [run["run_number"] for run in entry["runs"]] == [1]
+    assert _where(entry["flags"]) == [("ends_before_start", 2, None, None), ("block_outside_runs", None, 2, None)]
+    assert entry["flags"][0]["message"] == (
+        "run 2 ends at 12.000 s, before its start at 20.000 s: left out of this listing")
+
+
+def test_a_reversed_block_is_left_out_and_flagged():
+    """Its run's other blocks are numbered without it, as the file's
+    `_blocks` counts only the blocks it holds. One in no run names no run,
+    and is not also flagged as outside the runs."""
+    from wl_preproc.listing.entry import build_entry
+
+    blocks = [{"block_id": 1, "start_s": 1.004, "stop_s": 3.0}, {"block_id": 3, "start_s": 3.5, "stop_s": 3.2},
+              {"block_id": 5, "start_s": 4.0, "stop_s": 9.9}, *_facts().blocks[1:],
+              {"block_id": 7, "start_s": 25.0, "stop_s": 24.0}]
+    attributes = {number: {"closed": "1", "block_type": "Bt1"} for number in (1, 2, 3, 5, 7)}
+    entry = build_entry(_facts(blocks=blocks, block_attributes=attributes, strobed_blocks=[1, 2, 3, 5, 7]))
+    assert [(block["block_number"], block["block_in_run"]) for block in entry["runs"][0]["blocks"]] == [
+        (1, 1), (5, 2)]
+    assert [block["block_number"] for block in entry["runs"][1]["blocks"]] == [2]
+    assert _where(entry["flags"]) == [("ends_before_start", 1, 3, None), ("ends_before_start", None, 7, None)]
+    assert [flag["message"] for flag in entry["flags"]] == [
+        "block 3 of run 1 ends at 3.200 s, before its start at 3.500 s: left out of this listing",
+        "block 7 ends at 24.000 s, before its start at 25.000 s: left out of this listing"]
+
+
+def test_a_run_whose_only_block_was_left_out_has_no_run_without_block_flag():
+    """It did not stop before its first trial, which is what that flag says."""
+    from wl_preproc.listing.entry import build_entry
+
+    blocks = [_facts().blocks[0], {"block_id": 2, "start_s": 12.004, "stop_s": 12.002}]
+    entry = build_entry(_facts(blocks=blocks))
+    assert entry["runs"][1]["blocks"] == []
+    assert _where(entry["flags"]) == [("ends_before_start", 2, 2, None)]
+
+
+def test_equal_times_are_listed():
+    from wl_preproc.listing.entry import build_entry
+
+    entry = build_entry(_facts(blocks=[_facts().blocks[0], {"block_id": 2, "start_s": 12.004, "stop_s": 12.004}],
+                               segments=[*_facts().segments, {"segment_id": "200.nidq.bin", "start_s": 21.5,
+                                                              "end_s": 21.5}]))
+    assert entry["flags"] == []
+    assert [block["block_number"] for block in entry["runs"][1]["blocks"]] == [2]
+    assert [segment["segment_id"] for segment in entry["segments"]] == ["100.nidq.bin", "200.nidq.bin"]
+
+
+def test_the_rigs_pauses_are_counted_apart():
+    """wl-xcon's display process pauses the session itself when it dies; those rows carry
+    `by.kind` "system" and are the rig's, not a person's. A row with no actor is a person's."""
+    from wl_preproc.listing.entry import build_entry
+
+    # three stored pause rows (member, system, no actor), as the gather reports them: all three, and one system
+    entry = build_entry(_facts(rig_session={"session_kind": "training"}, control_kinds={"pause": 3},
+                               system_pauses=1))
+    assert entry["training_records"]["pauses"] == 2
+    assert entry["training_records"]["system_pauses"] == 1
+
+
+def test_a_person_pausing_during_a_rig_pause_counts_once_each():
+    """The rig's pause (carrying PAUSE's code) and the person's (event_code null), and one resume."""
+    from wl_preproc.listing.entry import build_entry
+
+    entry = build_entry(_facts(rig_session={"session_kind": "training"},
+                               control_kinds={"pause": 2, "resume": 1}, system_pauses=1))
+    assert (entry["training_records"]["pauses"], entry["training_records"]["system_pauses"]) == (1, 1)

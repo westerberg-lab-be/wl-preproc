@@ -354,3 +354,116 @@ def test_metadata_blocks_are_refused_naming_metadata_runs():
     schema = MetadataBundle.model_json_schema()
     blocks = schema["properties"]["blocks"]
     assert "blocks" not in schema["required"] and (blocks["maxItems"], blocks["deprecated"]) == (0, True)
+
+
+# --- wl.works' bad-run marks, the animal's nickname, a bounded experimenter. -----------------------
+# Design spec `2026-11-24-wl-works-requests-design.md` sections 2, 4.1, 4.2 and 4.6.
+
+
+def _run_entry(**fields):
+    return {"run_number": 7, "start_s": 0.0, "end_s": 1.0, "works_run_id": "w", **fields}
+
+
+@pytest.mark.parametrize("reason", [None, "", "   "])
+def test_a_marked_run_needs_a_reason(reason):
+    from wl_preproc.contracts.protocol import RunEntry
+
+    with pytest.raises(ValidationError, match="run_number|run 7") as excinfo:
+        RunEntry.model_validate(_run_entry(marked_bad=True, bad_reason=reason))
+    assert "run 7" in str(excinfo.value)
+
+
+def test_a_reason_needs_a_mark():
+    from wl_preproc.contracts.protocol import RunEntry
+
+    with pytest.raises(ValidationError, match="run 7"):
+        RunEntry.model_validate(_run_entry(bad_reason="x"))
+    with pytest.raises(ValidationError, match="run 7"):
+        RunEntry.model_validate(_run_entry(marked_bad=False, bad_reason="x"))
+
+
+def test_a_marked_run_with_a_reason_is_accepted():
+    from wl_preproc.contracts.protocol import RunEntry
+
+    entry = RunEntry.model_validate(_run_entry(marked_bad=True, bad_reason="eye lost"))
+    assert (entry.marked_bad, entry.bad_reason) == (True, "eye lost")
+    assert RunEntry.model_validate(entry.model_dump()) == entry
+    assert RunEntry.model_validate(_run_entry(marked_bad=True, bad_reason="x" * 1000)).bad_reason == "x" * 1000
+    with pytest.raises(ValidationError):
+        RunEntry.model_validate(_run_entry(marked_bad=True, bad_reason="x" * 1001))
+
+
+def test_nickname_is_one_to_sixty_four_characters():
+    from wl_preproc.contracts.protocol import SubjectDetails
+
+    for bad in ("", "n" * 65):
+        with pytest.raises(ValidationError):
+            SubjectDetails.model_validate({"nickname": bad})
+    for good in ("Pico", "n" * 64):
+        assert SubjectDetails.model_validate({"nickname": good}).nickname == good
+
+
+def test_a_nickname_of_only_white_space_is_refused():
+    from wl_preproc.contracts.protocol import SubjectDetails
+
+    for blank in (" ", "    ", "\t\n"):
+        with pytest.raises(ValidationError, match="nickname"):
+            SubjectDetails.model_validate({"nickname": blank})
+    assert SubjectDetails.model_validate({"nickname": " Pico "}).nickname == " Pico "
+
+
+def test_experimenter_is_at_most_sixty_four_characters():
+    for good in ("e" * 64, ""):
+        assert MetadataBundle.model_validate(_bundle(experimenter=good)).experimenter == good
+    with pytest.raises(ValidationError):
+        MetadataBundle.model_validate(_bundle(experimenter="e" * 65))
+
+
+def test_a_request_without_the_new_fields_reads_as_before():
+    bundle = MetadataBundle.model_validate(
+        _bundle(runs=[_run_entry()], subject_details={"species": "Macaca mulatta"}))
+    assert bundle.runs[0].marked_bad is False and bundle.runs[0].bad_reason is None
+    assert bundle.subject_details.nickname is None
+
+
+# --- A listed run, block or file never ends before it starts. ---------------------------------------
+# Design spec `2026-11-24-wl-works-requests-design.md` section 4.5: the backstop behind `build_entry`.
+
+
+def test_listed_items_refuse_an_end_before_the_start():
+    from wl_preproc.contracts.protocol import ListedBlock, ListedRun, ListedSegment
+
+    items = {
+        ListedSegment: {"segment_id": "a.nidq.bin", "probes": None},
+        ListedRun: {"run_number": 3, "task_code": 0, "task": None, "closed": True, "stopped_because": None,
+                    "stop_kind": None, "calibration": None, "segments": [], "blocks": []},
+        ListedBlock: {"block_number": 4, "block_in_run": 1, "block_type": None, "closed": None, "n_trials": 0},
+    }
+    for model, fields in items.items():
+        with pytest.raises(ValidationError, match="ends at 4.999 s, before its start at 5.0 s") as excinfo:
+            model.model_validate({**fields, "start_s": 5.0, "end_s": 4.999})
+        assert excinfo.value.errors()[0]["type"] == "ends_before_start"
+        assert model.model_validate({**fields, "start_s": 5.0, "end_s": 5.0}).end_s == 5.0
+        assert model.model_validate({**fields, "start_s": 5.0, "end_s": 6.0}).end_s == 6.0
+
+
+def test_a_listed_flag_may_name_a_file():
+    from wl_preproc.contracts.protocol import ListedFlag
+
+    flag = ListedFlag.model_validate({"code": "ends_before_start", "message": "m", "segment_id": "a.nidq.bin"})
+    assert (flag.segment_id, flag.run_number, flag.block_number) == ("a.nidq.bin", None, None)
+    assert ListedFlag.model_validate({"code": "task_unknown", "message": "m"}).segment_id is None
+
+
+def test_idempotency_key_is_one_to_sixty_four_characters():
+    """`request.Request.idempotency_key` is varchar(64); wl.works' own are `wlw-act-` plus a uuid (44)."""
+    def request(key):
+        return JobRequest(domain="neural", selection={}, parameters={}, idempotency_key=key,
+                          metadata=MetadataBundle(montage_boundaries=[], runs=[], probes=[], experimenter="jw",
+                                                  subject="s", task_types=[]))
+
+    for refused in ("", "k" * 65):
+        with pytest.raises(ValidationError):
+            request(refused)
+    for accepted in ("wlw-act-" + "0123456789abcdef0123456789abcdef0123", "k" * 64, "k"):
+        assert request(accepted).idempotency_key == accepted

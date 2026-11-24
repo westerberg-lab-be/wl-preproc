@@ -211,8 +211,8 @@ def _add_changes(module, changes: list[dict]) -> None:
                    [change["now"] or "" for change in changes]),
             column("sequence", "wl-xcon's number for the change (-1 if the row has none).",
                    [-1 if change["sequence"] is None else change["sequence"] for change in changes]),
-            column("by_kind", "Who made it, by kind only: box or member ('' if not recorded, and for the rig's own "
-                              "suggestion).",
+            column("by_kind", "Who made it, by kind only: box, member or system (the rig itself) ('' if not recorded, and for the "
+                              "rig's own suggestion).",
                    [change["by_kind"] or "" for change in changes]),
             column("kind", "set (a person's value), hand_back, range (a draw's numbers: was and now are draws), "
                            "revert, clear, drum, training, suggested (the rig suggested a move: its detail says which, "
@@ -265,6 +265,6 @@ def _add_controls(module, controls: list[dict]) -> None:
                                   "recorded).",
                    [-1 if control["trial_index"] is None else control["trial_index"] for control in controls]),
             column("detail", "The control's own fields, as JSON text.", [control["detail"] for control in controls]),
-            column("by_kind", "Who sent it, by kind only: box or member ('' for nobody).",
+            column("by_kind", "Who sent it, by kind only: box, member or system (the rig itself) ('' for nobody).",
                    [control["by_kind"] or "" for control in controls]),
         ]))

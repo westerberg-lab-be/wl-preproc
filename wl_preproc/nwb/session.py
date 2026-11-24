@@ -25,6 +25,9 @@ def new_file(session: dict) -> NWBFile:
     date_of_birth = subject.get("date_of_birth")
     if isinstance(date_of_birth, datetime.date) and not isinstance(date_of_birth, datetime.datetime):
         date_of_birth = datetime.datetime.combine(date_of_birth, datetime.time(), tzinfo=datetime.timezone.utc)
+    description = "As wl.works' job request stated it (design spec section 9)."
+    if subject.get("nickname"):
+        description = f"Nickname {subject['nickname']}, as wl.works' record gives it. {description}"
     return NWBFile(
         session_description=session["description"],
         identifier=session["identifier"],
@@ -37,6 +40,6 @@ def new_file(session: dict) -> NWBFile:
             species=subject.get("species"),
             sex=subject.get("sex") or "U",
             date_of_birth=date_of_birth,
-            description="As wl.works' job request stated it (design spec section 9).",
+            description=description,
         ),
     )

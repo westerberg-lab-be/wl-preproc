@@ -14,9 +14,11 @@ from wl_preproc.contracts.protocol import SessionListing
 from wl_preproc.schema import DEFAULT_PREFIX
 
 
-def list_sessions(since: int | None, prefix: str = DEFAULT_PREFIX) -> dict:
+def list_sessions(since: int | None, limit: int | None = None, prefix: str = DEFAULT_PREFIX) -> dict:
     """Every session whose entry changed after `since` (all of them when
-    None), in the order of their latest change, and the cursor to send next."""
+    None), in the order of their latest change, and the cursor to send next:
+    the first `limit` of them when `limit` is given, and the cursor is then the
+    latest `change_seq` on the page (`since`, or 0, on an empty one)."""
     from wl_preproc.listing import entry
     from wl_preproc.schema import core, ephys, ingest, timebase
 
@@ -27,10 +29,11 @@ def list_sessions(since: int | None, prefix: str = DEFAULT_PREFIX) -> dict:
     for change in changes.proj("subject", "session_datetime").to_dicts():
         session = (change["subject"], change["session_datetime"])
         latest[session] = max(latest.get(session, 0), change["change_seq"])
-    cursor = max(latest.values(), default=since or 0)
-    facts = entry.gather_all([{"subject": subject, "session_datetime": moment} for subject, moment in latest])
+    page = sorted(latest.items(), key=lambda item: item[1])[:limit]
+    cursor = max((seq for _session, seq in page), default=since or 0)
+    facts = entry.gather_all([{"subject": subject, "session_datetime": moment} for (subject, moment), _seq in page])
     sessions = []
-    for (subject, moment), _seq in sorted(latest.items(), key=lambda item: item[1]):
+    for (subject, moment), _seq in page:
         try:
             sessions.append(entry.build_entry(facts[(subject, moment)]))
         except Exception as exc:

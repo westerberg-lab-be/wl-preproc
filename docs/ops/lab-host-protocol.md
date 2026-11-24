@@ -442,8 +442,44 @@ than something one side can do quietly.
   not inert, though: the whole request payload participates in the key-reuse comparison, so
   **resending the same `idempotency_key` with different `parameters` is a `409`**, not a
   retry.
-- **`metadata.experimenter`** becomes the request's `requested_by`. **`metadata.subject`**,
-  not any `subject` inside `selection`, is what identifies the session.
+- **`metadata.experimenter`** becomes the request's `requested_by`. **It is at most 64
+  characters, and a longer one is a `422`**; before 2026-11-24 it failed at the database
+  (`request.Request.requested_by` is `varchar(64)`). The empty string is still accepted and
+  gives a file with no experimenter. **`metadata.subject`**, not any `subject` inside
+  `selection`, is what identifies the session.
+- **`idempotency_key`** is 1 to 64 characters, and anything else is a `422` (the column is
+  `varchar(64)`). A key of `wlw-act-` and a 36-character uuid is 44.
+- **`metadata.subject_details`**, optional, is wl.works' own record of the animal:
+  `species` (1 to 64 characters), `sex` (`M`, `F` or `U`, default `U`), `date_of_birth`, and
+  `nickname` (**1 to 64 characters, since 2026-11-24**; a longer or empty one is a `422`).
+  The latest request wins. A request without `nickname` leaves the stored one as it was.
+  - **`nickname` is in the file's subject**, in `/general/subject/description`: "Nickname
+    <name>, as wl.works' record gives it. As wl.works' job request stated it (design spec
+    section 9)." A nickname that equals the subject's id (the stand-in the landing stub
+    writes) is not stated, and the description's `subject.nickname` is then null.
+  - **A changed nickname does not correct files already built**, unlike species, sex and date of
+    birth: a file states the nickname stored when it was built. A file built after the change
+    does carry it. To put a changed nickname in a file already built, send a replacement.
+- **A run's mark, `metadata.runs[].marked_bad` and `bad_reason`, since 2026-11-24.**
+  `marked_bad` is a boolean, default `false`. `bad_reason` is free text of at most 1000
+  characters, default null. They go together: `marked_bad` true with no reason (empty or only
+  white space), or a `bad_reason` with `marked_bad` not set, is a `422` naming the run. **Send null,
+  not `""`, as the reason of a run that is not marked.**
+  - The marks stay in the request as received; nothing else stores them.
+  - **They are in the file**, from the file's own request: the runs table's `marked_bad` and
+    `bad_reason` columns (`''` where not marked), and each run's `marked_bad` and `bad_reason` in
+    `GET /nwb`'s description (false and null where not marked). A run the request's
+    `metadata.runs` does not list reads as not marked.
+  - **A later mark reaches a file only through a later request**, a replacement: nothing corrects
+    a built file in place.
+- **A run that ends before it starts cannot be requested.** `GET /sessions` leaves it out
+  (see `ends_before_start`), so it is never in a copy of the listing. Asserting one in
+  `metadata.runs`, or naming it in a derivative's `run_numbers`, is a `422` that names the
+  run and both its times, for example *run 3 ends at 101.250 s, before its start at 101.300 s: left
+  out of this listing; it cannot be requested*. **A canonical need not assert it**: the run is
+  left out of the runs its montage's window requires. A window whose every run ends before it
+  starts is a `422` naming them, never an empty file. The file leaves such a run, block or
+  SpikeGLX file out and says so in its `notes`, with its times.
 
 **Response `200`:**
 
@@ -491,11 +527,19 @@ section 6).* Lists every NWB file whose record changed after a cursor, so wl.wor
 where each file is and what it holds without opening it.
 
 ```
-GET /nwb?since=<cursor>
+GET /nwb?since=<cursor>&limit=<n>
 Authorization: Bearer <token>
 ```
 
 - **`since`** is optional, one non-negative integer. Without it, every file is listed.
+- **`limit`** is optional, one positive integer, with no upper bound (since 2026-11-24). Without it, every
+  file after `since` is listed, as before. With it, the page is the first `limit` files, and
+  **`cursor` is the latest `change_seq` on the page**, or `since` (0 without it) when the page is empty. A page
+  with fewer than `limit` files means you are caught up. Any other key, a repeat of either, or a value that is
+  not a number of that kind is a `422`.
+- **The order is by each file's latest change (since 2026-11-24).** It was by activation key. An unpaged call
+  returns the same files and the same `cursor` as before, in a new order, so a reader that took the order from
+  the key must sort. Only the files on the page are read and described.
 - **The response** is [`docs/schemas/nwb_listing.json`](../schemas/nwb_listing.json):
   `{"cursor": <int>, "files": [...]}`. Send `cursor` as the next `since`; it only increases.
 - **Each file:**
@@ -530,7 +574,11 @@ Authorization: Bearer <token>
     `syncbox`, so a description written before reads unchanged), and two more values of
     `quality.reference_source`, where the wall-clock time of t = 0 came from under the NI:
     `rig_clock` (the rig's clock fitted to the recording) and `nidq_meta` (the first NI file's
-    `fileCreateTime`), beside `barcode` and `manifest`. The exported schema refuses fields and
+    `fileCreateTime`), beside `barcode` and `manifest`. **Within version 3, since 2026-11-24**
+    (design spec `2026-11-24-wl-works-requests-design.md` §4.1 and §4.2): each run's `marked_bad` (false
+    unless the file's request marked the run bad for behaviour) and `bad_reason` (null unless marked), and
+    the `subject`'s `nickname` (null where wl.works sent none), each defaulted so a description written before
+    reads unchanged. The exported schema refuses fields and
     values it does not know, so a copy validated against must take these. Read `schema_version`,
     and ignore fields you do not know.
 
@@ -573,12 +621,18 @@ the SpikeGLX segments and probes it recorded, and its flags. It is how wl.works 
 session's measured runs, to make the session's runs from them and to fire its canonical NWB.
 
 ```
-GET /sessions?since=<cursor>
+GET /sessions?since=<cursor>&limit=<n>
 Authorization: Bearer <token>
 ```
 
 - **`since`** is optional, one non-negative integer, as for `GET /nwb`. Without it, every
   listed session is listed.
+- **`limit`** is optional, one positive integer, with no upper bound (since 2026-11-24), as for
+  `GET /nwb`. The sessions changed after `since` are ordered by their latest change, as before, and the
+  page is the first `limit` of them; **`cursor` is the latest `change_seq` on the page**, or `since` (0
+  without it) when the page is empty. A page with fewer than `limit` sessions means you are caught up.
+  Only the sessions on the page are built. Any other key, a repeat, or a value that is not a number of that
+  kind is a `422`.
 - **The response** is [`docs/schemas/session_listing.json`](../schemas/session_listing.json):
   `{"cursor": <int>, "sessions": [...]}`. Send `cursor` as the next `since`; it only increases.
 - **A session is listed** once the daemon has read its event codes, and again whenever its entry
@@ -603,7 +657,8 @@ Authorization: Bearer <token>
     eye-tracker file whose analog copy on the NI was found but refused and which no barcode placed, or an eye
     file that is not the one its copy placed (another, or one changed since): it makes the session `D`);
   - `runs`, measured from the recording's `RUN_START` (`0x8006`) and `RUN_END` (4): `run_number`
-    (wl-xcon's `run_in_session`), `task_code`, `task` (wl-xcon's name for it), `start_s` and
+    (wl-xcon's `run_in_session`), `task_code`, `task` (wl-xcon's name for it), `task_hash` (the content hash of the task file it ran, `sha256:` and
+    its digest, from its start row, or null where the rig named none or named a path), `start_s` and
     `end_s` on the recording's clock, `closed`, wl-xcon's `stopped_because` and `stop_kind`,
     `calibration` (the display calibration the run ran against, from its start row in wl-xcon's
     record, or null), `segments` (the `segment_id`s of the SpikeGLX segments it spans), and `blocks`;
@@ -626,18 +681,30 @@ Authorization: Bearer <token>
     `run_number` it was accepted for (null at the open, for a run the recording did not
     measure, for one with no start row in wl-xcon's record, or for one whose number could not
     be stored, only the last flagged as a `rig_record_problem`), `at_local` (the rig's local time, not the recording's clock) and `by`: `kind` (`box`
-    for a name typed at the rig, `member` for a wl.works member), `name` and `account` (null for a
+    for a name typed at the rig, `member` for a wl.works member, `system` for the rig itself), `name` and `account` (null for a
     box), never the token or its issuer. A session wl-xcon did not run, one whose record predates
     its engine build B, and one read before this host carried them (2026-10-14) list null, null and
     `[]` alike;
   - `training_records`, how many of wl-xcon's training records the session has (design spec
     `2026-10-18-training-records-and-backup-clock-design.md` §3.4): its `parameter_changes`, and of
-    its console controls its `pauses` and `manual_rewards`; the rows are in the database and the
+    its console controls its `pauses` (a person's) and `manual_rewards`, and `system_pauses`, the
+    rig's own, sent when its display process died, counted apart; the rows are in the database and the
     NWB file, never listed. Null for a session wl-xcon did not run; a session read before this host
     carried them (2026-10-18) lists zeros;
   - `clock`, which clock kept the session's time: `syncbox`, `nidq` (built since part
     3b-1) or `lab` (part 4, not built yet), or null until the daemon has chosen it;
-  - `flags`, each a `code`, a `message`, and the `run_number` or `block_number` it is about:
+  - `t0_datetime`, the wall-clock time of session t = 0, ISO-8601, naive UTC like `session_datetime`
+    but kept to the microsecond, and `t0_source`, where it came from: `barcode` (the sync box's first
+    barcode), `rig_clock` (the rig's clock fitted to the recording) or `nidq_meta` (the first NI file's
+    creation time), each only within 60 s of the manifest's `started_at`, else `manifest` (`started_at`
+    itself, which `session_datetime` is). Worked out once by the daemon, after the session's event codes
+    are read, and the value every NWB file of the session built since it was stored starts at
+    (`timebase/clock_reference`'s `reference_datetime`); a file built before a session was re-timed keeps
+    the value it was built with (see below). Both are null until it is stored. It is what places a
+    time of day between runs: `session_datetime` may be up to 60 s from it, and a run's `start_s` counts
+    from it;
+  - `flags`, each a `code`, a `message`, and the `run_number`, `block_number` or `segment_id` (a
+    SpikeGLX file) it is about:
     `waiting_for_run_markers` (no measured run yet), `repeated_run_number` and
     `repeated_block_number` (a crash restart before wl-xcon's XC-026; only the first is
     listed), `run_without_block`, `bank_change_in_run`, `block_type_unknown`, `task_unknown`,
@@ -645,8 +712,35 @@ Authorization: Bearer <token>
     `rig_record_problem` (what wl-xcon's record could not supply, each naming its file, line by
     line: `runs.jsonl`, `config.json`, `warnings.jsonl`, `parameter_changes.jsonl` or
     `controls.jsonl`, the last two also when a count of codes disagrees or rows cannot be timed; or
-    the run record's absence; a problem stored before 2026-10-14 names no file).
+    the run record's absence; a problem stored before 2026-10-14 names no file), and
+    `ends_before_start`: a run, block or file whose end comes before its start, **left out of the
+    entry** and named here with both its times (a block with its run's number, when it lies in one).
+    It is the one flag that means something was withheld. Equal start and end is listed.
     **None of them blocks anything here.**
+
+### `t0_datetime` is fixed when it is stored: re-timing a session
+
+A session's t = 0 wall time is fixed when a daemon pass stores its `timebase.ClockReference` row,
+with the NI machine's time zone that pass had (`wlpp daemon --nidq-timezone <IANA name>`, such as
+`America/New_York`; unset, an NI file's creation time places nothing). That row is what
+`GET /sessions` lists as `t0_datetime` and `t0_source`, and what every NWB file of the session
+starts at. Starting the daemon later with another zone, or with one where it had none, changes no
+session already stored. `wlpp nwb build` takes no zone at all: it reads the stored row.
+
+**To re-time a session**, delete its row, then run a daemon pass with the zone set:
+
+    python -c "from wl_preproc.daemon import activate_all; activate_all(prefix='wlpp_'); \
+      from wl_preproc.schema import timebase; \
+      (timebase.ClockReference & {'subject': '<subject>', 'session_datetime': '<session_datetime>'}).delete_quick()"
+    wlpp daemon --nidq-timezone America/New_York …
+
+A session whose scratch copy was freed is skipped by the daemon, so rehydrate it first with
+`wlpp rehydrate --session <session folder> --nas-root <mount>`, then delete the row and run the pass.
+
+Until that pass, the session lists `t0_datetime` and `t0_source` as null and its NWB files wait.
+Once it has run, the session's entry changes, so `GET /sessions` lists it again. **Files already
+built keep the value they were built with** (their `quality.reference_source` and
+`timebase/clock_reference` say which); only a file built after the pass carries the new one.
 
 ---
 
@@ -660,12 +754,12 @@ Every code this host can return, on any endpoint.
 | `202` | `PUT /nwb/active` | `{"accepted": …, "unknown": […]}` | The active set is recorded; the daemon's next pass moves files. | — |
 | `400` | all | `{"error": "bad request"}` | Malformed request line, or an unparseable version such as `HTTP/9.9.9`. See the framing note below. | No — fix the client |
 | `401` | all | `{"error": "unauthorized"}` | Missing, wrong-scheme, or wrong token; or a verb no endpoint answers. | No — fix the credential |
-| `404` | all | `{"error": "not found"}` | Path is not one of `/health`, `/jobs`, `/nwb`, `/nwb/active`; or a query string on any path but `/nwb`. | No |
+| `404` | all | `{"error": "not found"}` | Path is not one of `/health`, `/jobs`, `/nwb`, `/nwb/active`, `/sessions`; or a query string on any path but `/nwb` and `/sessions`. | No |
 | `405` | all | `{"error": "method not allowed"}` | Known path, wrong verb — `GET /jobs`, `POST /health`, `GET /nwb/active`, authenticated `PUT /health`. | No |
 | `408` | `POST /jobs`, `PUT /nwb/active` | `{"error": "request timed out"}` | The declared body never fully arrived. | **Yes** |
 | `409` | `POST /jobs` | `{"error": "<what differed>"}` | Idempotency key reused for materially different content; a replacement naming a canonical that is not the montage's current one; or a run named under a `works_run_id` other than the one recorded, or a `works_run_id` recorded for another run. | **No — needs a human** |
 | `414` | all | `{"error": "request line too long"}` | Over-long request line. | No |
-| `422` | `POST /jobs`, `PUT /nwb/active`, `GET /nwb` (a `since` that is not one non-negative integer) | `{"error": "…"}` or `{"error": "invalid request body", "detail": […]}` | The request is malformed, or asks for something this host cannot do — **including naming a session it has not ingested yet**. | No — fix and resend; for a not-yet-ingested session, resend once the transfer lands |
+| `422` | `POST /jobs`, `PUT /nwb/active`, `GET /nwb` and `GET /sessions` (a `since` that is not one non-negative integer, a `limit` that is not one positive integer, any other key, or a key sent twice) | `{"error": "…"}` or `{"error": "invalid request body", "detail": […]}` | The request is malformed, or asks for something this host cannot do — **including naming a session it has not ingested yet**. | No — fix and resend; for a not-yet-ingested session, resend once the transfer lands |
 | `431` | all | `{"error": "request header fields too large"}` | Oversized header. | No |
 | `500` | all | `{"error": "<ExceptionType>: <message>"}` | This host's own fault, infrastructure included. | **Yes** |
 | `505` | all | `{"error": "http version not supported"}` | `HTTP/2.0` or later. See the framing note below. | No |
@@ -798,7 +892,11 @@ rather than paraphrased. It enumerates whichever of `task_type`, `origin`, `requ
 with the sentence `Mint a new idempotency key.`
 
 Because a genuine retry carries the same key **and the same content**, it is a `200`, not
-a `409`. A client following Plan 10 §6.1 will never see `409` from an honest retry; it sees
+a `409`. **That holds across versions of this contract (since 2026-11-24).** Before comparing, the stored payload
+is read again through today's `JobRequest`, so a field added with a default since the request was stored
+(`marked_bad`, `bad_reason`, `nickname`) does not make the same body a different request. A stored payload that
+today's model refuses is compared as it is stored, so **a field removed since storing still makes an honest
+retry a `409`**. A client following Plan 10 §6.1 will never see `409` from an honest retry; it sees
 it when two different intents were given one key.
 
 ### `500` **is** retryable, infrastructure faults included

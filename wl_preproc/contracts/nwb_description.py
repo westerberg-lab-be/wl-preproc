@@ -77,6 +77,8 @@ class SubjectInfo(_Frozen):
     sex: Literal["M", "F", "U"]
     date_of_birth: datetime.date | None
     age_days: int | None
+    # Added within version 3: a description stored before it reads None.
+    nickname: str | None = None
 
 
 class EyeData(_Frozen):
@@ -193,6 +195,11 @@ class Run(_Frozen):
     # `2026-11-07-rig-record-fields-design.md` section 8).
     plan: str | None = None
     end_reason: str | None = None
+    # Whether wl.works' job request for this file marks the run bad for
+    # behaviour, and why; null where not marked (design spec
+    # `2026-11-24-wl-works-requests-design.md` section 4.1).
+    marked_bad: bool = False
+    bad_reason: str | None = None
 
 
 class RigCalibration(_Frozen):

@@ -364,9 +364,9 @@ def make_handler(
     token: str,
     health_fn: Callable[[], Any],
     accept_fn: Callable[[JobRequest], dict],
-    nwb_list_fn: Callable[[int | None], dict] | None = None,
+    nwb_list_fn: Callable[[int | None, int | None], dict] | None = None,
     nwb_active_fn: Callable[[ActiveSetRequest], dict] | None = None,
-    sessions_list_fn: Callable[[int | None], dict] | None = None,
+    sessions_list_fn: Callable[[int | None, int | None], dict] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a `BaseHTTPRequestHandler` subclass closing over `token` and the
     two callables. A fresh class per call -- not a module-level singleton --
@@ -798,17 +798,35 @@ def make_handler(
             else:
                 self._send_json(200, {"activation": result, "accepted": True})
 
-        def _get_since(self, list_fn: Callable[[int | None], dict]) -> None:
-            """`GET /nwb` or `GET /sessions`, `[?since=<cursor>]`: 200 with
-            the listing; 422 when `since` is anything but one non-negative
-            integer."""
+        def _get_since(self, list_fn: Callable[[int | None, int | None], dict]) -> None:
+            """`GET /nwb` or `GET /sessions`, `[?since=<cursor>][&limit=<n>]`:
+            200 with the listing; 422 when `since` is anything but one
+            non-negative integer, `limit` anything but one positive integer
+            (a number of more than 4300 digits, which `int()` refuses, is
+            neither), or any other key or a repeat is sent."""
             query = parse_qs(self.path.partition("?")[2], keep_blank_values=True)
-            values = query.get("since", [])
-            if set(query) - {"since"} or len(values) > 1 or (values and not (values[0].isascii() and values[0].isdigit())):
-                self._send_json(422, {"error": "the only parameter is since, one non-negative integer"})
+            since, limit = query.get("since", []), query.get("limit", [])
+
+            def digits(values):
+                return values[0].isascii() and values[0].isdigit()
+
+            def convertible(values):
+                # `int()` refuses a string of more than 4300 digits (ValueError); that is the
+                # caller's mistake like any other bad cursor, not an escape from `do_GET`.
+                try:
+                    int(values[0])
+                except ValueError:
+                    return False
+                return True
+
+            if (set(query) - {"since", "limit"} or len(since) > 1 or len(limit) > 1
+                    or (since and not (digits(since) and convertible(since)))
+                    or (limit and not (digits(limit) and convertible(limit) and int(limit[0]) > 0))):
+                self._send_json(422, {"error": "the only parameters are since, one non-negative integer, "
+                                               "and limit, one positive integer"})
                 return
             try:
-                payload = list_fn(int(values[0]) if values else None)
+                payload = list_fn(int(since[0]) if since else None, int(limit[0]) if limit else None)
             except Exception as exc:  # noqa: BLE001 -- see module docstring's table
                 self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
                 return

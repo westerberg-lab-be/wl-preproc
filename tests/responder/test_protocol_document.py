@@ -45,3 +45,14 @@ def test_a_rig_record_problem_is_said_to_be_about_the_rigs_whole_record():
     section = _section("`GET /sessions`")
     assert "what wl-xcon's run record could not supply" not in section
     assert "`runs.jsonl`" in section and "`config.json`" in section and "`warnings.jsonl`" in section
+
+
+def test_the_404_row_names_every_path_and_both_query_paths():
+    """The router answers 404 for a path that is not one of the five, and for a query string on any path but
+    `/nwb` and `/sessions` (`handler.py::_CURSOR_PATHS`); the status table said `/nwb` only and left out
+    `/sessions` (design spec `2026-11-24-wl-works-requests-design.md` section 2.7)."""
+    text = PROTOCOL.read_text(encoding="utf-8")
+    row = next(line for line in text.splitlines() if line.startswith("| `404` |"))
+    for path in ("/health", "/jobs", "/nwb", "/nwb/active", "/sessions"):
+        assert f"`{path}`" in row
+    assert "a query string on any path but `/nwb` and `/sessions`" in row

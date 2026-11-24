@@ -31,6 +31,13 @@ def listed(dj_conn, prefix, tmp_path_factory):
                                           {"trial": 3, "kind": "note", "event_code": None},
                                           {"trial": 4, "kind": "reward", "event_code": 4134}]}),
         "plain": _session(tmp_path_factory, subject="sllist2", session_id="2025-07-22_01"),
+        "rigpause": _session(tmp_path_factory, subject="sllist3", session_id="2025-07-23_01", runs=True,
+                             rig_record={"session_kind": "recording", "controls": [
+                                 {"trial": 2, "by": {"kind": "member", "name": "J. W."}},
+                                 {"trial": 2, "by": {"kind": "system", "name": "display"}},
+                                 {"trial": 3, "by": None, "event_code": None},
+                                 {"trial": 3, "kind": "resume", "event_code": 4132,
+                                  "by": {"kind": "system", "name": "display"}}]}),
     }
     daemon.run_once(prefix=prefix)
     return sessions
@@ -94,7 +101,8 @@ def test_an_entry_counts_the_training_records_and_names_its_clock(listed):
 
     _recipe, key = listed["runs"]
     entry = session_entry(key)
-    assert entry["training_records"] == {"parameter_changes": 1, "pauses": 1, "manual_rewards": 1}
+    assert entry["training_records"] == {"parameter_changes": 1, "pauses": 1, "manual_rewards": 1,
+                                         "system_pauses": 0}
     assert entry["clock"] == "syncbox"
     plain = session_entry(listed["plain"][1])
     assert (plain["training_records"], plain["clock"]) == (None, "syncbox")
@@ -328,3 +336,13 @@ def test_get_sessions_reads_each_table_once_however_many_sessions_it_lists(liste
 
     selects(listing_since(after[2], 2))
     assert selects(listing_since(after[1], 1)) == selects(listing_since(after[2], 2))
+
+
+def test_the_rigs_pauses_are_counted_from_stored_rows_apart_from_a_persons(listed):
+    """A member's pause, the rig's own (`by.kind` "system") and one with no actor, landed and read back:
+    the person's two are `pauses`, the rig's is `system_pauses`."""
+    from wl_preproc.listing.entry import session_entry
+
+    entry = session_entry(listed["rigpause"][1])
+    assert (entry["training_records"]["pauses"], entry["training_records"]["system_pauses"]) == (2, 1)
+    assert session_entry(listed["runs"][1])["training_records"]["system_pauses"] == 0

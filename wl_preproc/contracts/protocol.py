@@ -15,7 +15,7 @@ import datetime
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 SCHEMA_VERSION = 1
@@ -245,6 +245,17 @@ class SubjectDetails(BaseModel):
     species: Annotated[str, Field(min_length=1, max_length=64)] | None = None
     sex: Literal["M", "F", "U"] = "U"
     date_of_birth: datetime.date | None = None
+    # What the lab calls the animal; the file's `subject.description` carries it.
+    nickname: Annotated[str, Field(min_length=1, max_length=64)] | None = None
+
+    @field_validator("nickname")
+    @classmethod
+    def _a_nickname_has_a_character_that_shows(cls, value: str | None) -> str | None:
+        # `PydanticCustomError`, not `ValueError`, for the reason
+        # `MetadataBundle._blocks_are_retired` gives.
+        if value is not None and not value.strip():
+            raise PydanticCustomError("blank_nickname", "nickname is only white space; leave it out or give one")
+        return value
 
 
 class RunEntry(BaseModel):
@@ -259,6 +270,25 @@ class RunEntry(BaseModel):
     start_s: _SessionSeconds
     end_s: _SessionSeconds
     works_run_id: Annotated[str, Field(min_length=1, max_length=64)]  # core.RunAssertion : varchar(64)
+    # wl.works' mark that the run is bad, and why (design spec
+    # `2026-11-24-wl-works-requests-design.md` section 2). Defaults keep every
+    # earlier payload valid.
+    marked_bad: bool = False
+    bad_reason: Annotated[str, Field(max_length=1000)] | None = None
+
+    @model_validator(mode="after")
+    def _a_mark_and_its_reason_go_together(self) -> RunEntry:
+        # `PydanticCustomError`, not `ValueError`, for the reason
+        # `MetadataBundle._blocks_are_retired` gives.
+        if self.marked_bad and not (self.bad_reason or "").strip():
+            raise PydanticCustomError(
+                "bad_run_without_reason", "run {run_number}: marked_bad needs a bad_reason that is not empty",
+                {"run_number": self.run_number})
+        if self.bad_reason is not None and not self.marked_bad:
+            raise PydanticCustomError(
+                "reason_without_bad_run", "run {run_number}: bad_reason is given but marked_bad is not set",
+                {"run_number": self.run_number})
+        return self
 
 
 class MetadataBundle(BaseModel):
@@ -274,7 +304,7 @@ class MetadataBundle(BaseModel):
     blocks: list[dict[str, Any]] = Field(default=[], json_schema_extra={"maxItems": 0, "deprecated": True})
     montage_boundaries: list[MontageBoundary]
     probes: list[ProbeEntry]
-    experimenter: str
+    experimenter: Annotated[str, Field(max_length=64)]
     subject: str
     task_types: list[str]
     subject_details: SubjectDetails | None = None
@@ -302,7 +332,7 @@ class JobRequest(BaseModel):
     domain: str
     selection: dict[str, Any]
     parameters: dict[str, Any]
-    idempotency_key: str
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=64)]  # request.Request.idempotency_key : varchar(64)
     metadata: MetadataBundle
 
 
@@ -394,13 +424,19 @@ ListedFlagCode = Literal[
     "task_unknown",
     "block_outside_runs",
     "rig_record_problem",
+    "ends_before_start",
 ]
 
 
 class ListedFlag(BaseModel):
     """A fact wl.works shows beside the session as a hint. None blocks
     anything here. `run_number` and `block_number` say where, when it is one
-    run or one block."""
+    run or one block; `segment_id` when it is one SpikeGLX file.
+
+    `ends_before_start` is the one flag that means something was withheld: a
+    run, block or file whose end comes before its start is left out of the
+    entry, and this flag names it, with both its times, in its stead (design
+    spec `2026-11-24-wl-works-requests-design.md` section 4.5)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -408,6 +444,19 @@ class ListedFlag(BaseModel):
     message: str
     run_number: int | None = None
     block_number: int | None = None
+    segment_id: str | None = None
+
+
+def _in_order(item: str, start_s: float, end_s: float) -> None:
+    """The backstop behind `listing/entry.py::build_entry`, which leaves out
+    what ends before it starts by `listing/order.py`'s same rule, so this
+    cannot fire from it. Equal start and end is allowed. A
+    `PydanticCustomError`, for the reason `MetadataBundle._blocks_are_retired`
+    gives."""
+    if end_s < start_s:
+        raise PydanticCustomError(
+            "ends_before_start", "{item} ends at {end_s} s, before its start at {start_s} s",
+            {"item": item, "start_s": start_s, "end_s": end_s})
 
 
 class ListedProbe(BaseModel):
@@ -442,6 +491,11 @@ class ListedSegment(BaseModel):
     end_s: float
     probes: list[ListedProbe] | None
 
+    @model_validator(mode="after")
+    def _ends_after_it_starts(self) -> ListedSegment:
+        _in_order(f"file {self.segment_id}", self.start_s, self.end_s)
+        return self
+
 
 class ListedBlock(BaseModel):
     """A measured block: consecutive trials under one block type, inside a
@@ -460,6 +514,11 @@ class ListedBlock(BaseModel):
     closed: bool | None
     n_trials: int
 
+    @model_validator(mode="after")
+    def _ends_after_it_starts(self) -> ListedBlock:
+        _in_order(f"block {self.block_number}", self.start_s, self.end_s)
+        return self
+
 
 class ListedRun(BaseModel):
     """A measured run (`core.Run`) with the rig's record of it
@@ -471,6 +530,9 @@ class ListedRun(BaseModel):
     run_number: int
     task_code: int
     task: str | None
+    # The content hash of the task file the run ran (`sha256:` and its digest),
+    # from its start row; null where the rig named none, or named a path.
+    task_hash: str | None = None
     start_s: float
     end_s: float
     closed: bool
@@ -482,6 +544,11 @@ class ListedRun(BaseModel):
     calibration: str | None
     segments: list[str]
     blocks: list[ListedBlock]
+
+    @model_validator(mode="after")
+    def _ends_after_it_starts(self) -> ListedRun:
+        _in_order(f"run {self.run_number}", self.start_s, self.end_s)
+        return self
 
 
 class ListedCalibration(BaseModel):
@@ -497,9 +564,9 @@ class ListedCalibration(BaseModel):
 
 
 class ListedActor(BaseModel):
-    """Who accepted a warning: a name typed at the rig (`box`, no account) or
-    a wl.works member, by name and wl.works account. Never the token's id or
-    its issuer."""
+    """Who accepted a warning: `box` (a name typed at the rig, no account), `member`
+    (a wl.works member, by name and wl.works account) or `system` (the rig itself,
+    by its process's name, no account). Never the token's id or its issuer."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -530,7 +597,8 @@ class ListedWarning(BaseModel):
 class ListedTrainingRecords(BaseModel):
     """How many of wl-xcon's training records the session has: its live
     parameter changes, and of its console controls the pauses and the manual
-    rewards. The rows are in the database and the NWB file, not here (design
+    rewards. `pauses` are a person's (a row with no actor included); `system_pauses` are the rig's own,
+    sent when its display process died (`by_kind` "system"). The rows are in the database and the NWB file, not here (design
     spec `2026-10-18-training-records-and-backup-clock-design.md` section 3.4).
     Since 2026-11-07 `parameter_changes` counts a person's acts on a setting,
     one per act among a set, a hand-back, a range edit and a revert; a clear
@@ -542,6 +610,7 @@ class ListedTrainingRecords(BaseModel):
     parameter_changes: int
     pauses: int
     manual_rewards: int
+    system_pauses: int = 0
 
 
 class RejectedFile(BaseModel):
@@ -581,6 +650,13 @@ class SessionEntry(BaseModel):
     # and 4.1).
     training_records: ListedTrainingRecords | None
     clock: Literal["syncbox", "nidq", "lab"] | None
+    # The wall-clock time of session t = 0, naive UTC to the microsecond, as
+    # `timebase.ClockReference` stored it, and where it came from: what
+    # places a time of day between runs, where `session_datetime` (the
+    # manifest's started_at) may be up to 60 s off it. Null until stored (the
+    # requester's choice of 2026-11-24).
+    t0_datetime: datetime.datetime | None = None
+    t0_source: Literal["barcode", "rig_clock", "nidq_meta", "manifest"] | None = None
 
 
 class SessionListing(BaseModel):

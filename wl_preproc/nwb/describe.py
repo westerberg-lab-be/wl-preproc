@@ -96,6 +96,7 @@ def describe(data, *, status: str, n_critical: int, checksums: list[dict], built
             "sex": subject["sex"],
             "date_of_birth": subject["date_of_birth"],
             "age_days": _age_days(subject["date_of_birth"], session["session_datetime"]),
+            "nickname": subject.get("nickname"),
         },
         "data_types": {
             "eye": None if eye is None else {
@@ -141,6 +142,8 @@ def describe(data, *, status: str, n_critical: int, checksums: list[dict], built
             "calibration": run.get("calibration"),
             "plan": run.get("plan"),
             "end_reason": run.get("end_reason"),
+            "marked_bad": bool(run.get("marked_bad", False)),
+            "bad_reason": (run.get("bad_reason") or None) if run.get("marked_bad") else None,
         } for run in data.runs],
         "quality": {
             "timing_tier": session["timing_tier"],
@@ -148,7 +151,8 @@ def describe(data, *, status: str, n_critical: int, checksums: list[dict], built
             "clock": session["session_clock"],
             "eye_usable_fraction": (eye or {}).get("usable_fraction") or {"left": None, "right": None},
         },
-        "notes": [*data.condition_notes, *data.trial_notes, *data.probe_notes, *data.span_notes],
+        "notes": [*data.condition_notes, *data.trial_notes, *data.probe_notes, *data.span_notes,
+                  *data.order_notes],
         "checksums": {"algorithm": "sha256", "datasets": checksums},
         **_rig_record(data.rig_record),
     }

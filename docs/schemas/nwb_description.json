@@ -773,6 +773,18 @@
       "additionalProperties": false,
       "description": "One run the file holds, measured from the recording. `works_run_id`\njoins it to wl.works' `animal_session_run`.",
       "properties": {
+        "bad_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bad Reason"
+        },
         "blocks": {
           "items": {
             "$ref": "#/$defs/RunBlock"
@@ -821,6 +833,11 @@
           ],
           "default": null,
           "title": "End Reason"
+        },
+        "marked_bad": {
+          "default": false,
+          "title": "Marked Bad",
+          "type": "boolean"
         },
         "measured": {
           "$ref": "#/$defs/Interval"
@@ -963,6 +980,18 @@
             }
           ],
           "title": "Date Of Birth"
+        },
+        "nickname": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nickname"
         },
         "sex": {
           "enum": [

@@ -53,7 +53,8 @@ def test_the_description_of_a_file_without_eye_data():
     assert (out["identity"]["rig"], out["identity"]["role"], out["identity"]["status"]) == ("rig-a", "canonical", "written")
     assert out["identity"]["pipeline"]["name"] == "wl-preproc"
     assert out["subject"] == {"species": "Macaca mulatta", "sex": "F", "date_of_birth": "2016-03-02",
-                              "age_days": (datetime.date(2026, 9, 28) - datetime.date(2016, 3, 2)).days}
+                              "age_days": (datetime.date(2026, 9, 28) - datetime.date(2016, 3, 2)).days,
+                              "nickname": None}
     assert out["data_types"]["eye"] is None and out["data_types"]["eye_events"] is None
     assert out["data_types"]["behaviour"] == {"trials": 1, "events": 2}
     assert out["data_types"]["ephys"] is None and out["probes"] == [] and out["processing"] == {}
@@ -241,6 +242,34 @@ def test_a_description_recorded_before_the_polar_series_reads_back_without_it():
     out = describe(_gathered(eye=eye), status="written", n_critical=0, checksums=[], built_at=BUILT_AT)
     del out["data_types"]["eye"]["gaze_polar"]
     assert as_described_now(out)["data_types"]["eye"]["gaze_polar"] == []
+
+
+def test_a_description_without_a_nickname_reads():
+    """`subject.nickname` was added within version 3: a description stored
+    before it validates, with None."""
+    from wl_preproc.contracts.nwb_description import NwbDescription
+    from wl_preproc.nwb.describe import describe
+
+    out = describe(_gathered(), status="written", n_critical=0, checksums=[CHECKSUM], built_at=BUILT_AT)
+    out["subject"].pop("nickname", None)
+    assert NwbDescription.model_validate(out).subject.nickname is None
+
+
+def test_a_description_without_marks_reads():
+    """`marked_bad` and `bad_reason` were added within version 3: a run
+    without them validates with the defaults, and a marked one says why."""
+    from wl_preproc.contracts.nwb_description import NwbDescription
+    from wl_preproc.nwb.describe import describe
+
+    out = describe(_gathered(), status="written", n_critical=0, checksums=[CHECKSUM], built_at=BUILT_AT)
+    assert (out["runs"][0]["marked_bad"], out["runs"][0]["bad_reason"]) == (False, None)
+    for name in ("marked_bad", "bad_reason"):
+        out["runs"][0].pop(name)
+    run = NwbDescription.model_validate(out).runs[0]
+    assert (run.marked_bad, run.bad_reason) == (False, None)
+    out = describe(_gathered(runs=({**RUN, "marked_bad": True, "bad_reason": "eye lost"},)), status="written",
+                   n_critical=0, checksums=[CHECKSUM], built_at=BUILT_AT)
+    assert (out["runs"][0]["marked_bad"], out["runs"][0]["bad_reason"]) == (True, "eye lost")
 
 
 def test_a_run_says_its_plan_and_end_reason_and_a_block_how_it_ended():

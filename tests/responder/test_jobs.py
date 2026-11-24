@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import re
 
 import pytest
@@ -734,6 +735,28 @@ def test_the_subjects_details_fill_its_own_record(landed_session, prefix):
     assert (pipeline.subject.Subject.Species & {"subject": subject}).fetch1("species") == "Macaca mulatta"
 
 
+def test_a_nickname_is_stored_and_kept_when_absent(landed_session, prefix):
+    """wl.works' nickname for the animal lands in `Subject.subject_nickname`;
+    a later request without one leaves it (the latest request that carries it
+    wins)."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import pipeline
+
+    subject = "jbnick01"
+    naive_dt = datetime.datetime(2027, 5, 11, 9, 0)
+    landed_session(subject, naive_dt)
+    boundaries = [{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}]
+    accept(_request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
+                    idempotency_key="jbnick01-k1", montage_boundaries=boundaries,
+                    subject_details={"sex": "F", "nickname": "Pico"}), prefix=prefix)
+    assert (pipeline.subject.Subject & {"subject": subject}).fetch1("subject_nickname") == "Pico"
+
+    accept(_request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
+                    idempotency_key="jbnick01-k2", montage_boundaries=boundaries,
+                    subject_details={"sex": "F"}), prefix=prefix)
+    assert (pipeline.subject.Subject & {"subject": subject}).fetch1("subject_nickname") == "Pico"
+
+
 def test_a_request_without_details_leaves_the_subject_alone(landed_session, prefix):
     """They are optional: a request that does not carry them changes nothing
     about the subject."""
@@ -1211,3 +1234,176 @@ def test_the_retired_block_selection_is_refused_naming_its_replacement(landed_se
     with pytest.raises(ValueError, match=re.escape(expect)):
         accept(_runs_job(key, idempotency_key, **selection), prefix=prefix)
     assert not schema_request.Request & {"idempotency_key": idempotency_key}
+
+
+# --- wl.works' bad-run marks and a replacement of a refused canonical (design spec
+# `2026-11-24-wl-works-requests-design.md` sections 2 and 4.6). ---------------------------------
+
+
+def _post_job(body: dict, *, prefix) -> tuple[int, dict]:
+    """`POST /jobs` through the real handler, with `accept` behind it."""
+    import functools
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from wl_preproc.responder.handler import make_handler
+    from wl_preproc.responder.jobs import accept
+
+    token = "test-bearer-token-1"
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(token, lambda: None,
+                                                              functools.partial(accept, prefix=prefix)))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        http_request = urllib.request.Request(
+            f"http://127.0.0.1:{httpd.server_address[1]}/jobs", data=json.dumps(body).encode(), method="POST",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(http_request, timeout=30) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def _job_body(subject, when, key, *, runs=None, **selection) -> dict:
+    return {"domain": "neural",
+            "selection": {"session_datetime": when.isoformat(), "montage_id": 0, **selection},
+            "parameters": {}, "idempotency_key": key,
+            "metadata": {"runs": runs if runs is not None else _asserted(), "montage_boundaries": _LC_BOUNDARIES,
+                         "probes": [], "experimenter": "jw", "subject": subject, "task_types": []}}
+
+
+def test_a_marked_run_without_a_reason_is_a_422(landed_session, prefix):
+    when = datetime.datetime(2027, 6, 1, 9, 0)
+    landed_session("jbbad01", when)
+    runs = _asserted()
+    runs[1] = {**runs[1], "marked_bad": True}
+    status, body = _post_job(_job_body("jbbad01", when, "jbbad01-k1", runs=runs), prefix=prefix)
+    assert status == 422
+    assert "run 2" in json.dumps(body)
+
+
+def test_a_replacement_of_a_refused_canonical_is_accepted(landed_session, prefix):
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import nwb as nwb_schema
+    from wl_preproc.schema import request as schema_request
+
+    when = datetime.datetime(2027, 6, 1, 10, 0)
+    session_key = landed_session("jbbad02", when)
+    nwb_schema.activate(prefix=prefix)
+    first = accept(_lifecycle_job("jbbad02", when, "jbbad02-k1"), prefix=prefix)
+    nwb_schema.NwbFile.insert1({**first, "status": "refused", "built_at": datetime.datetime(2027, 6, 1, 11, 0),
+                                "reason": "no blocks"})
+    status, body = _post_job(_job_body("jbbad02", when, "jbbad02-k2", role="canonical",
+                                       supersedes_activation_id=first["activation_id"]), prefix=prefix)
+    assert status == 200, body
+    assert body["accepted"] is True
+    new_id = body["activation"]["activation_id"]
+    row = (schema_request.Activation & {**session_key, "montage_id": 0, "activation_id": new_id}).fetch1()
+    assert (row["role"], row["supersedes"]) == ("canonical", first["activation_id"])
+    assert new_id == first["activation_id"] + 1
+
+
+# --- What ends before it starts (design spec `2026-11-24-wl-works-requests-design.md`
+# section 4.5): `GET /sessions` leaves such a run out, so wl.works can never assert it. ---------
+
+# Run 2 ends before it starts; its start lies in montage 0's window [0, 12).
+_REVERSED = [(1, 0.0, 4.0), (2, 11.0, 5.0), (3, 13.0, 16.0)]
+_RUN_2_LEFT_OUT = ("run 2 ends at 5.000 s, before its start at 11.000 s: left out of this listing; "
+                   "it cannot be requested")
+
+
+def test_a_canonical_need_not_assert_a_reversed_run(landed_session, prefix):
+    """A canonical asserting the window's other runs is accepted, and its
+    file's runs leave run 2 out."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+
+    key = _landed_with_runs(landed_session, "jbrev01", 1, runs=_REVERSED)
+    activation = accept(_runs_job(key, "jbrev01-k1", runs=[_REVERSED[0], _REVERSED[2]], probe_runs={_SERIAL: [1]}),
+                        prefix=prefix)
+    assert _run_rows(schema_request.ActivationRun, activation) == [(1,)]
+
+
+@pytest.mark.parametrize("subject, runs, selection", [
+    # Asserted in metadata.runs, with the times the listing would have given.
+    ("jbrev02", _asserted(_REVERSED), {"probe_runs": {_SERIAL: [1]}}),
+    # Named in a derivative's run_numbers, and not asserted.
+    ("jbrev03", _asserted([_REVERSED[0], _REVERSED[2]]), {"run_numbers": [2]}),
+])
+def test_naming_a_reversed_run_is_a_422(landed_session, prefix, subject, runs, selection):
+    """The 422 names the run and both its times, and nothing is written."""
+    from wl_preproc.schema import core
+    from wl_preproc.schema import request as schema_request
+
+    key = _landed_with_runs(landed_session, subject, 2, runs=_REVERSED)
+    body = _job_body(subject, key["session_datetime"], f"{subject}-k1", runs=runs, **selection)
+    body["metadata"]["probes"] = [{"serial": _SERIAL, "insertion_number": 1}]
+    status, answer = _post_job(body, prefix=prefix)
+    assert status == 422, answer
+    assert _RUN_2_LEFT_OUT in json.dumps(answer)
+    assert (len(core.RunAssertion & key), len(schema_request.Activation & key)) == (0, 0)
+
+
+def test_a_window_of_only_reversed_runs_is_a_422(landed_session, prefix):
+    """Review focus 5: a canonical whose window holds only runs that end
+    before they start is refused, naming them; it is not an empty file."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+
+    measured = [(1, 4.0, 0.0), (2, 11.0, 5.0), (3, 13.0, 16.0)]
+    key = _landed_with_runs(landed_session, "jbrev04", 4, runs=measured)
+    expect = ("montage 0's window [0.0, 12.0) holds no run that can be requested: "
+              "run 1 ends at 0.000 s, before its start at 4.000 s: left out of this listing; "
+              "run 2 ends at 5.000 s, before its start at 11.000 s: left out of this listing")
+    with pytest.raises(ValueError, match=re.escape(expect)):
+        accept(_runs_job(key, "jbrev04-k1", runs=[measured[2]], probe_runs={_SERIAL: []}), prefix=prefix)
+    assert not schema_request.Activation & key
+
+
+def _stored_before_the_fields_were_added(key: str) -> None:
+    """Rewrite a stored request's payload as it was before `marked_bad`, `bad_reason` and `nickname` existed."""
+    from wl_preproc.schema import request as schema_request
+
+    stored = (schema_request.Request & {"idempotency_key": key}).fetch1("payload")
+    for run in stored["metadata"]["runs"]:
+        del run["marked_bad"], run["bad_reason"]
+    del stored["metadata"]["subject_details"]["nickname"]
+    schema_request.Request.update1({"idempotency_key": key, "payload": stored})
+
+
+def test_a_retry_of_a_request_stored_before_a_field_was_added_is_the_same_request(landed_session, prefix):
+    when = datetime.datetime(2027, 6, 2, 9, 0)
+    landed_session("jbver01", when)
+    body = _job_body("jbver01", when, "jbver01-k1")
+    body["metadata"]["subject_details"] = {"species": "Macaca mulatta"}
+    first_status, first = _post_job(body, prefix=prefix)
+    assert first_status == 200, first
+    _stored_before_the_fields_were_added("jbver01-k1")
+    status, retried = _post_job(body, prefix=prefix)
+    assert status == 200, retried
+    assert retried["activation"] == first["activation"]
+
+
+def test_a_retry_that_changes_a_field_is_still_key_reuse(landed_session, prefix):
+    when = datetime.datetime(2027, 6, 2, 10, 0)
+    landed_session("jbver02", when)
+    body = _job_body("jbver02", when, "jbver02-k1")
+    body["metadata"]["subject_details"] = {"species": "Macaca mulatta"}
+    assert _post_job(body, prefix=prefix)[0] == 200
+    _stored_before_the_fields_were_added("jbver02-k1")
+    runs = _asserted()
+    runs[0] = {**runs[0], "marked_bad": True, "bad_reason": "x"}
+    changed = _job_body("jbver02", when, "jbver02-k1", runs=runs)
+    changed["metadata"]["subject_details"] = body["metadata"]["subject_details"]
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema.request import KeyReuseError
+
+    # `accept` raises the module's own KeyReuseError; `server.py`'s seam is what turns it into the 409.
+    with pytest.raises(KeyReuseError, match="payload differs"):
+        accept(JobRequest.model_validate(changed), prefix=prefix)

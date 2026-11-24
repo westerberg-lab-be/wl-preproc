@@ -1,7 +1,8 @@
-"""`--nidq-timezone` on every command that builds an NWB file, the daemon's
-pass and `wlpp nwb build`, so a file rebuilt by hand places t = 0 as the
-daemon's did (design spec `2026-10-18-training-records-and-backup-clock-design.md`,
-amendment 46). Neither path reaches the database here."""
+"""`--nidq-timezone` on the daemon's pass, which stores each session's t = 0
+with it (`timebase.ClockReference`; design spec
+`2026-10-18-training-records-and-backup-clock-design.md`, amendment 46), and
+not on `wlpp nwb build`, which reads the stored value and could do nothing
+with a zone (the controller's ruling P9). No path reaches the database here."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import pytest
 
 _BUILD = ["nwb", "build", "--subject", "pico", "--session-datetime", "2024-01-01T09:00:00", "--montage-id", "0",
           "--activation-id", "0", "--nwb-root", "unused"]
-_COMMANDS = {"daemon": ["daemon"], "nwb build": _BUILD}
+_COMMANDS = {"daemon": ["daemon"]}
 
 
 class _Stopped(Exception):
@@ -70,3 +71,14 @@ def test_without_the_option_the_zone_stays_unset(command, clock, stopped):
         main(_COMMANDS[command])
     assert clock.NIDQ_TIMEZONE is None
 
+
+def test_nwb_build_refuses_a_zone(clock, stopped, capsys):
+    """A file's t = 0 is read as the daemon stored it, so a zone given to a
+    build by hand would be silently ignored: the parser refuses it instead,
+    before anything runs."""
+    from wl_preproc.cli.main import main
+
+    # `main` returns argparse's usage status rather than raising it.
+    assert main([*_BUILD, "--nidq-timezone", "Europe/Berlin"]) == 2
+    assert "unrecognized arguments: --nidq-timezone Europe/Berlin" in capsys.readouterr().err
+    assert clock.NIDQ_TIMEZONE is None

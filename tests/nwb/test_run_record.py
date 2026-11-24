@@ -32,9 +32,10 @@ def test_a_run_column_is_written_only_where_some_run_carries_its_field():
                                                           "task_hash", "seed"})),), problems=())
     tables, notes = run_record(runs, blocks, old, {})
     assert runs[0]["record"] == {"stop_kind": "completed", "stopped_because": "done", "rig_trials": 38,
-                                 "task_hash": "sha256:5d1f", "seed": "7"}
+                                 "task_hash": "sha256:5d1f", "seed": "7", "marked_bad": False,
+                                 "bad_reason": ""}
     assert runs[1]["record"] == {"stop_kind": "", "stopped_because": "", "rig_trials": -1, "task_hash": "",
-                                 "seed": ""}
+                                 "seed": "", "marked_bad": False, "bad_reason": ""}
     assert (runs[0]["plan"], runs[0]["end_reason"], "record" in blocks[0]) == (None, None, False)
     assert tables == {"unopened_blocks": [], "shortfalls": [], "condition_counts": []} and notes == []
 
@@ -150,3 +151,22 @@ def test_the_runs_table_says_where_each_stage_was_left_and_the_runs_color_sets()
     column, text = RUN_COLUMNS["left"]
     assert column == "stages_left" and "'{}'" in text and "not the stage it starts in" in text
     assert "times its fraction" in RUN_COLUMNS["color_sets"][1] and "held" in RUN_COLUMNS["color_sets"][1]
+
+
+def test_the_runs_table_has_the_marks():
+    """A run wl.works marks bad is marked in the file, as its request stated
+    it (design spec `2026-11-24-wl-works-requests-design.md` section 4.1)."""
+    from wl_preproc.nwb.run_record import RUN_COLUMNS
+
+    assert RUN_COLUMNS["marked_bad"][1] == ("Whether wl.works' record marks the run bad for behaviour, as the "
+                                            "request stated it.")
+    assert RUN_COLUMNS["bad_reason"][1] == "Why, as wl.works' record gives it ('' if not marked)."
+
+
+def test_the_marks_are_written_for_every_run_even_with_no_rig_record():
+    from wl_preproc.nwb.run_record import run_record
+
+    runs = [{"run_number": 1, "marked_bad": True, "bad_reason": "eye lost"}, {"run_number": 2}]
+    run_record(runs, [], None, {})
+    assert runs[0]["record"] == {"marked_bad": True, "bad_reason": "eye lost"}
+    assert runs[1]["record"] == {"marked_bad": False, "bad_reason": ""}

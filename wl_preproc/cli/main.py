@@ -151,11 +151,15 @@ def _add_nidq_timezone(subparser: argparse.ArgumentParser) -> None:
     """`--nidq-timezone`: the lab's NI machine's time zone, which SpikeGLX's
     `fileCreateTime` is local time in (design spec
     `2026-10-18-training-records-and-backup-clock-design.md`, amendment 46).
-    Unset, an NI-timed file's t = 0 never comes from it. Taken by every
-    command that builds an NWB file -- the daemon's pass and `wlpp nwb
-    build` -- so a file rebuilt by hand places t = 0 as the daemon's did."""
+    Unset, an NI-timed file's t = 0 never comes from it. Taken by the
+    daemon's pass, which works each session's t = 0 out once with it and
+    stores it (`timebase.ClockReference`). Not by `wlpp nwb build`, which
+    reads the stored value and could do nothing with a zone (the
+    controller's ruling P9): re-timing a session is deleting its row and
+    running a pass with the zone (`docs/ops/lab-host-protocol.md`)."""
     subparser.add_argument("--nidq-timezone", default=None, metavar="IANA_NAME",
-                           help="the NI machine's time zone, such as America/New_York")
+                           help="the NI machine's time zone, such as America/New_York, with which this pass "
+                                "stores each new session's t = 0; a session already stored keeps its own")
 
 
 def _set_nidq_timezone(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -249,7 +253,6 @@ def main(argv: list[str] | None = None) -> int:
     nwb_build.add_argument("--activation-id", required=True, type=int)
     nwb_build.add_argument("--nwb-root", required=True, type=Path)
     nwb_build.add_argument("--prefix", default=DEFAULT_PREFIX)
-    _add_nidq_timezone(nwb_build)
 
     ingest_parser = subparsers.add_parser("ingest", help="scan a storage root once")
     ingest_parser.add_argument("--root", required=True, help="directory holding session dirs")
@@ -760,7 +763,6 @@ def main(argv: list[str] | None = None) -> int:
         from wl_preproc.nwb.lock import Busy, exclusive
         from wl_preproc.schema import request as request_schema
 
-        _set_nidq_timezone(parser, args)
         activate_all(prefix=args.prefix)
         # Under the daemon's NWB lock (`nwb/lock.py`): a build beside a pass
         # would record the same activation twice.

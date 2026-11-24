@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 
 import datajoint as dj
 
@@ -340,6 +341,7 @@ def _reject_key_reuse(
     payload: dict,
     requested_by: str | None,
     selection_key: dict,
+    read_stored_payload: Callable[[dict], dict] | None = None,
 ) -> None:
     """Raise if an existing `Request` under this key is a different request.
 
@@ -403,7 +405,11 @@ def _reject_key_reuse(
         conflicts.append(f"origin {stored['origin']!r} vs {origin!r}")
     if stored["requested_by"] != requested_by:
         conflicts.append(f"requested_by {stored['requested_by']!r} vs {requested_by!r}")
-    if _payload_differs(stored["payload"], payload):
+    # `read_stored_payload` re-reads a payload recorded under an older contract as today's model would
+    # have dumped it, so a field added with a default since is not a difference. The caller owns the
+    # model; this module imports none.
+    stored_payload = stored["payload"] if read_stored_payload is None else read_stored_payload(stored["payload"])
+    if _payload_differs(stored_payload, payload):
         conflicts.append("payload differs from the one already recorded")
 
     # .to_dicts(), not .keys(): keys() returns primary-key columns only, and
@@ -455,6 +461,7 @@ def submit(
     probe_runs: dict[str, list[int]] | None = None,
     montages: list[dict] | tuple[dict, ...] = (),
     run_assertions: list[dict] | tuple[dict, ...] = (),
+    read_stored_payload: Callable[[dict], dict] | None = None,
 ) -> dict:
     """Record a request and the canonical activation it selects, atomically,
     with its runs and each probe's (`_record_run_sets`), and what the request
@@ -542,6 +549,7 @@ def submit(
                 payload=payload,
                 requested_by=requested_by,
                 selection_key=canonical_selection_key,
+                read_stored_payload=read_stored_payload,
             )
         else:
             # No skip_duplicates: the only duplicate reachable here is another
@@ -675,6 +683,7 @@ def submit_replacement(
     probe_runs: dict[str, list[int]] | None = None,
     montages: list[dict] | tuple[dict, ...] = (),
     run_assertions: list[dict] | tuple[dict, ...] = (),
+    read_stored_payload: Callable[[dict], dict] | None = None,
 ) -> dict:
     """Record a request and the canonical activation that replaces the
     montage's current one, `supersedes_activation_id`: at the montage's next free
@@ -739,6 +748,7 @@ def submit_replacement(
                     payload=payload,
                     requested_by=requested_by,
                     selection_key=selection_key,
+                    read_stored_payload=read_stored_payload,
                 )
                 produced = (Activation & {"request_key": idempotency_key} & selection_key).to_dicts()
                 if produced:
@@ -931,6 +941,7 @@ def submit_derivative(
     probe_runs: dict[str, list[int]] | None = None,
     montages: list[dict] | tuple[dict, ...] = (),
     run_assertions: list[dict] | tuple[dict, ...] = (),
+    read_stored_payload: Callable[[dict], dict] | None = None,
 ) -> dict:
     """Record a request and the derivative activation its run set selects.
 
@@ -1128,6 +1139,7 @@ def submit_derivative(
                 payload=payload,
                 requested_by=requested_by,
                 selection_key=selection_key,
+                read_stored_payload=read_stored_payload,
             )
         else:
             # No skip_duplicates: the only duplicate reachable here is another

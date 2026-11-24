@@ -373,6 +373,22 @@ def ni_reference_from(started_at: datetime.datetime, rig_at_zero: float | None,
     }
 
 
+def reference_row(reference: dict) -> dict:
+    """`wall_reference`'s result as `timebase.ClockReference` stores it: the
+    time naive UTC, to the microsecond."""
+    return {"reference_time": reference["reference_time"].astimezone(datetime.timezone.utc).replace(tzinfo=None),
+            "reference_source": reference["source"],
+            "started_at_difference_s": reference["started_at_difference_s"]}
+
+
+def stored_reference(row: dict, started_at: datetime.datetime) -> dict:
+    """A stored `timebase.ClockReference` row in `wall_reference`'s shape, as
+    the NWB build reads it, its times aware UTC."""
+    return {"reference_time": aware_utc(row["reference_time"]), "source": row["reference_source"],
+            "manifest_started_at": aware_utc(started_at),
+            "started_at_difference_s": row["started_at_difference_s"]}
+
+
 def syncbox_codes(session_dir: Path) -> list[tuple[float, int]]:
     """Every code word of session time's clock, in session seconds and in
     emission order (`timebase/segments.py::SyncBoxSession.codes`): every
@@ -475,7 +491,9 @@ class Clock:
         (`ni_reference_from`), the rig's clock fit, `core.RigClock`'s
         `rig_at_zero` where it fitted; else the first NI file's
         `fileCreateTime`, read in `NIDQ_TIMEZONE`, where that is set; else
-        `started_at`."""
+        `started_at`. Worked out once per session by the daemon and stored
+        (`timebase.ClockReference`), which the listing and the NWB build
+        read."""
         if self.source == "nidq":
             return ni_reference_from(started_at, rig_at_zero, self._ni_file_created())
         reference = self.barcode_reference()
