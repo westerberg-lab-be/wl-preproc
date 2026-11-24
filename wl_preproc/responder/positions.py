@@ -37,12 +37,17 @@ def _as_stored(row: dict) -> dict:
             "inserted_after_run": row["inserted_after_run"], "ended_after_run": row["ended_after_run"]}
 
 
-def stored_positions(session_key: dict, prefix: str = DEFAULT_PREFIX) -> tuple[int, list[dict]] | None:
+def stored_positions(session_key: dict, prefix: str | None = None) -> tuple[int, list[dict]] | None:
     """The stored seq and the positions as `ProbePosition`-shaped dicts (naive UTC times) by insertion number,
-    or None when none has been stored for the session."""
+    or None when none has been stored for the session.
+
+    It activates `request` under `prefix` when given one. Without one it reads the schemas as already
+    activated, as the daemon's montage stage calls it: activating the default prefix there would fail in a
+    process bound to another."""
     from wl_preproc.schema import request
 
-    request.activate(prefix=prefix)
+    if prefix is not None:
+        request.activate(prefix=prefix)
     key = {"subject": session_key["subject"], "session_datetime": session_key["session_datetime"]}
     master = (request.PositionSet & key).to_dicts()
     if not master:

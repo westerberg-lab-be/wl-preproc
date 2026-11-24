@@ -1,0 +1,278 @@
+"""The montage stage, stored (design spec `2026-11-24-montages-design.md`
+sections 4.1-4.4; plan decisions D6-D10, D13): each daemon pass derives every
+listable session's montages and shared groups from its stored positions, its
+runs and its census, and rewrites them only when the result changes, until the
+session's first accepted request.
+
+The synthetic sessions' t = 0 comes from the manifest, so an edge's window
+widens by a minute each side and any time near the session touches every gap:
+an edge near the runs names its gap (`*_after_run`), as wl.works would. An
+insertion ten minutes before t = 0 (`before_t0`) touches only the gap before
+the first run."""
+
+from __future__ import annotations
+
+import datetime
+
+import pytest
+
+from tests.identities import new_animal, new_serial
+from tests.positions import before_t0, land, put
+from tests.schema.test_spikeglx_restart import RESTART
+
+_EPHYS = ("syncbox", "spikeglx")
+_MONTAGE_TABLES = ("MontageDerivation", "MontageDerivation.Flag", "Montage", "MontageProbe", "MontageSortableRun",
+                   "PlacedPosition", "SharedGroup", "SharedGroup.Member", "SharedGroup.SortableRun")
+
+
+@pytest.fixture(scope="module")
+def daemon_module(dj_conn, prefix):
+    from wl_preproc import daemon
+
+    daemon.activate_all(prefix=prefix)
+    return daemon
+
+
+def _landed(tmp_path_factory, systems=_EPHYS, **update) -> tuple[dict, str]:
+    """A new animal's CI session with runs, recording `systems`; returns its key and `imec0`'s serial."""
+    session = new_animal().session()
+    serial = new_serial()
+    key = land(tmp_path_factory, systems=systems, subject=session.subject, session_id=session.session_id,
+               session_datetime=session.session_datetime, probe_serial=serial, **update)
+    return key, serial
+
+
+def _pass(daemon, prefix, key) -> dict:
+    report = daemon.run_once(prefix=prefix)
+    mine = [error for error in report["errors"] if key["subject"] in error]
+    assert not mine, mine
+    return report
+
+
+def _t0(key) -> datetime.datetime:
+    """t = 0's minute: under the manifest's widening its window touches every gap of these short sessions."""
+    return before_t0(key, 0)
+
+
+def _position(serial: str, number: int, inserted_at: datetime.datetime, **more) -> dict:
+    return {"serial": serial, "insertion_number": number, "inserted_at": inserted_at, **more}
+
+
+def _table(name: str):
+    from wl_preproc.schema import core
+
+    table = core
+    for part in name.split("."):
+        table = getattr(table, part)
+    return table
+
+
+def _rows(key) -> dict:
+    """Every montage table's rows of the session, `derived_at` included."""
+    return {name: sorted((_table(name) & key).to_dicts(), key=repr) for name in _MONTAGE_TABLES}
+
+
+def _derivation(key) -> tuple[str, int | None]:
+    from wl_preproc.schema import core
+
+    row = (core.MontageDerivation & key).fetch1()
+    return row["positions_status"], row["positions_seq"]
+
+
+def _runs(key) -> list[dict]:
+    from wl_preproc.schema import core
+
+    return (core.Run & key).to_dicts(order_by="run_number")
+
+
+def _montages(key) -> list[tuple[int, float, float]]:
+    from wl_preproc.schema import core
+
+    return [(row["montage_id"], row["start_s"], row["end_s"])
+            for row in (core.Montage & key).to_dicts(order_by="montage_id")]
+
+
+def _probes(key) -> dict:
+    """`{(montage_id, serial): (insertion_number, electrode_config_hash, [sortable runs])}`."""
+    from wl_preproc.schema import core
+
+    probes = {}
+    for row in (core.MontageProbe & key).to_dicts():
+        where = {**key, "montage_id": row["montage_id"], "probe_serial": row["probe_serial"]}
+        runs = sorted(int(n) for n in (core.MontageSortableRun & where).to_arrays("run_number"))
+        probes[(row["montage_id"], row["probe_serial"])] = (
+            row["insertion_number"], row["electrode_config_hash"], runs)
+    return probes
+
+
+def _census(key, serial) -> list[str]:
+    """The serial's `electrode_config_hash` in each SpikeGLX segment, by the segment's start."""
+    from wl_preproc.schema import core, ephys
+
+    segments = (core.Segment & key & {"system": "spikeglx"}).proj("start_s")
+    rows = (ephys.ProbeCensus.Probe * segments & {"probe_serial": serial}).to_dicts(order_by="start_s")
+    return [row["electrode_config_hash"] for row in rows]
+
+
+def test_a_session_without_ephys_has_one_montage_at_once(daemon_module, prefix, tmp_path_factory):
+    from wl_preproc.schema import core
+
+    key, _serial = _landed(tmp_path_factory, systems=("syncbox",))
+    _pass(daemon_module, prefix, key)
+
+    assert _derivation(key) == ("not_needed", None)
+    first, second = _runs(key)
+    assert _montages(key) == [(1, first["run_start_time"], second["run_stop_time"])]
+    assert not core.MontageProbe & key
+
+
+def test_positions_for_a_session_without_ephys_change_nothing(daemon_module, prefix, tmp_path_factory):
+    """Review Focus 4: they are stored and listed by their seq, and the session keeps its one montage."""
+    key, serial = _landed(tmp_path_factory, systems=("syncbox",))
+    _pass(daemon_module, prefix, key)
+    montages = _montages(key)
+
+    put(key, [_position(serial, 1, before_t0(key))], seq=4, prefix=prefix)
+    _pass(daemon_module, prefix, key)
+
+    assert _derivation(key) == ("not_needed", 4)
+    assert _montages(key) == montages and len(montages) == 1
+
+
+def test_a_recording_waits_for_its_positions(daemon_module, prefix, tmp_path_factory):
+    from wl_preproc.schema import core
+
+    key, serial = _landed(tmp_path_factory)
+    _pass(daemon_module, prefix, key)
+    assert _derivation(key) == ("waiting", None)
+    assert not core.Montage & key
+
+    put(key, [_position(serial, 1, before_t0(key))], seq=1, prefix=prefix)
+    _pass(daemon_module, prefix, key)
+
+    assert _derivation(key) == ("placed", 1)
+    first, second = _runs(key)
+    assert _montages(key) == [(1, first["run_start_time"], second["run_stop_time"])]
+    (config,) = set(_census(key, serial))
+    assert _probes(key) == {(1, serial): (1, config, [1, 2])}
+    placed = (core.PlacedPosition & key).fetch1()
+    assert (placed["insertion_number"], placed["probe_serial"], placed["start_s"], placed["end_s"]) == (
+        1, serial, first["run_start_time"], second["run_stop_time"])
+
+
+def test_positions_sent_on_landing_are_placed_on_the_first_pass(daemon_module, prefix, tmp_path_factory):
+    """Review Focus 2: no `ClockReference` is stored yet, so the time is ten minutes before the session's
+    `session_datetime`, the manifest's t = 0 in these sessions."""
+    key, serial = _landed(tmp_path_factory)
+    put(key, [_position(serial, 1, key["session_datetime"] - datetime.timedelta(minutes=10))], seq=1,
+        prefix=prefix)
+    _pass(daemon_module, prefix, key)
+
+    assert _derivation(key) == ("placed", 1)
+
+
+def test_a_moved_probe_splits_the_montages_and_the_other_probe_shares_its_electrodes(
+        daemon_module, prefix, tmp_path_factory):
+    from wl_preproc.schema import core, ephys
+
+    other = new_serial()
+    key, serial = _landed(tmp_path_factory, extra_probes=[{"serial": other, "part_number": "NP1032", "bank": 1}])
+    _pass(daemon_module, prefix, key)
+    put(key, [
+        _position(serial, 1, before_t0(key)),
+        _position(other, 2, before_t0(key), ended_at=_t0(key), end_kind="moved", ended_after_run=1),
+        _position(other, 3, _t0(key), inserted_after_run=1),
+    ], seq=1, prefix=prefix)
+    _pass(daemon_module, prefix, key)
+
+    assert _derivation(key) == ("placed", 1)
+    first, second = _runs(key)
+    assert _montages(key) == [(1, first["run_start_time"], second["run_start_time"]),
+                              (2, second["run_start_time"], second["run_stop_time"])]
+    (config,) = set(_census(key, serial))
+    (other_config,) = set(_census(key, other))
+    assert _probes(key) == {(1, serial): (1, config, [1]), (2, serial): (1, config, [2]),
+                            (1, other): (2, other_config, [1]), (2, other): (3, other_config, [2])}
+
+    group = (core.SharedGroup & key).fetch1()
+    assert (group["group_id"], group["probe_serial"], group["insertion_number"]) == (1, serial, 1)
+    # The identity intersection: one selection over both montages is the same config.
+    assert group["electrode_config_hash"] == config
+    assert group["n_electrodes"] == 4
+    assert group["probe_type"] == (ephys.ElectrodeConfig & {"electrode_config_hash": config}).fetch1("probe_type")
+    where = {**key, "group_id": 1}
+    assert sorted(int(m) for m in (core.SharedGroup.Member & where).to_arrays("montage_id")) == [1, 2]
+    assert sorted(int(r) for r in (core.SharedGroup.SortableRun & where).to_arrays("run_number")) == [1, 2]
+
+
+def test_a_bank_change_inside_a_run_leaves_the_run_unsortable(daemon_module, prefix, tmp_path_factory):
+    """SpikeGLX restarts at 11 s, inside run 2, with another bank (section 4.3)."""
+    from wl_preproc.schema import core
+
+    key, serial = _landed(tmp_path_factory, spikeglx_restart={**RESTART, "probe_bank": 1})
+    _pass(daemon_module, prefix, key)
+    put(key, [_position(serial, 1, before_t0(key))], seq=1, prefix=prefix)
+    _pass(daemon_module, prefix, key)
+
+    assert _derivation(key) == ("placed", 1)
+    first, second = _runs(key)
+    assert _montages(key) == [(1, first["run_start_time"], second["run_stop_time"])]
+    before, after = _census(key, serial)
+    assert before != after
+    assert _probes(key) == {(1, serial): (1, before, [1])}
+    assert not core.SharedGroup & key
+
+
+def test_an_accepted_request_fixes_the_derivation(daemon_module, prefix, tmp_path_factory):
+    """D8: once a request is accepted the session is never derived again, so a change to its positions --
+    here made in the database, past `PUT /positions`' own refusal -- changes none of its rows."""
+    from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
+    from wl_preproc.montage.derive import derive
+    from wl_preproc.montage.stage import gather_input
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request
+
+    key, serial = _landed(tmp_path_factory)
+    _pass(daemon_module, prefix, key)
+    put(key, [_position(serial, 1, before_t0(key), ended_at=_t0(key), end_kind="withdrawn", ended_after_run=1)],
+        seq=1, prefix=prefix)
+    _pass(daemon_module, prefix, key)
+    assert _derivation(key) == ("placed", 1)
+    assert [probe[2] for probe in _probes(key).values()] == [[1]]
+
+    runs = [{"run_number": row["run_number"], "start_s": row["run_start_time"], "end_s": row["run_stop_time"],
+             "works_run_id": f"wr-{row['run_number']}"} for row in _runs(key)]
+    accept(JobRequest(
+        domain="neural", parameters={}, idempotency_key=f"{key['subject']}-canonical",
+        selection={"session_datetime": key["session_datetime"].replace(tzinfo=datetime.UTC), "montage_id": 1},
+        metadata=MetadataBundle(runs=runs, montage_boundaries=[], probes=[], experimenter="jw",
+                                subject=key["subject"], task_types=[]),
+    ), prefix=prefix)
+    assert request.first_accepted_request(key) == f"{key['subject']}-canonical"
+    stored = _rows(key)
+
+    request.PositionSet.Position.update1({**key, "insertion_number": 1, "ended_after_run": 2})
+    # Derived again, the probe would now cover both runs.
+    (montage,) = derive(gather_input(key)).montages
+    assert [probe.sortable_runs for probe in montage.probes] == [(1, 2)]
+    _pass(daemon_module, prefix, key)
+
+    assert _rows(key) == stored
+
+
+def test_the_derivation_changes_only_when_its_result_does(daemon_module, prefix, tmp_path_factory):
+    from wl_preproc.montage.stage import derive_session, run_stage
+
+    key, serial = _landed(tmp_path_factory)
+    put(key, [_position(serial, 1, key["session_datetime"] - datetime.timedelta(minutes=10))], seq=1,
+        prefix=prefix)
+    _pass(daemon_module, prefix, key)
+    stored = _rows(key)
+    assert stored["MontageDerivation"][0]["positions_status"] == "placed"
+
+    _pass(daemon_module, prefix, key)
+
+    assert _rows(key) == stored
+    assert derive_session(key) is False
+    written, _errors = run_stage()
+    assert written == 0

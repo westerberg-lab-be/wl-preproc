@@ -488,6 +488,37 @@ def test_run_once_reports_the_per_key_failures_populate_swallows(
         RunOnceBoomSource.drop_quick()
 
 
+def test_the_montage_stage_runs_before_the_link_stage(daemon_env, monkeypatch, prefix):
+    """Plan decision D8: the montage stage reads this pass's census and
+    `ClockReference`, so it runs after the computed tables, and before the
+    link stage, the listing and the NWB stages, which read its rows. What it
+    writes counts into `populated`, and its failures into `errors`."""
+    import wl_preproc.listing.stage
+
+    order = []
+
+    def montages():
+        order.append("montages")
+        return 2, ["montages {'subject': 'x'}: boom"]
+
+    def links():
+        order.append("links")
+        return 0, []
+
+    monkeypatch.setattr(daemon_env, "_first_tables", lambda: [])
+    monkeypatch.setattr(daemon_env, "_populate_event_stage", lambda freed: (0, []))
+    monkeypatch.setattr(daemon_env, "_computed_tables", lambda: [])
+    monkeypatch.setattr(daemon_env, "_montage_stage", montages)
+    monkeypatch.setattr(daemon_env, "_link_stage", links)
+    monkeypatch.setattr(wl_preproc.listing.stage, "run_stage", lambda: (0, []))
+
+    report = daemon_env.run_once(prefix=prefix)
+
+    assert order == ["montages", "links"]
+    assert report["populated"] == 2
+    assert report["errors"] == ["montages {'subject': 'x'}: boom"]
+
+
 def test_doctor_reports_each_stale_job_state_and_reaps_nothing(
     daemon_env, dj_conn, monkeypatch, capsys, prefix
 ):

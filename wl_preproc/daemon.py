@@ -801,6 +801,18 @@ def _link_stage() -> tuple[int, list[str]]:
     return linked, errors
 
 
+def _montage_stage() -> tuple[int, list[str]]:
+    """Derive each listable session's montages and shared groups and store
+    them when they change, until the session's first accepted request
+    (`montage/stage.py::run_stage`; design spec
+    `2026-11-24-montages-design.md` sections 4.1-4.4, plan decision D8).
+    Returns `(sessions written, per-session failures)`. It reads only the
+    database, as the link stage does, so freed sessions are not skipped."""
+    from wl_preproc.montage.stage import run_stage
+
+    return run_stage()
+
+
 def _populate_event_stage(freed: list[dict] | None = None) -> tuple[int, list[str]]:
     """Build the canonical trial list for each session still missing one.
 
@@ -1095,6 +1107,13 @@ def run_once(
             errors.extend(f"{table.__name__} {key}: {err}" for key, err in result["error_list"])
         except Exception as exc:  # a failing stage must not stop the others
             errors.append(f"{table.__name__}: {exc}")
+
+    # After the loop, whose census and `ClockReference` it reads, and before
+    # the link stage, the listing and the NWB stages, which read its montages
+    # (plan decision D8).
+    derived, montage_errors = _montage_stage()
+    populated += derived
+    errors.extend(montage_errors)
 
     # After the loop, whose `ephys.ProbeCensus` it reads, and before the NWB
     # stages, which read what it writes.

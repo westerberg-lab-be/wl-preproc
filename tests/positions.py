@@ -25,3 +25,20 @@ def before_t0(key: dict, minutes: int = 10) -> datetime.datetime:
 
     reference = (timebase.ClockReference & key).fetch1("reference_time")
     return reference.replace(second=0, microsecond=0) - minutes * _MINUTE
+
+
+def land(tmp_path_factory, *, systems: tuple[str, ...], **update) -> dict:
+    """`tests/schema/test_spikeglx_restart.py::_session` with `runs=True`, recording and landing `systems`
+    (`("syncbox",)` for a session without ephys). `update` edits the CI recipe, and may name the
+    `session_datetime` to land at (else 09:00 on the `session_id`'s date). Returns the session key."""
+    from tests.schema.test_eye_populate import _land
+    from wl_preproc.synth.recipe import CI_RECIPE, SessionRecipe
+    from wl_preproc.synth.session import generate_session
+
+    when = update.pop("session_datetime", None)
+    recipe = SessionRecipe.model_validate(
+        {**CI_RECIPE.model_dump(), "systems": list(systems), "runs": True, **update})
+    root = tmp_path_factory.mktemp(recipe.subject)
+    generate_session(root, recipe)
+    when = when or datetime.datetime.fromisoformat(recipe.session_id[:10]).replace(hour=9)
+    return _land(root, recipe, when, acquisition_systems=tuple(systems))
