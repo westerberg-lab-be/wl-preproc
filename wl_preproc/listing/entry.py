@@ -67,6 +67,9 @@ class SessionFacts:
     parameter_changes: int  # a person's acts on a setting among its core.ParameterChange rows
     control_kinds: dict[str, int]  # control kind -> its core.RigControl rows
     clock: str | None  # timebase.SessionClock's source; None until chosen
+    # The wall-clock time of t = 0: its timebase.ClockReference row's reference_time and
+    # reference_source; None until stored.
+    reference: dict | None
 
 
 def _repeats(numbers: list[int]) -> list[tuple[int, int]]:
@@ -213,6 +216,8 @@ def build_entry(facts: SessionFacts) -> dict:
         "probes": sorted({part["probe_serial"] for part in facts.census if part["probe_serial"]}),
         "flags": flags,
         "clock": facts.clock,
+        "t0_datetime": None if facts.reference is None else facts.reference["reference_time"],
+        "t0_source": None if facts.reference is None else facts.reference["reference_source"],
         **_rig_session(facts),
     }
     return SessionEntry.model_validate(entry).model_dump(mode="json")
@@ -326,6 +331,8 @@ def gather_all(keys: list[dict]) -> dict[tuple[str, datetime.datetime], SessionF
     for row in dj.U("subject", "session_datetime", "kind").aggr(core.RigControl & keys, n="count(*)").to_dicts():
         control_kinds[_session(row)][row["kind"]] = int(row["n"])
     clocks = {_session(row): row["source"] for row in (timebase.SessionClock & keys).proj("source").to_dicts()}
+    references = {_session(row): row for row in (timebase.ClockReference & keys).proj(
+        "reference_time", "reference_source").to_dicts()}
     facts = {}
     for ingestion in (ingest.Ingestion & keys).proj("session_dir").to_dicts():
         session = _session(ingestion)
@@ -357,6 +364,7 @@ def gather_all(keys: list[dict]) -> dict[tuple[str, datetime.datetime], SessionF
             parameter_changes=changes.get(session, 0),
             control_kinds=dict(control_kinds.get(session, {})),
             clock=clocks.get(session),
+            reference=references.get(session),
         )
     return facts
 

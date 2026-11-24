@@ -153,7 +153,10 @@ def _add_nidq_timezone(subparser: argparse.ArgumentParser) -> None:
     `2026-10-18-training-records-and-backup-clock-design.md`, amendment 46).
     Unset, an NI-timed file's t = 0 never comes from it. Taken by every
     command that builds an NWB file -- the daemon's pass and `wlpp nwb
-    build` -- so a file rebuilt by hand places t = 0 as the daemon's did."""
+    build`. The daemon's pass works each session's t = 0 out once with it
+    (`timebase.ClockReference`), and every build reads that, so a file
+    rebuilt by hand places t = 0 as the daemon's did whatever zone it is
+    given."""
     subparser.add_argument("--nidq-timezone", default=None, metavar="IANA_NAME",
                            help="the NI machine's time zone, such as America/New_York")
 

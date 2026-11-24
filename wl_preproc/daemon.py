@@ -178,6 +178,12 @@ def _computed_tables() -> list:
     this ordering is what avoids the second.
     """
     return [
+        # First: the wall-clock time of t = 0 needs the session's clock
+        # (`_first_tables`) and, under the NI, the rig's clock fit, which
+        # `_populate_event_stage()` writes; both exist by now, so this is the
+        # earliest stage it can be worked out. The listing and the NWB stages
+        # read it.
+        timebase.ClockReference,
         # Reads the sync box's folder alone; nothing here waits on it, and its
         # rows say which segment keeps session time (design spec
         # `2026-10-22-syncbox-records-and-segments-design.md` section 6).

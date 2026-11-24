@@ -638,6 +638,15 @@ Authorization: Bearer <token>
     carried them (2026-10-18) lists zeros;
   - `clock`, which clock kept the session's time: `syncbox`, `nidq` (built since part
     3b-1) or `lab` (part 4, not built yet), or null until the daemon has chosen it;
+  - `t0_datetime`, the wall-clock time of session t = 0, ISO-8601, naive UTC like `session_datetime`
+    but kept to the microsecond, and `t0_source`, where it came from: `barcode` (the sync box's first
+    barcode), `rig_clock` (the rig's clock fitted to the recording) or `nidq_meta` (the first NI file's
+    creation time), each only within 60 s of the manifest's `started_at`, else `manifest` (`started_at`
+    itself, which `session_datetime` is). Worked out once by the daemon, after the session's event codes
+    are read, and the same value every NWB file of the session starts at
+    (`timebase/clock_reference`'s `reference_datetime`); both null until it is stored. It is what places a
+    time of day between runs: `session_datetime` may be up to 60 s from it, and a run's `start_s` counts
+    from it;
   - `flags`, each a `code`, a `message`, and the `run_number`, `block_number` or `segment_id` (a
     SpikeGLX file) it is about:
     `waiting_for_run_markers` (no measured run yet), `repeated_run_number` and

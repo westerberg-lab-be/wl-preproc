@@ -202,6 +202,52 @@ class ClockRefusal(dj.Manual):
 
 
 @schema
+class ClockReference(dj.Computed):
+    definition = """
+    # The wall-clock time of session t = 0, and where it came from, worked
+    # out once by `timebase/clock.py::Clock.wall_reference` (the NWB builder
+    # spec section 4.2; amendment 46), so that `GET /sessions` lists it and
+    # every NWB file of the session reads it, and the two cannot disagree
+    # (the requester's choice of 2026-11-24). Its manifest `started_at` is the
+    # session's `session_datetime`. Key: (subject, session_datetime).
+    -> SessionClock
+    -> pipeline.event.BehaviorRecording
+    ---
+    reference_time   : datetime(6)  # naive UTC
+    reference_source : enum('barcode','manifest','rig_clock','nidq_meta')
+    started_at_difference_s = null : double  # (s) started_at minus the source's time; null under the NI where none gave one
+    """
+
+    # `key_source` is DataJoint's own, the join of the two parents: a session
+    # whose clock is recorded and whose events stage has run. The NI's case
+    # reads `core.RigClock`, which the events stage writes in the same
+    # transaction as `BehaviorRecording`, its done-marker, or never: so with
+    # that row here, the rig's clock fit is final. The daemon runs this first
+    # of its computed tables, the earliest point all its inputs exist.
+    #
+    # **What can change after it is stored.** The clock is chosen once
+    # (`SessionClock`), and the session's files are landed and verified, so
+    # neither changes. `core.RigClock` is refitted only by doing the events
+    # stage again, which takes deleting `BehaviorRecording`, this row's
+    # parent: the delete takes this row with it, and the next pass works it
+    # out again after the events stage. Deleting the clock does the same. The
+    # NI machine's zone (`clock.NIDQ_TIMEZONE`) is read once, as the daemon's
+    # pass had it, as `SystemTimebase`'s analog copy reads it: a zone set
+    # later changes no stored session.
+
+    def make(self, key: dict) -> None:
+        from wl_preproc.schema import ingest
+        from wl_preproc.timebase.clock import clock_for, reference_row
+
+        session_key = {k: key[k] for k in pipeline.Session.primary_key}
+        session_dir = Path((ingest.Ingestion & session_key).fetch1("session_dir"))
+        rig_clock = (core.RigClock & session_key).to_dicts()
+        reference = clock_for(session_key, session_dir).wall_reference(
+            session_key["session_datetime"], rig_at_zero=rig_clock[0]["rig_at_zero"] if rig_clock else None)
+        self.insert1({**session_key, **reference_row(reference)})
+
+
+@schema
 class SyncBoxSegment(dj.Computed):
     definition = f"""
     # One segment of the session's sync box log: one process's records between

@@ -88,6 +88,38 @@ def test_get_sessions_lists_the_task_hash(serve_sessions, dj_conn, prefix, tmp_p
     assert [run["task_hash"] for run in entry["runs"]] == ["sha256:synthetic", "sha256:synthetic"]
 
 
+def test_get_sessions_lists_t0s_wall_time_as_stored(serve_sessions, dj_conn, prefix, tmp_path_factory):
+    """`t0_datetime` and `t0_source` are the stored row's
+    (`timebase.ClockReference`), and both null for a session whose t = 0 is
+    not stored yet."""
+    from tests.identities import new_animal
+    from tests.schema.test_spikeglx_restart import _session
+    from wl_preproc import daemon
+    from wl_preproc.responder.sessions import list_sessions
+    from wl_preproc.schema import timebase
+
+    daemon.activate_all(prefix=prefix)
+    session = new_animal().session()
+    _recipe, key = _session(tmp_path_factory, subject=session.subject, session_id=session.session_id,
+                            session_datetime=session.session_datetime, runs=True)
+    daemon.run_once(prefix=prefix)
+    base = serve_sessions(lambda since, limit: list_sessions(since, limit, prefix=prefix))
+
+    def listed():
+        status, body = _request(f"{base}/sessions", method="GET", token=TOKEN)
+        assert status == 200
+        (entry,) = [entry for entry in json.loads(body)["sessions"] if entry["subject"] == key["subject"]]
+        return entry["t0_datetime"], entry["t0_source"]
+
+    row = (timebase.ClockReference & key).fetch1()
+    assert listed() == (row["reference_time"].isoformat(), row["reference_source"])
+    (timebase.ClockReference & key).delete_quick()
+    try:
+        assert listed() == (None, None)
+    finally:
+        timebase.ClockReference.insert1(row, allow_direct_insert=True)
+
+
 def test_one_reversed_session_does_not_break_the_page(serve_sessions, dj_conn, prefix, tmp_path_factory):
     """A run, a block and a file that end before they start, written into
     `core` after the session landed, are left out of its entry and flagged

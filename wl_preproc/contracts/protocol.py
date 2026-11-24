@@ -639,6 +639,13 @@ class SessionEntry(BaseModel):
     # and 4.1).
     training_records: ListedTrainingRecords | None
     clock: Literal["syncbox", "nidq", "lab"] | None
+    # The wall-clock time of session t = 0, naive UTC to the microsecond, as
+    # `timebase.ClockReference` stored it, and where it came from: what
+    # places a time of day between runs, where `session_datetime` (the
+    # manifest's started_at) may be up to 60 s off it. Null until stored (the
+    # requester's choice of 2026-11-24).
+    t0_datetime: datetime.datetime | None = None
+    t0_source: Literal["barcode", "rig_clock", "nidq_meta", "manifest"] | None = None
 
 
 class SessionListing(BaseModel):

@@ -23,6 +23,7 @@ from wl_preproc.nwb.trim import BlockSet
 # `tests/nwb/test_clock.py` has always read them.
 from wl_preproc.timebase.clock import BARCODE_EPOCH, CLOCK_DISAGREEMENT_S, clock_for, reference_from  # noqa: F401
 from wl_preproc.timebase.clock import aware_utc as _aware_utc
+from wl_preproc.timebase.clock import stored_reference
 
 MASK_LABELS = ("blink", "invalid", "lost")
 
@@ -218,6 +219,10 @@ def readiness(activation_key: dict) -> str | None:
     session_key = {k: activation_key[k] for k in ("subject", "session_datetime")}
     if not timebase.TimingProvenance & session_key:
         return "waiting on TimingProvenance"
+    # The file's t = 0 is read as stored, never worked out here, so that it
+    # and `GET /sessions` agree.
+    if not timebase.ClockReference & session_key:
+        return "waiting on ClockReference: the wall-clock time of t = 0 is not stored yet"
     validity_idx, detection_idx = _paramsets()
     detectors = ", ".join(str(idx) for idx in sorted(detection_idx.values()))
     read = {
@@ -910,7 +915,7 @@ def _probes(key: dict, session_key: dict, run_rows: list[dict]) -> tuple[list[di
 
 def gather(activation_key: dict) -> Gathered:
     """One activation's data, or `Refused` with the reason (section 10)."""
-    from wl_preproc.schema import core, ingest, request, timebase
+    from wl_preproc.schema import ingest, request, timebase
 
     key = {k: activation_key[k] for k in ("subject", "session_datetime", "montage_id", "activation_id")}
     session_key = {k: key[k] for k in ("subject", "session_datetime")}
@@ -936,12 +941,13 @@ def gather(activation_key: dict) -> Gathered:
         probe["sorted_runs"] = sorted_runs.get(probe["serial"], [])
 
     session_dir = Path((ingest.Ingestion & session_key).fetch1("session_dir"))
-    # The rig's clock fit places t = 0 under the NI (amendment 46); the sync
-    # box's clock ignores it.
     session_clock = clock_for(session_key, session_dir)
-    rig_clock = (core.RigClock & session_key).to_dicts()
-    clock = session_clock.wall_reference(key["session_datetime"],
-                                         rig_at_zero=rig_clock[0]["rig_at_zero"] if rig_clock else None)
+    # The wall-clock time of t = 0 as the daemon stored it, which `GET
+    # /sessions` lists too; `readiness` waits until it is.
+    stored = (timebase.ClockReference & session_key).to_dicts()
+    if not stored:
+        raise Refused("no ClockReference row: the wall-clock time of t = 0 is not stored yet")
+    clock = stored_reference(stored[0], key["session_datetime"])
     validity_idx, detection_idx = _paramsets()
     eye = _eye(session_key, session_dir, extent, validity_idx, detection_idx, eye_span(session_key, session_dir))
     # Samples in these runs, but none inside the covered span: the notes say

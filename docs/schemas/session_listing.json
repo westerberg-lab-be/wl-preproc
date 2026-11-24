@@ -709,6 +709,37 @@
           "title": "Subject",
           "type": "string"
         },
+        "t0_datetime": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "T0 Datetime"
+        },
+        "t0_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "barcode",
+                "rig_clock",
+                "nidq_meta",
+                "manifest"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "T0 Source"
+        },
         "tier": {
           "anyOf": [
             {

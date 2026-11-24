@@ -294,6 +294,37 @@ def test_a_synthetic_sessions_clock_falls_back_to_the_manifest(activation, built
     assert abs(built.clock["started_at_difference_s"]) > 60.0
 
 
+def test_the_file_places_t0_as_stored(activation, tmp_path_factory):
+    """The build reads t = 0's wall time as the daemon stored it
+    (`timebase.ClockReference`), never working it out again, so a file and
+    `GET /sessions` cannot disagree: a stored value moved by a few
+    microseconds is the file's, in `timebase/clock_reference` and as its
+    start time, and in what `record` stores."""
+    from pynwb import NWBHDF5IO
+
+    from wl_preproc.nwb.build import build
+    from wl_preproc.schema import timebase
+
+    session_key, key, _runs = activation
+    stored = (timebase.ClockReference & session_key).fetch1()
+    moved = stored["reference_time"] + datetime.timedelta(seconds=1, microseconds=250017)
+    timebase.ClockReference.update1({**session_key, "reference_time": moved})
+    try:
+        result = build(key, tmp_path_factory.mktemp("nwb-t0"))
+    finally:
+        timebase.ClockReference.update1({**session_key, "reference_time": stored["reference_time"]})
+    assert result.status == "written", result.findings
+    placed = moved.replace(tzinfo=datetime.timezone.utc)
+    assert (result.clock["reference_time"], result.clock["source"], result.clock["started_at_difference_s"]) == (
+        placed, stored["reference_source"], stored["started_at_difference_s"])
+    with NWBHDF5IO(str(result.path), "r") as handle:
+        nwb = handle.read()
+        reference = nwb.processing["timebase"]["clock_reference"].to_dataframe()
+        assert reference["reference_datetime"].tolist() == [placed.isoformat()]
+        assert reference["source"].tolist() == [stored["reference_source"]]
+        assert nwb.session_start_time == placed
+
+
 def test_runs_blocks_trials_and_events_carry_the_tables_times(activation, built):
     """Design spec `2026-10-01-session-listing-and-run-requests-design.md`
     section 4: the file's runs are measured, with wl.works' ids; its blocks
@@ -628,7 +659,7 @@ def test_the_daemon_stage_records_every_activation(activation, daemon_module, pr
     """`run_once(nwb_root=...)`: one `NwbFile` row per activation, with its
     datasets; without a root the stage is skipped and says so."""
     from wl_preproc.schema import nwb as nwb_schema
-    from wl_preproc.schema import request
+    from wl_preproc.schema import request, timebase
 
     assert daemon_module.run_once(prefix=prefix)["nwb"] is None
     report = daemon_module.run_once(prefix=prefix, nwb_root=tmp_path_factory.mktemp("nwb-daemon"))
@@ -638,6 +669,10 @@ def test_the_daemon_stage_records_every_activation(activation, daemon_module, pr
     assert set(rows) == {(r["montage_id"], r["activation_id"]) for r in (request.Activation & session_key).to_dicts()}
     canonical = rows[(key["montage_id"], key["activation_id"])]
     assert canonical["status"] == "written" and canonical["reference_source"] == "manifest"
+    # The stored t = 0, as `GET /sessions` lists it (`timebase.ClockReference`).
+    stored = (timebase.ClockReference & session_key).fetch1()
+    assert (canonical["reference_time"], canonical["reference_source"], canonical["started_at_difference_s"]) == (
+        stored["reference_time"], stored["reference_source"], stored["started_at_difference_s"])
     assert canonical["description"]["identity"]["identifier"] == canonical["nwb_identifier"]
     assert len(nwb_schema.NwbFile.Dataset & canonical) > 50
     assert rows[(1, 0)]["status"] == "refused"

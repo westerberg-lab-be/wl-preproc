@@ -35,6 +35,7 @@ def _facts(**changes):
         electrodes={("a" * 32, "NP1000"): [0, 1, 2]},
         strobed_runs=[1, 2], strobed_blocks=[1, 2], censused=frozenset({"100.nidq.bin"}), rig_problems=[],
         rig_session=None, run_calibrations={}, warnings=[], parameter_changes=0, control_kinds={}, clock="syncbox",
+        reference=None,
     )
     return dataclasses.replace(facts, **changes)
 
@@ -289,6 +290,33 @@ def test_a_session_lists_how_many_training_records_it_has_and_its_clock():
     assert entry["clock"] == "syncbox"
     plain = build_entry(_facts(clock=None))
     assert (plain["training_records"], plain["clock"]) == (None, None)
+
+
+def test_a_session_lists_t0s_wall_time_as_stored():
+    """The wall-clock time of session t = 0, as `timebase.ClockReference`
+    stored it, naive UTC with its microseconds, and where it came from; both
+    null until it is stored (the requester's choice of 2026-11-24)."""
+    from wl_preproc.listing.entry import build_entry
+
+    stored = {"reference_time": datetime.datetime(2027, 7, 22, 9, 0, 12, 504318), "reference_source": "rig_clock"}
+    entry = build_entry(_facts(reference=stored))
+    assert (entry["t0_datetime"], entry["t0_source"]) == ("2027-07-22T09:00:12.504318", "rig_clock")
+    assert entry["session_datetime"] == "2027-07-22T09:00:00"
+    plain = build_entry(_facts())
+    assert (plain["t0_datetime"], plain["t0_source"]) == (None, None)
+
+
+def test_the_entrys_digest_changes_when_the_stored_t0_does():
+    """The listing stage hashes `build_entry`'s output, so a stored value
+    that changes, or one stored for the first time, appends a change."""
+    from wl_preproc.listing.entry import build_entry
+    from wl_preproc.listing.stage import digest
+
+    stored = {"reference_time": datetime.datetime(2027, 7, 22, 9, 0, 12, 504318), "reference_source": "rig_clock"}
+    digests = {digest(build_entry(_facts(reference=reference))) for reference in (
+        None, stored, {**stored, "reference_time": stored["reference_time"] + datetime.timedelta(microseconds=1)},
+        {**stored, "reference_source": "nidq_meta"})}
+    assert len(digests) == 4
 
 
 def test_a_session_read_before_its_training_records_were_kept_lists_zeros():
