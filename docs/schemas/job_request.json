@@ -83,6 +83,7 @@
           "type": "array"
         },
         "experimenter": {
+          "maxLength": 64,
           "title": "Experimenter",
           "type": "string"
         },
@@ -230,9 +231,27 @@
       "additionalProperties": false,
       "description": "One run wl.works holds for the session: its copy of a run `GET\n/sessions` listed, measured from the recording, and its own id for it\n(design spec `2026-10-01-session-listing-and-run-requests-design.md`\nsection 3.1). Checked against `core.Run` as the request arrives.",
       "properties": {
+        "bad_reason": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bad Reason"
+        },
         "end_s": {
           "title": "End S",
           "type": "number"
+        },
+        "marked_bad": {
+          "default": false,
+          "title": "Marked Bad",
+          "type": "boolean"
         },
         "run_number": {
           "maximum": 32767,
@@ -276,6 +295,20 @@
           ],
           "default": null,
           "title": "Date Of Birth"
+        },
+        "nickname": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nickname"
         },
         "sex": {
           "default": "U",

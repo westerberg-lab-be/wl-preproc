@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import re
 
 import pytest
@@ -1211,3 +1212,76 @@ def test_the_retired_block_selection_is_refused_naming_its_replacement(landed_se
     with pytest.raises(ValueError, match=re.escape(expect)):
         accept(_runs_job(key, idempotency_key, **selection), prefix=prefix)
     assert not schema_request.Request & {"idempotency_key": idempotency_key}
+
+
+# --- wl.works' bad-run marks and a replacement of a refused canonical (design spec
+# `2026-11-24-wl-works-requests-design.md` sections 2 and 4.6). ---------------------------------
+
+
+def _post_job(body: dict, *, prefix) -> tuple[int, dict]:
+    """`POST /jobs` through the real handler, with `accept` behind it."""
+    import functools
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from wl_preproc.responder.handler import make_handler
+    from wl_preproc.responder.jobs import accept
+
+    token = "test-bearer-token-1"
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(token, lambda: None,
+                                                              functools.partial(accept, prefix=prefix)))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        http_request = urllib.request.Request(
+            f"http://127.0.0.1:{httpd.server_address[1]}/jobs", data=json.dumps(body).encode(), method="POST",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(http_request, timeout=30) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def _job_body(subject, when, key, *, runs=None, **selection) -> dict:
+    return {"domain": "neural",
+            "selection": {"session_datetime": when.isoformat(), "montage_id": 0, **selection},
+            "parameters": {}, "idempotency_key": key,
+            "metadata": {"runs": runs if runs is not None else _asserted(), "montage_boundaries": _LC_BOUNDARIES,
+                         "probes": [], "experimenter": "jw", "subject": subject, "task_types": []}}
+
+
+def test_a_marked_run_without_a_reason_is_a_422(landed_session, prefix):
+    when = datetime.datetime(2027, 6, 1, 9, 0)
+    landed_session("jbbad01", when)
+    runs = _asserted()
+    runs[1] = {**runs[1], "marked_bad": True}
+    status, body = _post_job(_job_body("jbbad01", when, "jbbad01-k1", runs=runs), prefix=prefix)
+    assert status == 422
+    assert "run 2" in json.dumps(body)
+
+
+def test_a_replacement_of_a_refused_canonical_is_accepted(landed_session, prefix):
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import nwb as nwb_schema
+    from wl_preproc.schema import request as schema_request
+
+    when = datetime.datetime(2027, 6, 1, 10, 0)
+    session_key = landed_session("jbbad02", when)
+    nwb_schema.activate(prefix=prefix)
+    first = accept(_lifecycle_job("jbbad02", when, "jbbad02-k1"), prefix=prefix)
+    nwb_schema.NwbFile.insert1({**first, "status": "refused", "built_at": datetime.datetime(2027, 6, 1, 11, 0),
+                                "reason": "no blocks"})
+    status, body = _post_job(_job_body("jbbad02", when, "jbbad02-k2", role="canonical",
+                                       supersedes_activation_id=first["activation_id"]), prefix=prefix)
+    assert status == 200, body
+    assert body["accepted"] is True
+    new_id = body["activation"]["activation_id"]
+    row = (schema_request.Activation & {**session_key, "montage_id": 0, "activation_id": new_id}).fetch1()
+    assert (row["role"], row["supersedes"]) == ("canonical", first["activation_id"])
+    assert new_id == first["activation_id"] + 1

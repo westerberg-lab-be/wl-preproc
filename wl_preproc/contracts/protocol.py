@@ -15,7 +15,7 @@ import datetime
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 SCHEMA_VERSION = 1
@@ -245,6 +245,8 @@ class SubjectDetails(BaseModel):
     species: Annotated[str, Field(min_length=1, max_length=64)] | None = None
     sex: Literal["M", "F", "U"] = "U"
     date_of_birth: datetime.date | None = None
+    # What the lab calls the animal; the file's `subject.description` carries it.
+    nickname: Annotated[str, Field(min_length=1, max_length=64)] | None = None
 
 
 class RunEntry(BaseModel):
@@ -259,6 +261,25 @@ class RunEntry(BaseModel):
     start_s: _SessionSeconds
     end_s: _SessionSeconds
     works_run_id: Annotated[str, Field(min_length=1, max_length=64)]  # core.RunAssertion : varchar(64)
+    # wl.works' mark that the run is bad, and why (design spec
+    # `2026-11-24-wl-works-requests-design.md` section 2). Defaults keep every
+    # earlier payload valid.
+    marked_bad: bool = False
+    bad_reason: Annotated[str, Field(max_length=1000)] | None = None
+
+    @model_validator(mode="after")
+    def _a_mark_and_its_reason_go_together(self) -> RunEntry:
+        # `PydanticCustomError`, not `ValueError`, for the reason
+        # `MetadataBundle._blocks_are_retired` gives.
+        if self.marked_bad and not (self.bad_reason or "").strip():
+            raise PydanticCustomError(
+                "bad_run_without_reason", "run {run_number}: marked_bad needs a bad_reason that is not empty",
+                {"run_number": self.run_number})
+        if self.bad_reason is not None and not self.marked_bad:
+            raise PydanticCustomError(
+                "reason_without_bad_run", "run {run_number}: bad_reason is given but marked_bad is not set",
+                {"run_number": self.run_number})
+        return self
 
 
 class MetadataBundle(BaseModel):
@@ -274,7 +295,7 @@ class MetadataBundle(BaseModel):
     blocks: list[dict[str, Any]] = Field(default=[], json_schema_extra={"maxItems": 0, "deprecated": True})
     montage_boundaries: list[MontageBoundary]
     probes: list[ProbeEntry]
-    experimenter: str
+    experimenter: Annotated[str, Field(max_length=64)]
     subject: str
     task_types: list[str]
     subject_details: SubjectDetails | None = None
