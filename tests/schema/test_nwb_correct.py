@@ -222,6 +222,27 @@ def test_a_published_file_is_corrected_where_it_is_with_its_annotations(publishe
     assert file_subject(live)["date_of_birth"] == _BIRTH
 
 
+def test_a_corrected_files_description_keeps_the_nickname_its_subject_states(published, shares):
+    """The nickname is not corrected (spec section 4.2) but the description
+    rebuilt from the file must still carry it. The fixture's file was built
+    without one, so its record is given the nickname a build would have
+    stated."""
+    from wl_preproc.nwb.correct import correct
+    from wl_preproc.schema import nwb as nwb_schema
+
+    _session_key, key, _runs, _root = published
+    row = (nwb_schema.NwbFile & key).fetch1()
+    stated = {**row["description"], "subject": {**row["description"]["subject"], "nickname": "Pico"}}
+    nwb_schema.NwbFile.update1({**key, "description": stated})
+    _set_birth(datetime.date(2016, 3, 1))
+    try:
+        correct(key, shares, _DAY)
+        assert (nwb_schema.NwbFile & key).fetch1("description")["subject"]["nickname"] == "Pico"
+    finally:
+        _set_birth(_BIRTH)
+        correct(key, shares, _DAY)
+
+
 def test_a_file_not_yet_published_is_corrected_in_scratch(published, daemon_module, prefix, tmp_path_factory):
     """Spec section 2: a written file waiting to publish is corrected where
     it is, and its recorded size follows."""

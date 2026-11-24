@@ -286,7 +286,9 @@ def subject_records(key: dict, description: dict, path: Path) -> tuple[dict, lis
     described = copy.deepcopy(description)
     described["subject"] = {"species": held["species"], "sex": held["sex"],
                             "date_of_birth": None if born is None else born.isoformat(),
-                            "age_days": _age_days(born, key["session_datetime"])}
+                            "age_days": _age_days(born, key["session_datetime"]),
+                            # Not corrected: the file's text states it as built.
+                            "nickname": description["subject"].get("nickname")}
     with h5py.File(path, "r") as handle:
         stated = handle[SUBJECT]["description"][()].decode() if "description" in handle[SUBJECT] else ""
     # The file's own correction lines, every one, after the notes the build
