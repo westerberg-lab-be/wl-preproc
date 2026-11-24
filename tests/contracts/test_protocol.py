@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -6,7 +8,10 @@ from wl_preproc.contracts.protocol import (
     HealthResponse,
     JobRequest,
     MetadataBundle,
+    PositionsRequest,
+    ProbePosition,
     Reading,
+    as_naive_utc,
     contains_markup,
     plain_text,
 )
@@ -467,3 +472,190 @@ def test_idempotency_key_is_one_to_sixty_four_characters():
             request(refused)
     for accepted in ("wlw-act-" + "0123456789abcdef0123456789abcdef0123", "k" * 64, "k"):
         assert request(accepted).idempotency_key == accepted
+
+
+# -- PUT /positions' body ------------------------------------------------------
+
+
+def _at(hhmm, second=0):
+    hour, minute = (int(part) for part in hhmm.split(":"))
+    return datetime.datetime(2026, 11, 20, hour, minute, second)
+
+
+def _position(number=1, serial="S1", start="09:00", end=None, kind=None, **extra):
+    body = {"serial": serial, "insertion_number": number, "inserted_at": _at(start)}
+    if end is not None:
+        body["ended_at"] = _at(end)
+    if kind is not None:
+        body["end_kind"] = kind
+    body.update(extra)
+    return body
+
+
+def _positions(*positions, seq=3):
+    return {
+        "subject": "M1",
+        "session_datetime": _at("08:30"),
+        "positions_seq": seq,
+        "positions": list(positions),
+    }
+
+
+def test_a_position_set_round_trips():
+    body = _positions(
+        _position(1, start="09:00", end="09:05", kind="moved"),
+        _position(2, start="09:05"),
+    )
+    request = PositionsRequest.model_validate(body)
+    assert request.positions_seq == 3
+    assert request.model_dump(mode="python") == PositionsRequest.model_validate(request.model_dump()).model_dump()
+    dumped = request.model_dump()
+    assert dumped["positions"][0]["end_kind"] == "moved"
+    assert dumped["positions"][1]["ended_at"] is None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"ended_at": _at("09:05")},
+        {"end_kind": "withdrawn"},
+        {"ended_after_run": 2},
+    ],
+)
+def test_an_end_and_its_kind_come_together(extra):
+    with pytest.raises(ValidationError) as caught:
+        PositionsRequest.model_validate(_positions(_position(7, **extra)))
+    assert "insertion_number 7" in str(caught.value)
+    assert "ended_at" in str(caught.value) or "end_kind" in str(caught.value)
+
+
+def test_a_position_ends_no_earlier_than_it_starts():
+    with pytest.raises(ValidationError) as caught:
+        ProbePosition.model_validate(
+            {
+                "serial": "S1",
+                "insertion_number": 4,
+                "inserted_at": _at("09:05"),
+                "ended_at": _at("09:04", 59),
+                "end_kind": "withdrawn",
+            }
+        )
+    assert "insertion_number 4" in str(caught.value)
+    equal = ProbePosition.model_validate(
+        {
+            "serial": "S1",
+            "insertion_number": 4,
+            "inserted_at": _at("09:05"),
+            "ended_at": _at("09:05"),
+            "end_kind": "withdrawn",
+        }
+    )
+    assert equal.ended_at == equal.inserted_at
+    # A naive start and an aware end compare as UTC instants: no TypeError.
+    aware = datetime.datetime(2026, 11, 20, 9, 6, tzinfo=datetime.timezone.utc)
+    mixed = ProbePosition.model_validate(
+        {
+            "serial": "S1",
+            "insertion_number": 4,
+            "inserted_at": _at("09:05"),
+            "ended_at": aware,
+            "end_kind": "moved",
+        }
+    )
+    assert mixed.ended_at == aware
+    early = datetime.datetime(2026, 11, 20, 9, 4, tzinfo=datetime.timezone.utc)
+    with pytest.raises(ValidationError):
+        ProbePosition.model_validate(
+            {
+                "serial": "S1",
+                "insertion_number": 4,
+                "inserted_at": _at("09:05"),
+                "ended_at": early,
+                "end_kind": "moved",
+            }
+        )
+
+
+def test_one_insertion_number_once():
+    with pytest.raises(ValidationError) as caught:
+        PositionsRequest.model_validate(_positions(_position(2, "S1"), _position(2, "S2")))
+    assert "insertion_number 2 is given twice" in str(caught.value)
+    ok = PositionsRequest.model_validate(_positions(_position(1, "S1"), _position(3, "S2"), _position(4, "S3")))
+    assert [p.insertion_number for p in ok.positions] == [1, 3, 4]
+
+
+def test_one_serials_positions_do_not_overlap():
+    with pytest.raises(ValidationError) as caught:
+        PositionsRequest.model_validate(
+            _positions(
+                _position(1, start="09:00", end="09:10", kind="moved"),
+                _position(2, start="09:05"),
+            )
+        )
+    message = str(caught.value)
+    assert "insertion_number 1" in message and "insertion_number 2" in message
+    PositionsRequest.model_validate(
+        _positions(
+            _position(1, start="09:00", end="09:05", kind="moved"),
+            _position(2, start="09:05"),
+        )
+    )
+    # Two serials at the same time are not one serial overlapping itself.
+    PositionsRequest.model_validate(_positions(_position(1, "S1"), _position(2, "S2")))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _position(0),
+        _position(256),
+        _position(1, serial="x" * 33),
+        _position(1, inserted_after_run=-1),
+        _position(1, inserted_after_run=32768),
+    ],
+)
+def test_the_bounds_refused(body):
+    with pytest.raises(ValidationError):
+        PositionsRequest.model_validate(_positions(body))
+
+
+def test_the_bounds():
+    with pytest.raises(ValidationError):
+        PositionsRequest.model_validate(_positions(_position(1), seq=-1))
+    ok = PositionsRequest.model_validate(_positions(_position(1, inserted_after_run=0), seq=0))
+    assert ok.positions[0].inserted_after_run == 0
+
+
+def test_a_positions_refusal_is_a_custom_error():
+    bodies = [
+        _positions(_position(1, ended_at=_at("09:05"))),
+        _positions(_position(1, end_kind="moved")),
+        _positions(_position(1, ended_after_run=1)),
+        _positions(_position(1, start="09:05", end="09:04", kind="moved")),
+        _positions(_position(2, "S1"), _position(2, "S2")),
+        _positions(
+            _position(1, start="09:00", end="09:10", kind="moved"),
+            _position(2, start="09:05"),
+        ),
+    ]
+    for body in bodies:
+        with pytest.raises(ValidationError) as caught:
+            PositionsRequest.model_validate(body)
+        assert {error["type"] for error in caught.value.errors()}.isdisjoint({"value_error"})
+
+
+def test_as_naive_utc_converts_without_truncating():
+    naive = datetime.datetime(2026, 11, 20, 9, 0, 0, 500)
+    assert as_naive_utc(naive) is naive
+    plus_one = datetime.datetime(
+        2026,
+        11,
+        20,
+        10,
+        0,
+        0,
+        500,
+        tzinfo=datetime.timezone(datetime.timedelta(hours=1)),
+    )
+    assert as_naive_utc(plus_one) == naive
+    assert as_naive_utc(plus_one).tzinfo is None

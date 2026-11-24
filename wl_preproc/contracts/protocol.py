@@ -372,6 +372,118 @@ class ActiveSetResponse(BaseModel):
     unknown: list[ActivationKey]
 
 
+def as_naive_utc(value: datetime.datetime) -> datetime.datetime:
+    """`value` as a naive UTC time: an aware one is converted to UTC and made
+    naive, a naive one (UTC by this host's convention) is returned unchanged.
+    It does not truncate; `ingest/landing.to_naive_utc` truncates to the second
+    and imports DataJoint, which a contract module may not."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+
+class ProbePosition(BaseModel):
+    """One insertion of one probe, in wall time, as wl.works records it.
+
+    `insertion_number` is wl.works' identity for the position (1-255, never
+    renumbered; gaps are fine). `*_after_run` names the gap between runs a
+    person chose when the time alone is ambiguous: the gap after that run, `0`
+    for the gap before the first run. No author is carried (O3).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    serial: Annotated[str, Field(min_length=1, max_length=32)]
+    insertion_number: Annotated[int, Field(ge=1, le=255)]
+    inserted_at: datetime.datetime
+    ended_at: datetime.datetime | None = None
+    end_kind: Literal["withdrawn", "moved"] | None = None
+    inserted_after_run: Annotated[int, Field(ge=0, le=32767)] | None = None
+    ended_after_run: Annotated[int, Field(ge=0, le=32767)] | None = None
+
+    @model_validator(mode="after")
+    def _an_end_comes_whole_and_in_order(self) -> ProbePosition:
+        # `PydanticCustomError`, not `ValueError`, for the reason
+        # `MetadataBundle._blocks_are_retired` gives.
+        n = self.insertion_number
+        if self.ended_at is None:
+            for name in ("end_kind", "ended_after_run"):
+                if getattr(self, name) is not None:
+                    raise PydanticCustomError(
+                        "position_end_incomplete",
+                        "{name} is given without ended_at for insertion_number {n}",
+                        {"name": name, "n": n},
+                    )
+            return self
+        if self.end_kind is None:
+            raise PydanticCustomError(
+                "position_end_incomplete",
+                "ended_at is given without end_kind for insertion_number {n}",
+                {"n": n},
+            )
+        if as_naive_utc(self.ended_at) < as_naive_utc(self.inserted_at):
+            raise PydanticCustomError(
+                "position_ends_before_it_starts",
+                "ended_at is before inserted_at for insertion_number {n}",
+                {"n": n},
+            )
+        return self
+
+
+class PositionsRequest(BaseModel):
+    """`PUT /positions`: the WHOLE set of one session's probe positions, every
+    time. The highest `positions_seq` wins until the session's first accepted
+    job request; sending the same set twice changes nothing. No author is
+    carried (O3): a person's name leaves wl.works only in a job request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    subject: Annotated[str, Field(min_length=1, max_length=64)]
+    session_datetime: datetime.datetime
+    positions_seq: Annotated[int, Field(ge=0, le=4294967295)]
+    positions: list[ProbePosition]
+
+    @model_validator(mode="after")
+    def _numbers_once_and_one_serial_at_a_time(self) -> PositionsRequest:
+        seen: set[int] = set()
+        for position in self.positions:
+            if position.insertion_number in seen:
+                raise PydanticCustomError(
+                    "position_number_twice",
+                    "insertion_number {n} is given twice in positions",
+                    {"n": position.insertion_number},
+                )
+            seen.add(position.insertion_number)
+        by_serial: dict[str, list[ProbePosition]] = {}
+        for position in self.positions:
+            by_serial.setdefault(position.serial, []).append(position)
+        for serial, group in by_serial.items():
+            ordered = sorted(group, key=lambda p: as_naive_utc(p.inserted_at))
+            for earlier, later in zip(ordered, ordered[1:]):
+                # Touching (an end equal to the next start) is not overlap;
+                # an open end runs on without limit.
+                if earlier.ended_at is None or as_naive_utc(earlier.ended_at) > as_naive_utc(later.inserted_at):
+                    raise PydanticCustomError(
+                        "positions_overlap",
+                        "positions of serial {serial} overlap: insertion_number {a} and insertion_number {b}",
+                        {
+                            "serial": serial,
+                            "a": earlier.insertion_number,
+                            "b": later.insertion_number,
+                        },
+                    )
+        return self
+
+
+class PositionsResponse(BaseModel):
+    """`200`: the seq this host now holds, and whether the set changed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    positions_seq: int
+    changed: bool
+
+
 class Placement(BaseModel):
     """Where a published file is: wl.works' location triple (its Plan 23
     section 10.1), the path relative to the share, and which share tier."""

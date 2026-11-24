@@ -29,6 +29,23 @@ def test_job_request_schema_is_exported_for_wl_works(tmp_path):
     assert "idempotency_key" in schema["properties"]
 
 
+def test_positions_request_schema_is_exported_for_wl_works(tmp_path):
+    export_schemas(tmp_path)
+    schema = json.loads((tmp_path / "positions_request.json").read_text())
+    assert "positions_seq" in schema["properties"]
+    fields = schema["$defs"]["ProbePosition"]["properties"]
+    for name in (
+        "serial",
+        "insertion_number",
+        "inserted_at",
+        "ended_at",
+        "end_kind",
+        "inserted_after_run",
+        "ended_after_run",
+    ):
+        assert name in fields
+
+
 def test_syncbox_header_schema_comes_from_wl_sync(tmp_path):
     """The sync box owns its log format; we re-export it so wl.works has one
     place to fetch every contract."""

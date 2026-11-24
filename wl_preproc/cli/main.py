@@ -24,7 +24,14 @@ from wl_sync.log import SyncBoxLogHeader
 from wl_preproc.contracts.done import DoneMarker
 from wl_preproc.contracts.manifest import SessionManifest
 from wl_preproc.contracts.nwb_description import NwbDescription
-from wl_preproc.contracts.protocol import ActiveSetRequest, HealthResponse, JobRequest, NwbListing, SessionListing
+from wl_preproc.contracts.protocol import (
+    ActiveSetRequest,
+    HealthResponse,
+    JobRequest,
+    NwbListing,
+    PositionsRequest,
+    SessionListing,
+)
 from wl_preproc.contracts.sidecar import BehaviorCameraSidecar
 
 # `wl_preproc.schema.__init__` is deliberately import-cheap (a constant and
@@ -42,6 +49,7 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
     "active_set_request": ActiveSetRequest,
     "nwb_listing": NwbListing,
     "session_listing": SessionListing,
+    "positions_request": PositionsRequest,
 }
 
 
