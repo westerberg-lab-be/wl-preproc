@@ -423,7 +423,7 @@ def test_the_rigs_pauses_are_counted_apart():
     `by.kind` "system" and are the rig's, not a person's. A row with no actor is a person's."""
     from wl_preproc.listing.entry import build_entry
 
-    # three pause rows: by_kind "member", "system" and null
+    # three stored pause rows (member, system, no actor), as the gather reports them: all three, and one system
     entry = build_entry(_facts(rig_session={"session_kind": "training"}, control_kinds={"pause": 3},
                                system_pauses=1))
     assert entry["training_records"]["pauses"] == 2

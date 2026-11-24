@@ -555,9 +555,9 @@ class ListedCalibration(BaseModel):
 
 
 class ListedActor(BaseModel):
-    """Who accepted a warning: a name typed at the rig (`box`, no account) or
-    a wl.works member, by name and wl.works account. Never the token's id or
-    its issuer."""
+    """Who accepted a warning: `box` (a name typed at the rig, no account), `member`
+    (a wl.works member, by name and wl.works account) or `system` (the rig itself,
+    by its process's name, no account). Never the token's id or its issuer."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
