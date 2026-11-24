@@ -444,3 +444,17 @@ def test_a_listed_flag_may_name_a_file():
     flag = ListedFlag.model_validate({"code": "ends_before_start", "message": "m", "segment_id": "a.nidq.bin"})
     assert (flag.segment_id, flag.run_number, flag.block_number) == ("a.nidq.bin", None, None)
     assert ListedFlag.model_validate({"code": "task_unknown", "message": "m"}).segment_id is None
+
+
+def test_idempotency_key_is_one_to_sixty_four_characters():
+    """`request.Request.idempotency_key` is varchar(64); wl.works' own are `wlw-act-` plus a uuid (44)."""
+    def request(key):
+        return JobRequest(domain="neural", selection={}, parameters={}, idempotency_key=key,
+                          metadata=MetadataBundle(montage_boundaries=[], runs=[], probes=[], experimenter="jw",
+                                                  subject="s", task_types=[]))
+
+    for refused in ("", "k" * 65):
+        with pytest.raises(ValidationError):
+            request(refused)
+    for accepted in ("wlw-act-" + "0123456789abcdef0123456789abcdef0123", "k" * 64, "k"):
+        assert request(accepted).idempotency_key == accepted

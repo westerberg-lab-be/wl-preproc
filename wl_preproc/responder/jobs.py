@@ -117,6 +117,8 @@ from __future__ import annotations
 import datetime
 import math
 
+from pydantic import ValidationError
+
 from wl_preproc.contracts.protocol import JobRequest, MontageBoundary, ProbeEntry, RunEntry
 from wl_preproc.events import agreement
 from wl_preproc.ingest import landing
@@ -537,6 +539,21 @@ def _record_probe_reports(session_key: dict, probes, prefix: str) -> None:
             )
 
 
+def _as_current_payload(stored: dict) -> dict:
+    """A payload recorded under an earlier contract, as today's `JobRequest` would dump it.
+
+    A field added with a default since the request was stored has no key in the stored payload, and
+    `accept()` dumps the retried body with that key present, so the two would differ and an honest
+    retry would be refused as key reuse. Re-reading the stored payload through the model fills in
+    exactly those defaults. A payload today's model refuses is left as it is: it is not an honest
+    retry of today's body, and the raw comparison says so.
+    """
+    try:
+        return JobRequest.model_validate(stored).model_dump(mode="json")
+    except ValidationError:
+        return stored
+
+
 def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
     """A validated `JobRequest` becomes `Montage`/`RunAssertion`/`Request`/
     `Activation` rows, with the activation's runs and each probe's. Design
@@ -685,6 +702,7 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
             probe_runs={probe.serial: file_runs for probe in metadata.probes},
             montages=montage_rows,
             run_assertions=run_assertion_rows,
+            read_stored_payload=_as_current_payload,
         )
 
     if selection.get("supersedes_activation_id") is not None:
@@ -700,6 +718,7 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
             probe_runs=probe_runs,
             montages=montage_rows,
             run_assertions=run_assertion_rows,
+            read_stored_payload=_as_current_payload,
         )
     return schema_request.submit(
         idempotency_key=request.idempotency_key,
@@ -712,4 +731,5 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
         probe_runs=probe_runs,
         montages=montage_rows,
         run_assertions=run_assertion_rows,
+        read_stored_payload=_as_current_payload,
     )

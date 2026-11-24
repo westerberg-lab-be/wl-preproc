@@ -346,6 +346,8 @@
       "type": "string"
     },
     "idempotency_key": {
+      "maxLength": 64,
+      "minLength": 1,
       "title": "Idempotency Key",
       "type": "string"
     },

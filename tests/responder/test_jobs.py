@@ -1364,3 +1364,46 @@ def test_a_window_of_only_reversed_runs_is_a_422(landed_session, prefix):
     with pytest.raises(ValueError, match=re.escape(expect)):
         accept(_runs_job(key, "jbrev04-k1", runs=[measured[2]], probe_runs={_SERIAL: []}), prefix=prefix)
     assert not schema_request.Activation & key
+
+
+def _stored_before_the_fields_were_added(key: str) -> None:
+    """Rewrite a stored request's payload as it was before `marked_bad`, `bad_reason` and `nickname` existed."""
+    from wl_preproc.schema import request as schema_request
+
+    stored = (schema_request.Request & {"idempotency_key": key}).fetch1("payload")
+    for run in stored["metadata"]["runs"]:
+        del run["marked_bad"], run["bad_reason"]
+    del stored["metadata"]["subject_details"]["nickname"]
+    schema_request.Request.update1({"idempotency_key": key, "payload": stored})
+
+
+def test_a_retry_of_a_request_stored_before_a_field_was_added_is_the_same_request(landed_session, prefix):
+    when = datetime.datetime(2027, 6, 2, 9, 0)
+    landed_session("jbver01", when)
+    body = _job_body("jbver01", when, "jbver01-k1")
+    body["metadata"]["subject_details"] = {"species": "Macaca mulatta"}
+    first_status, first = _post_job(body, prefix=prefix)
+    assert first_status == 200, first
+    _stored_before_the_fields_were_added("jbver01-k1")
+    status, retried = _post_job(body, prefix=prefix)
+    assert status == 200, retried
+    assert retried["activation"] == first["activation"]
+
+
+def test_a_retry_that_changes_a_field_is_still_key_reuse(landed_session, prefix):
+    when = datetime.datetime(2027, 6, 2, 10, 0)
+    landed_session("jbver02", when)
+    body = _job_body("jbver02", when, "jbver02-k1")
+    body["metadata"]["subject_details"] = {"species": "Macaca mulatta"}
+    assert _post_job(body, prefix=prefix)[0] == 200
+    _stored_before_the_fields_were_added("jbver02-k1")
+    runs = _asserted()
+    runs[0] = {**runs[0], "marked_bad": True, "bad_reason": "x"}
+    changed = _job_body("jbver02", when, "jbver02-k1", runs=runs)
+    changed["metadata"]["subject_details"] = body["metadata"]["subject_details"]
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema.request import KeyReuseError
+
+    # `accept` raises the module's own KeyReuseError; `server.py`'s seam is what turns it into the 409.
+    with pytest.raises(KeyReuseError, match="payload differs"):
+        accept(JobRequest.model_validate(changed), prefix=prefix)

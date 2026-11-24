@@ -323,7 +323,7 @@ class JobRequest(BaseModel):
     domain: str
     selection: dict[str, Any]
     parameters: dict[str, Any]
-    idempotency_key: str
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=64)]  # request.Request.idempotency_key : varchar(64)
     metadata: MetadataBundle
 
 
