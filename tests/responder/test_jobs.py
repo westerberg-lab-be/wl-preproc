@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from tests.positions import put, seed_montage
+from tests.positions import put, seed_group, seed_montage
 from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
 
 # The runs the event stage measured for every landed session here (design
@@ -1245,7 +1245,7 @@ def _nothing_written(key: dict, idempotency_key: str) -> bool:
     from wl_preproc.schema import core
     from wl_preproc.schema import request as schema_request
 
-    return not (core.RunAssertion & key or schema_request.Activation & key
+    return not (core.RunAssertion & key or schema_request.Activation & key or schema_request.SharedActivation & key
                 or schema_request.Request & {"idempotency_key": idempotency_key})
 
 
@@ -1462,3 +1462,137 @@ def test_positions_sent_to_a_session_derived_with_none_are_a_422_saying_so(lande
         f"session {key['subject']} {key['session_datetime'].isoformat()}: its positions changed (seq 1) since its "
         "montages were derived with no positions; send the request again once GET /sessions lists seq 1")
     assert _nothing_written(key, "jbseq03-k1")
+
+
+# --- A shared group's request (design spec `2026-11-24-montages-design.md` section 4.6; plan decisions D11,
+# D12). Group 1 is S1 at insertion 1 over montages 1 [0, 5) and 2 [5, 24), sortable on runs 1 and 2; S1 sorts no
+# run 3 in montage 2. ---------------------------------------------------------------------------------------------
+
+
+def _shared_session(landed_session, subject: str, *, prefix) -> dict:
+    key = landed_session(subject, datetime.datetime(2027, 10, 1, 9, 0))
+    _positions(key, ("S1", 1), ("S2", 2), prefix=prefix)
+    seed_montage(key, {"montage_id": 1, "start_s": 0.0, "end_s": 5.0},
+                 probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1]}])
+    seed_montage(key, {"montage_id": 2, "start_s": 5.0, "end_s": 24.0},
+                 probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [2]},
+                         {"serial": "S2", "insertion_number": 2, "sortable_runs": [2, 3]}])
+    seed_group(key, {"group_id": 1, "serial": "S1", "insertion_number": 1, "montage_ids": [1, 2],
+                     "sortable_runs": [1, 2]})
+    return key
+
+
+def _shared_job(key: dict, idempotency_key: str, *, runs=_RUNS, probes=None, **selection) -> JobRequest:
+    """Group 1's request, asserting `runs`, with S1 at insertion 1 sorted on runs 1 and 2 unless `selection` or
+    `probes` say otherwise."""
+    return JobRequest(
+        domain="neural",
+        selection={"role": "shared", "group_id": 1, "session_datetime": key["session_datetime"],
+                   "probe_runs": {"S1": [1, 2]}, **selection},
+        parameters={},
+        idempotency_key=idempotency_key,
+        metadata=MetadataBundle(runs=_asserted(runs), experimenter="jw", subject=key["subject"], task_types=[],
+                                probes=probes if probes is not None else [{"serial": "S1", "insertion_number": 1}]),
+    )
+
+
+def test_a_shared_request_is_stored_and_waits(landed_session, prefix):
+    """Section 4.6: accepted and stored, its build waiting on sorting. Its one probe's report is written as a
+    canonical's is, and the NWB stage has nothing to build for it."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import core, ephys
+    from wl_preproc.schema import request as schema_request
+
+    key = _shared_session(landed_session, "jbshr01", prefix=prefix)
+    activation = accept(_shared_job(key, "jbshr01-k1"), prefix=prefix)
+    assert activation == {**key, "group_id": 1, "activation_id": 0}
+    assert (schema_request.SharedActivation & activation).fetch1("request_key") == "jbshr01-k1"
+    assert sorted(int(n) for n in (schema_request.SharedActivation.ProbeRun & activation).to_arrays("run_number")) \
+        == [1, 2]
+    assert not schema_request.Activation & key
+    assert [(int(r["insertion_number"]), r["probe_serial"]) for r in (ephys.InsertionReport & key).to_dicts()] == [
+        (1, "S1")]
+    assert sorted(int(n) for n in (core.RunAssertion & key).to_arrays("run_number")) == [1, 2, 3]
+
+
+def test_a_shared_request_answers_as_a_canonical(landed_session, prefix):
+    """Q4: the same key again is a retry, another key for the group returns its activation, and the first key
+    with another payload is key reuse. Over HTTP the answer is a canonical's 200."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+    from wl_preproc.schema.request import KeyReuseError
+
+    key = _shared_session(landed_session, "jbshr02", prefix=prefix)
+    first = accept(_shared_job(key, "jbshr02-k1"), prefix=prefix)
+    assert accept(_shared_job(key, "jbshr02-k1"), prefix=prefix) == first
+    assert accept(_shared_job(key, "jbshr02-k2"), prefix=prefix) == first
+    assert len(schema_request.SharedActivation & key) == 1
+    assert schema_request.Request & {"idempotency_key": "jbshr02-k2"}
+    with pytest.raises(KeyReuseError, match="payload differs"):
+        accept(_shared_job(key, "jbshr02-k1", probe_runs={"S1": [1]}), prefix=prefix)
+    body = _shared_job(key, "jbshr02-k1").model_dump(mode="json")
+    assert _post_job(body, prefix=prefix) == (200, {"activation": {
+        "subject": "jbshr02", "session_datetime": key["session_datetime"].isoformat(), "group_id": 1,
+        "activation_id": 0}, "accepted": True})
+
+
+_TWO_PROBES = [{"serial": "S1", "insertion_number": 1}, {"serial": "S2", "insertion_number": 2}]
+
+
+@pytest.mark.parametrize("subject, change, expect", [
+    ("jbshg01", {"montage_id": 1},
+     "selection.montage_id is a canonical's or a derivative's: a shared request names its group in "
+     "selection.group_id"),
+    ("jbshg02", {"run_numbers": [1, 2]},
+     "selection.run_numbers is a derivative's: a shared request names its probe's runs in selection.probe_runs"),
+    ("jbshg03", {"supersedes_activation_id": 0},
+     "selection['supersedes_activation_id'] needs selection['role'] == 'canonical'"),
+    ("jbshg04", {"group_id": 9},
+     "no shared group 9 is listed for jbshg04/2027-10-01T09:00:00: positions_status is placed"),
+    ("jbshg05", {"probes": _TWO_PROBES},
+     "metadata.probes names 2 probes, and a shared request names its group's one: group 1 is probe S1 at "
+     "insertion_number 1"),
+    ("jbshg06", {"probes": _TWO_PROBES[1:], "probe_runs": {"S2": [2]}},
+     "metadata.probes names probe S2 at insertion_number 2, and group 1 is probe S1 at insertion_number 1"),
+    ("jbshg07", {"probe_runs": {"S2": [1, 2]}},
+     "selection.probe_runs names ['S2'], and group 1 is probe S1: a shared request states its one probe's runs"),
+    ("jbshg08", {"probe_runs": {"S1": [1, 2, 3]}},
+     "selection.probe_runs['S1'] names run(s) [3] not among group 1's sortable runs [1, 2]"),
+    ("jbshg09", {"runs": _RUNS[:1]},
+     "selection.probe_runs['S1'] names run(s) [2] asserted neither in metadata.runs nor before"),
+])
+def test_a_shared_request_names_only_its_group(landed_session, prefix, subject, change, expect):
+    """D11, D12: a shared request names its listed group, that group's one probe, and runs among the group's
+    sortable runs, each asserted now or before. Anything else is a 422 naming the field, and writes nothing."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _shared_session(landed_session, subject, prefix=prefix)
+    change = dict(change)
+    fields = {name: change.pop(name) for name in ("runs", "probes") if name in change}
+    with pytest.raises(ValueError, match=re.escape(expect)):
+        accept(_shared_job(key, f"{subject}-k1", **fields, **change), prefix=prefix)
+    assert _nothing_written(key, f"{subject}-k1")
+
+
+def test_a_shared_request_on_a_group_derived_again_while_checked_is_a_422(landed_session, prefix, monkeypatch):
+    """The race `_hold_derivation` closes for a canonical, for a shared request: the stage re-derives the session
+    after the group was checked and before the activation is written, and the request is refused whole."""
+    from wl_preproc.montage import stored
+    from wl_preproc.responder import jobs
+
+    key = _shared_session(landed_session, "jbshrace", prefix=prefix)
+    checked = jobs._check_probes
+
+    def checked_then_rederived(session_key, probes):
+        checked(session_key, probes)
+        stored.write(key, stored.StoredMontages(
+            status="placed", positions_seq=1, flags=(),
+            montages=({"montage_id": 1, "start_s": 0.0, "end_s": 24.0, "probes": ()},), groups=()))
+
+    monkeypatch.setattr(jobs, "_check_probes", checked_then_rederived)
+    with pytest.raises(ValueError) as refused:
+        jobs.accept(_shared_job(key, "jbshrace-k1"), prefix=prefix)
+    assert str(refused.value) == (
+        f"the montages of {_session_of(key)} were derived again while this request was checked: positions_status "
+        "is placed; rebuild the request from a fresh GET /sessions")
+    assert _nothing_written(key, "jbshrace-k1")

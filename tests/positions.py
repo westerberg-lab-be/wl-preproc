@@ -52,6 +52,21 @@ def seed_montage(key: dict, montage: dict, probes: list[dict] = (), status: str 
                                     for probe in probes for run in probe["sortable_runs"]], skip_duplicates=True)
 
 
+def seed_group(key: dict, group: dict) -> None:
+    """Store `group` ({group_id, serial, insertion_number, montage_ids, sortable_runs, and optionally
+    electrode_config_hash, probe_type and n_electrodes}) for the session `key` as the montage stage would list it:
+    its `core.SharedGroup` row, a `Member` for each of `montage_ids` and a `SortableRun` for each of
+    `sortable_runs`. Its montages are seeded first (`seed_montage`), whose derivation lists it."""
+    from wl_preproc.schema import core
+
+    where = {"subject": key["subject"], "session_datetime": key["session_datetime"], "group_id": group["group_id"]}
+    core.SharedGroup.insert1({**where, "probe_serial": group["serial"], "insertion_number": group["insertion_number"],
+                              "electrode_config_hash": group.get("electrode_config_hash"),
+                              "probe_type": group.get("probe_type"), "n_electrodes": group.get("n_electrodes")})
+    core.SharedGroup.Member.insert([{**where, "montage_id": montage_id} for montage_id in group["montage_ids"]])
+    core.SharedGroup.SortableRun.insert([{**where, "run_number": run} for run in group["sortable_runs"]])
+
+
 def before_t0(key: dict, minutes: int = 10) -> datetime.datetime:
     """The session's stored `ClockReference.reference_time`, floored to its minute, less `minutes` (naive UTC)."""
     from wl_preproc.schema import timebase

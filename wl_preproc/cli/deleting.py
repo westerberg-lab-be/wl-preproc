@@ -68,6 +68,11 @@ _PARENTS: dict[str, tuple[str, ...]] = {
     "SharedGroup": (),
     "SharedGroup.Member": ("SharedGroup", "Montage"),
     "SharedGroup.SortableRun": ("SharedGroup",),
+    # A shared group's request (design spec `2026-11-24-montages-design.md`
+    # section 4.6): its activation hangs from the group, and its runs' other
+    # parent, `core.Run`, is left out of the map as above.
+    "SharedActivation": ("SharedGroup", "Request"),
+    "SharedActivation.ProbeRun": ("SharedActivation",),
 }
 
 
@@ -93,6 +98,8 @@ def _tables() -> dict:
         "SharedGroup": core.SharedGroup,
         "SharedGroup.Member": core.SharedGroup.Member,
         "SharedGroup.SortableRun": core.SharedGroup.SortableRun,
+        "SharedActivation": request.SharedActivation,
+        "SharedActivation.ProbeRun": request.SharedActivation.ProbeRun,
     }
 
 

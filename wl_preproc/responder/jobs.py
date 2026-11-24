@@ -24,7 +24,7 @@ wl.works' probe positions (`PUT /positions`) and its own census, and the
 daemon's montage stage stores them (`montage/stage.py`), which `GET
 /sessions` lists. `metadata.montage_boundaries` is retired as
 `metadata.blocks` was, and a request names a listed montage in
-`selection.montage_id`: `_listed_montage` reads it from the stored rows,
+`selection.montage_id`: `_listed` reads it from the stored rows,
 never deriving it again, and a montage that is not stored, or not listed
 at the session's `positions_status`, is a 422 naming that status, never
 created. So is a session whose positions changed since its montages were
@@ -36,6 +36,13 @@ first accepted request, and the activation's transaction holds the
 derivation's lock and finds it unchanged since the checks read it
 (`_hold_derivation`), so an activation never covers montages it was not
 checked against.
+
+**A shared group's request** (section 4.6; plan decisions D11, D12) names a
+listed group in `selection.group_id`, with `role: shared`, and its one
+probe's runs in `selection.probe_runs`, each among the group's sortable runs
+and asserted now or before. Its `metadata.probes` is exactly that probe's
+entry. It is checked against the same stored derivation, under the same
+lock, and stored by `submit_shared` to wait for sorting.
 
 **Two corrections carried from Task 4's review, applied here rather than
 re-derived:**
@@ -146,6 +153,7 @@ from __future__ import annotations
 
 import datetime
 import math
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -159,10 +167,16 @@ from wl_preproc.schema import DEFAULT_PREFIX, core, pipeline
 from wl_preproc.schema import request as schema_request
 
 # The two keys `accept()` itself reads out of an arbitrary, wl.works-supplied
-# `selection` dict. `subject` is deliberately NOT among them: session identity
-# comes from `metadata.subject` (the ELN's own record), never from anything
-# named "subject" inside `selection` -- see `accept()`'s own docstring.
-_REQUIRED_SELECTION_KEYS = ("session_datetime", "montage_id")
+# `selection` dict, for each role: a montage's, or a shared group's (design
+# spec `2026-11-24-montages-design.md` section 4.6). `subject` is deliberately
+# NOT among them: session identity comes from `metadata.subject` (the ELN's
+# own record), never from anything named "subject" inside `selection` -- see
+# `accept()`'s own docstring.
+_REQUIRED_SELECTION_KEYS = {
+    "canonical": ("session_datetime", "montage_id"),
+    "derivative": ("session_datetime", "montage_id"),
+    "shared": ("session_datetime", "group_id"),
+}
 
 # Column bounds, read directly from wl_preproc/schema/core.py's declared
 # types -- `montage_id` does not declare "unsigned" (unlike
@@ -180,6 +194,7 @@ _REQUIRED_SELECTION_KEYS = ("session_datetime", "montage_id")
 # rather than assuming the same errno as the integer case). None of the three
 # appears in DataJoint's MySQL adapter's translated-error list.
 _MONTAGE_ID_RANGE = (-128, 127)  # core.Montage.montage_id : tinyint
+_GROUP_ID_RANGE = (0, 2**16 - 1)  # core.SharedGroup.group_id : smallint unsigned
 # request.Activation.activation_id : int, and a superseded one is never
 # negative: the allocator starts at 0.
 _ACTIVATION_ID_RANGE = (0, 2**31 - 1)
@@ -188,8 +203,8 @@ _ACTIVATION_ID_RANGE = (0, 2**31 - 1)
 _DATETIME_MIN_YEAR = 1000
 
 
-def _require_selection_keys(selection: dict) -> None:
-    missing = [key for key in _REQUIRED_SELECTION_KEYS if key not in selection]
+def _require_selection_keys(selection: dict, role: str) -> None:
+    missing = [key for key in _REQUIRED_SELECTION_KEYS[role] if key not in selection]
     if missing:
         raise ValueError(
             f"selection is missing required key(s) {missing}; got {sorted(selection)}"
@@ -246,18 +261,20 @@ def _coerce_session_datetime(value) -> datetime.datetime:
     )
 
 
-def _lifecycle_role(selection: dict, run_numbers: list[int]) -> bool:
-    """Whether the request asks for a canonical, from `selection`'s optional
-    `role` and `supersedes_activation_id` (design spec
+def _lifecycle_role(selection: dict, run_numbers: list[int]) -> Literal["canonical", "derivative", "shared"]:
+    """The role the request asks for, from `selection`'s optional `role` and
+    `supersedes_activation_id` (design spec
     `2026-09-30-canonical-lifecycle-design.md` section 3). Without a `role`,
     `run_numbers` makes a derivative and none a canonical over the whole
     montage, as `block_ids` did (design spec
-    `2026-10-01-session-listing-and-run-requests-design.md` section 3.1).
+    `2026-10-01-session-listing-and-run-requests-design.md` section 3.1). A
+    `shared` request is named so, and names a group, never a montage or a
+    run set (design spec `2026-11-24-montages-design.md` section 4.6).
     Raises `ValueError` (a `422`) for the combinations section 3 refuses,
     before anything is written."""
     role = selection.get("role")
-    if role not in (None, "canonical", "derivative"):
-        raise ValueError(f"selection['role'] must be 'canonical' or 'derivative', got {role!r}")
+    if role not in (None, "canonical", "derivative", "shared"):
+        raise ValueError(f"selection['role'] must be 'canonical', 'derivative' or 'shared', got {role!r}")
     # A null means absent, as a null `role` does (the 2b final review's M10).
     if selection.get("supersedes_activation_id") is not None:
         if role != "canonical":
@@ -269,7 +286,15 @@ def _lifecycle_role(selection: dict, run_numbers: list[int]) -> bool:
                                  name="selection['supersedes_activation_id']", bounds=_ACTIVATION_ID_RANGE)
     if role == "derivative" and not run_numbers:
         raise ValueError("selection['role'] 'derivative' needs run_numbers: a derivative is its run set")
-    return role == "canonical" or (role is None and not run_numbers)
+    if role == "shared":
+        if selection.get("montage_id") is not None:
+            raise ValueError("selection.montage_id is a canonical's or a derivative's: a shared request names its "
+                             "group in selection.group_id")
+        if run_numbers:
+            raise ValueError("selection.run_numbers is a derivative's: a shared request names its probe's runs in "
+                             "selection.probe_runs")
+        return "shared"
+    return "canonical" if role == "canonical" or (role is None and not run_numbers) else "derivative"
 
 
 class RunIdConflict(Exception):
@@ -305,21 +330,13 @@ def _cannot_be_requested(run: dict) -> str:
     return f"{_left_out(run)}; it cannot be requested"
 
 
-def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], run_numbers: list[int],
-                canonical: bool) -> tuple[list[int], list[dict]]:
-    """The file's runs, and the `core.RunAssertion` rows to record, after
-    checking every asserted run against the measured `core.Run` as the
-    request arrives (design spec
+def _asserted_runs(session_key: dict, asserted: list[RunEntry]) -> tuple[dict, dict, dict, list[dict]]:
+    """The session's measured runs and the runs the request asserts, both by
+    number, the `works_run_id` already recorded for each run, and the
+    `core.RunAssertion` rows to record, after checking every asserted run
+    against the measured `core.Run` as the request arrives (design spec
     `2026-10-01-session-listing-and-run-requests-design.md` section 3.2).
-
-    A canonical holds every measured run whose start lies in its montage's
-    window, and each must be asserted here; a derivative holds the runs it
-    names, each measured, in the window, and asserted here or before.
-
-    **A run that ends before it starts is in neither** (design spec
-    `2026-11-24-wl-works-requests-design.md` section 4.5): `GET /sessions`
-    leaves it out, so wl.works can never assert it, and a canonical need not.
-    Asserting or naming one is a 422 that names it and both its times."""
+    Asserting a run that ends before it starts is a 422 (`_check_runs`)."""
     measured = {row["run_number"]: row for row in (core.Run & session_key).to_dicts()}
     if not measured:
         raise ValueError(
@@ -364,6 +381,23 @@ def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], 
             if works_run_id == row["works_run_id"] and number != row["run_number"]:
                 raise RunIdConflict(f"works_run_id {works_run_id!r} is recorded for run {number}; this request "
                                     f"names it for run {row['run_number']}")
+    return measured, by_number, on_record, rows
+
+
+def _check_runs(session_key: dict, montage_row: dict, asserted: list[RunEntry], run_numbers: list[int],
+                canonical: bool) -> tuple[list[int], list[dict]]:
+    """The file's runs, and the `core.RunAssertion` rows to record
+    (`_asserted_runs`).
+
+    A canonical holds every measured run whose start lies in its montage's
+    window, and each must be asserted here; a derivative holds the runs it
+    names, each measured, in the window, and asserted here or before.
+
+    **A run that ends before it starts is in neither** (design spec
+    `2026-11-24-wl-works-requests-design.md` section 4.5): `GET /sessions`
+    leaves it out, so wl.works can never assert it, and a canonical need not.
+    Asserting or naming one is a 422 that names it and both its times."""
+    measured, by_number, on_record, rows = _asserted_runs(session_key, asserted)
     in_window = [number for number, run in sorted(measured.items())
                  if montage_row["start_s"] <= run["run_start_time"] < montage_row["end_s"]]
     window = [number for number in in_window if not _ends_before_start(measured[number])]
@@ -453,6 +487,44 @@ def _check_probe_runs(probes: list[ProbeEntry], probe_runs, file_runs: list[int]
                              f"the request gives it run(s) {unsortable}")
         raise ValueError(f"probe {serial}'s run(s) {unsortable} are not among its sortable runs {sortable} in "
                          f"montage {montage_id}")
+
+
+def _check_shared_probe(group: dict, probes: list[ProbeEntry], probe_runs) -> list[int]:
+    """The runs the group's one probe is sorted on, from `selection.probe_runs`, once `metadata.probes` is exactly
+    that probe's entry, at the group's insertion, and `selection.probe_runs` states its runs alone (design spec
+    `2026-11-24-montages-design.md` section 4.6)."""
+    serial, number = group["serial"], group["insertion_number"]
+    its = f"group {group['group_id']} is probe {serial} at insertion_number {number}"
+    if len(probes) != 1:
+        raise ValueError(f"metadata.probes names {len(probes)} probes, and a shared request names its group's one: "
+                         f"{its}")
+    probe = probes[0]
+    if (probe.serial, probe.insertion_number) != (serial, number):
+        raise ValueError(f"metadata.probes names probe {probe.serial} at insertion_number {probe.insertion_number}, "
+                         f"and {its}")
+    if not isinstance(probe_runs, dict) or sorted(probe_runs) != [serial]:
+        named = sorted(probe_runs) if isinstance(probe_runs, dict) else probe_runs
+        raise ValueError(f"selection.probe_runs names {named!r}, and group {group['group_id']} is probe {serial}: a "
+                         "shared request states its one probe's runs")
+    return _run_numbers(probe_runs[serial], name=f"selection.probe_runs[{serial!r}]")
+
+
+def _check_shared_runs(session_key: dict, group: dict, asserted: list[RunEntry],
+                       run_numbers: list[int]) -> tuple[list[int], list[dict]]:
+    """The runs the group's probe is sorted on, and the `core.RunAssertion` rows to record (`_asserted_runs`). Each
+    is among the group's sortable runs, and asserted in `metadata.runs` or before, as a derivative's runs are (plan
+    decision D12)."""
+    _measured, by_number, on_record, rows = _asserted_runs(session_key, asserted)
+    named = sorted(set(run_numbers))
+    sortable = list(group["sortable_runs"])
+    for problem, numbers in ((f"not among group {group['group_id']}'s sortable runs {sortable}",
+                              [n for n in named if n not in sortable]),
+                             ("asserted neither in metadata.runs nor before",
+                              [n for n in named if n not in by_number and n not in on_record])):
+        if numbers:
+            raise ValueError(f"selection.probe_runs[{group['serial']!r}] names run(s) {numbers} {problem}; "
+                             f"{_REBUILD}")
+    return named, rows
 
 
 def _reject_out_of_range_int(value, *, name: str, bounds: tuple[int, int]) -> None:
@@ -587,27 +659,30 @@ def _record_probe_reports(session_key: dict, probes, prefix: str) -> None:
             )
 
 
-def _listed_montage(session_key: dict, montage_id: int) -> tuple[dict | None, dict]:
+def _listed(session_key: dict, kind: str, wanted: int) -> tuple[dict | None, dict]:
     """The session's stored derivation (`stored_montages.derivation_row`) and
-    the montage `montage_id` as this host lists it (`{montage_id, start_s,
-    end_s, probes}`), from the stored rows and never derived again (design
-    spec `2026-11-24-montages-design.md` section 5). A `ValueError` (a 422)
-    naming the session's `positions_status` when no such montage is stored,
-    or the status is not one `GET /sessions` lists montages at (`placed`,
-    `not_needed`; plan decision D13).
+    its `kind` `wanted` as this host lists it, from the stored rows and never
+    derived again (design spec `2026-11-24-montages-design.md` section 5): a
+    "montage" (`{montage_id, start_s, end_s, probes}`) or a "shared group"
+    (`stored_montages.read_stored`'s group dict). A `ValueError` (a 422)
+    naming the session's `positions_status` when none is stored, or the
+    status is not one `GET /sessions` lists them at (`placed`, `not_needed`;
+    plan decision D13).
 
     The derivation is read first: a rewrite committed after it changes the
     row `_hold_derivation` compares it with, whatever was read after it."""
     derivation = stored_montages.derivation_row(session_key)
     stored = stored_montages.read_stored([session_key]).get((session_key["subject"],
                                                               session_key["session_datetime"]))
-    montage = next((m for m in (stored.montages if stored else ()) if m["montage_id"] == montage_id), None)
+    rows = () if stored is None else stored.montages if kind == "montage" else stored.groups
+    id_name = "montage_id" if kind == "montage" else "group_id"
+    found = next((row for row in rows if row[id_name] == wanted), None)
     status = stored.status if stored else "waiting"
-    if montage is None or status not in _LISTED_STATUSES:
-        raise ValueError(f"no montage {montage_id} is listed for {session_key['subject']}/"
+    if found is None or status not in _LISTED_STATUSES:
+        raise ValueError(f"no {kind} {wanted} is listed for {session_key['subject']}/"
                          f"{session_key['session_datetime'].isoformat()}: positions_status is {status}; send PUT "
                          f"/positions, or {_REBUILD}")
-    return derivation, montage
+    return derivation, found
 
 
 def _check_positions_seq(session_key: dict, derivation: dict | None, positions_seq: int | None) -> None:
@@ -678,10 +753,14 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
     host listed. Design spec section 6.1, and design specs
     `2026-10-01-session-listing-and-run-requests-design.md` section 3 and
     `2026-11-24-montages-design.md` section 4.6. Returns the `Activation`
-    primary key.
+    primary key, or for `role: shared` the `SharedActivation` key
+    (`_accept_shared`).
 
     Raises `ValueError` for a request that cannot be honoured: a `selection`
-    missing `session_datetime` or `montage_id`; the retired
+    missing `session_datetime` or `montage_id` (`group_id` for a shared
+    request); a shared request naming a montage, a run set, a supersede, a
+    group not listed, a probe not the group's or runs it cannot be sorted on
+    (`_lifecycle_role`, `_accept_shared`); the retired
     `selection.block_ids`; a `metadata.subject` longer than
     `landing.SUBJECT_MAX_LEN`; a `session_datetime` that is neither a
     `datetime.datetime` nor a parseable ISO-8601 string; a
@@ -689,7 +768,7 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
     (`_require_landed_session` -- the ordinary ELN-before-transfer case,
     which used to reach the database and come back as a `500` telling
     wl.works to retry forever); a `montage_id` that cannot fit its column; a
-    `montage_id` this host has not listed (`_listed_montage`); positions
+    `montage_id` this host has not listed (`_listed`); positions
     changed since the montages were derived (`_check_positions_seq`); a probe that
     names no stored position, or runs a probe cannot be sorted on in the
     montage (`_check_probes`, `_check_probe_runs`); a derivation rewritten
@@ -717,7 +796,6 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
     montage, with each probe's runs in `selection["probe_runs"]` (`submit`).
     """
     selection = request.selection
-    _require_selection_keys(selection)
     metadata = request.metadata
     # Before anything reads the database: a malformed selection is the
     # caller's to fix, whatever this host holds.
@@ -726,10 +804,12 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
                          "and a canonical holds every run of its montage, each probe's in selection.probe_runs")
     run_numbers = _run_numbers(selection.get("run_numbers") or [], name="selection.run_numbers")
     probe_runs = selection.get("probe_runs")
-    canonical = _lifecycle_role(selection, run_numbers)
+    role = _lifecycle_role(selection, run_numbers)
+    _require_selection_keys(selection, role)
+    canonical = role == "canonical"
     if canonical and run_numbers:
         raise ValueError("selection.run_numbers is a derivative's: a canonical holds every run of its montage")
-    if not canonical and probe_runs is not None:
+    if role == "derivative" and probe_runs is not None:
         raise ValueError("selection.probe_runs is a canonical's: a derivative's runs are its run_numbers")
 
     _reject_oversized_subject(metadata.subject)
@@ -741,10 +821,12 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
             f"before {_DATETIME_MIN_YEAR}, MySQL DATETIME's floor"
         )
 
+    session_key = {"subject": metadata.subject, "session_datetime": session_datetime}
+    if role == "shared":
+        return _accept_shared(request, session_key, prefix)
+
     montage_id = selection["montage_id"]
     _reject_out_of_range_int(montage_id, name="selection['montage_id']", bounds=_MONTAGE_ID_RANGE)
-
-    session_key = {"subject": metadata.subject, "session_datetime": session_datetime}
     montage_key = {**session_key, "montage_id": montage_id}
 
     # ---- Phase 1: build every candidate row and validate everything
@@ -757,7 +839,7 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
 
     # The montage this host listed, never one the request describes (design
     # spec `2026-11-24-montages-design.md` section 4.6).
-    derivation, montage = _listed_montage(session_key, montage_id)
+    derivation, montage = _listed(session_key, "montage", montage_id)
     positions = stored_positions(session_key)
     # Checked again under the lock (`_hold_derivation`); here first, so a
     # probe is not refused against positions the montages do not come from.
@@ -852,6 +934,47 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
         requested_by=metadata.experimenter,
         run_numbers=file_runs,
         probe_runs=probe_runs,
+        run_assertions=run_assertion_rows,
+        read_stored_payload=_as_current_payload,
+        guard=hold,
+    )
+
+
+def _accept_shared(request: JobRequest, session_key: dict, prefix: str) -> dict:
+    """`accept()` for `role: shared` (design spec `2026-11-24-montages-design.md` section 4.6; plan decisions D11,
+    D12, D14): the group is one this host listed (`_listed`), the positions are the ones its montages were derived
+    from (`_check_positions_seq`), each probe names a stored position (`_check_probes`), and the request names the
+    group's one probe and runs it can be sorted on (`_check_shared_probe`, `_check_shared_runs`), all before
+    anything is written. Then the probe's report, and `submit_shared` under the derivation's lock
+    (`_hold_derivation`). Returns the `SharedActivation` key."""
+    selection = request.selection
+    metadata = request.metadata
+    group_id = selection["group_id"]
+    _reject_out_of_range_int(group_id, name="selection['group_id']", bounds=_GROUP_ID_RANGE)
+
+    schema_request.activate(prefix=prefix)
+    _require_landed_session(session_key)
+    derivation, group = _listed(session_key, "shared group", group_id)
+    positions = stored_positions(session_key)
+    _check_positions_seq(session_key, derivation, positions[0] if positions else None)
+    _check_probes(session_key, metadata.probes)
+    probe_runs = _check_shared_probe(group, metadata.probes, selection.get("probe_runs"))
+    runs, run_assertion_rows = _check_shared_runs(session_key, group, metadata.runs, probe_runs)
+
+    _record_subject_details(metadata.subject, metadata.subject_details)
+    _record_probe_reports(session_key, metadata.probes, prefix)
+
+    def hold() -> None:
+        _hold_derivation(session_key, derivation)
+
+    return schema_request.submit_shared(
+        idempotency_key=request.idempotency_key,
+        task_type=request.domain,
+        origin="wl_works",
+        selection={**session_key, "group_id": group_id},
+        payload=request.model_dump(mode="json"),  # as `accept()` stores it, and for the same reason
+        requested_by=metadata.experimenter,
+        run_numbers=runs,
         run_assertions=run_assertion_rows,
         read_stored_payload=_as_current_payload,
         guard=hold,

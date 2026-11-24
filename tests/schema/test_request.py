@@ -1454,3 +1454,28 @@ def test_a_derivatives_identity_is_its_task_type_and_run_set():
     assert selection_hash("neural", [1, 2]) != selection_hash("ephys", [1, 2])
     expected = json.dumps({"task_type": "neural", "run_numbers": [1, 2]}, sort_keys=True, separators=(",", ":"))
     assert selection_hash("neural", [2, 1]) == hashlib.blake2b(expected.encode(), digest_size=16).hexdigest()
+
+
+def test_first_accepted_request_reads_both_kinds(req):
+    """Plan decision D8 over D11: a session is frozen by its earliest accepted request, by `created_at`, whether
+    a montage's activation or a shared group's."""
+    from wl_preproc.schema import core, pipeline
+
+    pipeline.subject.Subject.insert1({"subject": "picoboth", "sex": "M", "subject_description": "",
+                                      "subject_birth_date": datetime.date(2020, 1, 1)}, skip_duplicates=True)
+    at = datetime.datetime(2027, 6, 2, 10, 0)
+    for hour, shared_first in ((10, True), (11, False)):
+        key = {"subject": "picoboth", "session_datetime": at.replace(hour=hour)}
+        pipeline.Session.insert1(key)
+        core.Montage.insert1({**key, "montage_id": 1, "start_s": 0.0, "end_s": 12.0})
+        core.SharedGroup.insert1({**key, "group_id": 1, "probe_serial": "S1", "insertion_number": 1})
+        canonical, shared = (f"picoboth-{hour}-{kind}" for kind in ("canonical", "shared"))
+        for idempotency_key in (canonical, shared):
+            req.Request.insert1({"idempotency_key": idempotency_key, "task_type": "neural", "origin": "wl_works",
+                                 "payload": {}, "requested_by": None, "requested_at": at})
+        early, late = at, at + datetime.timedelta(seconds=1)
+        req.Activation.insert1({**key, "montage_id": 1, "activation_id": 0, "role": "canonical",
+                                "request_key": canonical, "created_at": late if shared_first else early})
+        req.SharedActivation.insert1({**key, "group_id": 1, "activation_id": 0, "request_key": shared,
+                                      "created_at": early if shared_first else late})
+        assert req.first_accepted_request(key) == (shared if shared_first else canonical)

@@ -251,14 +251,16 @@ def test_the_delete_previews_parent_graph_matches_the_real_foreign_keys(all_tabl
     # DataJoint's graph instead: every table of the three schemas the map
     # covers that descends from `Montage` is in it, and the preview from
     # `Montage` names exactly those.
+    # The same for `SharedGroup`, whose activation (`request.SharedActivation`) does not descend from `Montage`.
     covered = {f"`{module.schema.database}`" for module in (core, coverage, request)}
     names = {table.full_table_name: name for name, table in _tables().items()}
-    descendants = [d for d in core.Montage.descendants()
-                   if d.split(".")[0] in covered and d != core.Montage.full_table_name]
-    assert not [d for d in descendants if d not in names], (
-        f"tables descending from Montage missing from the delete preview's map: "
-        f"{[d for d in descendants if d not in names]}")
-    assert set(_cascade_closure("Montage")) == {"Montage", *(names[d] for d in descendants)}
+    for stage, table in (("Montage", core.Montage), ("SharedGroup", core.SharedGroup)):
+        descendants = [d for d in table.descendants()
+                       if d.split(".")[0] in covered and d != table.full_table_name]
+        assert not [d for d in descendants if d not in names], (
+            f"tables descending from {stage} missing from the delete preview's map: "
+            f"{[d for d in descendants if d not in names]}")
+        assert set(_cascade_closure(stage)) == {stage, *(names[d] for d in descendants)}
 
 
 @pytest.fixture(scope="module")

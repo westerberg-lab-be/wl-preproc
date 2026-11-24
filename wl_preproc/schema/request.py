@@ -231,13 +231,46 @@ class PositionSet(dj.Manual):
         """
 
 
+@schema
+class SharedActivation(dj.Manual):
+    definition = """
+    # A shared group's request (design spec 2026-11-24-montages-design.md
+    # section 4.6; plan decision D11): one per group, deduped as a canonical
+    # is, never superseded, so activation_id is always 0. Its build waits on
+    # sorting (Phase 2b): nothing builds it now, and `GET /nwb` lists nothing
+    # for it. Its sort, when it exists, is keyed on this row, over the group's
+    # one probe and its minted intersection.
+    # Key: (subject, session_datetime, group_id, activation_id).
+    -> core.SharedGroup
+    activation_id : int
+    ---
+    -> Request.proj(request_key='idempotency_key')
+    created_at : datetime
+    """
+
+    class ProbeRun(dj.Part):
+        definition = """
+        # A run the group's one probe is sorted on, as the request named it in
+        # `selection.probe_runs` (plan decision D12): among the group's
+        # sortable runs. Key: (subject, session_datetime, group_id,
+        # activation_id, run_number).
+        -> master
+        -> core.Run
+        """
+
+
 def first_accepted_request(session_key: dict) -> str | None:
-    """The `request_key` of the session's earliest `Activation` by `created_at`,
-    or None when no request has been accepted for it."""
-    rows = (Activation & {k: session_key[k] for k in ("subject", "session_datetime")}).to_dicts()
+    """The `request_key` of the session's earliest accepted request by
+    `created_at`, a montage's `Activation` or a group's `SharedActivation`, or
+    None when no request has been accepted for it."""
+    key = {k: session_key[k] for k in ("subject", "session_datetime")}
+    rows = [((r["created_at"], 0, r["montage_id"], r["activation_id"]), r["request_key"])
+            for r in (Activation & key).to_dicts()]
+    rows += [((r["created_at"], 1, r["group_id"], r["activation_id"]), r["request_key"])
+             for r in (SharedActivation & key).to_dicts()]
     if not rows:
         return None
-    return min(rows, key=lambda r: (r["created_at"], r["montage_id"], r["activation_id"]))["request_key"]
+    return min(rows)[1]
 
 
 def selection_hash(task_type: str, run_numbers: list[int] | tuple[int, ...]) -> str:
@@ -379,8 +412,12 @@ def _reject_key_reuse(
     requested_by: str | None,
     selection_key: dict,
     read_stored_payload: Callable[[dict], dict] | None = None,
+    produced_in=Activation,
 ) -> None:
     """Raise if an existing `Request` under this key is a different request.
+
+    `produced_in` is the table the key's produced rows are read from:
+    `SharedActivation` for `submit_shared`.
 
     `Request.insert1(..., skip_duplicates=True)` used to make a reused key a
     silent no-op *on Request only* — execution continued, so a second
@@ -461,7 +498,7 @@ def _reject_key_reuse(
     # of this comment said the extra columns "simply go unread" for
     # submit()'s callers -- true when written, false since round 2 added
     # role, and this correction (round 3) is why it no longer says that.
-    produced = (Activation & {"request_key": idempotency_key}).to_dicts()
+    produced = (produced_in & {"request_key": idempotency_key}).to_dicts()
     if produced and not any(
         all(row[attr] == value for attr, value in selection_key.items()) for row in produced
     ):
@@ -640,6 +677,83 @@ def submit(
             skip_duplicates=True,
         )
         _record_run_sets(key, run_numbers, probe_runs)
+        return key
+
+
+def submit_shared(
+    idempotency_key: str,
+    task_type: str,
+    origin: str,
+    selection: dict,
+    payload: dict,
+    requested_by: str | None,
+    run_numbers: list[int] | tuple[int, ...],
+    run_assertions: list[dict] | tuple[dict, ...] = (),
+    read_stored_payload: Callable[[dict], dict] | None = None,
+    guard: Callable[[], None] | None = None,
+) -> dict:
+    """Record a request and the shared group's activation it selects,
+    atomically, with the runs its one probe is sorted on
+    (`SharedActivation.ProbeRun`) and what the request asserts
+    (`_record_assertions`), on every path that returns (design spec
+    `2026-11-24-montages-design.md` section 4.6; plan decisions D11, D12).
+
+    `selection` is `{subject, session_datetime, group_id}`. Returns the
+    `SharedActivation` key, its `activation_id` 0. It answers as `submit()`
+    does (wl.works' question Q4): the same key again is a retry, another key
+    for the group returns the group's stored activation as it is, and a key
+    reused for another request is a `KeyReuseError` (`_reject_key_reuse`,
+    reading the rows the key produced here). ``guard``, when given, is called
+    first inside the transaction, as `submit()`'s is. Never call this from
+    inside a transaction (`submit()`'s docstring says why)."""
+    if not schema.is_activated():
+        raise dj.DataJointError(
+            "request.activate(prefix) must run before submit_shared() — the "
+            "Request/SharedActivation tables are not yet bound to a database."
+        )
+    if dj.conn().in_transaction:
+        raise dj.DataJointError(
+            "submit_shared() opens its own transaction and DataJoint transactions do not nest, so it cannot be "
+            "called from inside one. Call it as its own unit of work; see submit()'s docstring."
+        )
+
+    import datetime as _dt
+
+    group_key = {k: selection[k] for k in ("subject", "session_datetime", "group_id")}
+    with dj.conn().transaction:
+        if guard is not None:
+            guard()
+        prior = Request & {"idempotency_key": idempotency_key}
+        if prior:
+            _reject_key_reuse(
+                prior.fetch1(),
+                idempotency_key=idempotency_key,
+                task_type=task_type,
+                origin=origin,
+                payload=payload,
+                requested_by=requested_by,
+                selection_key=group_key,
+                read_stored_payload=read_stored_payload,
+                produced_in=SharedActivation,
+            )
+        else:
+            Request.insert1({
+                "idempotency_key": idempotency_key,
+                "task_type": task_type,
+                "origin": origin,
+                "payload": payload,
+                "requested_by": requested_by,
+                "requested_at": _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None),
+            })
+        _record_assertions(run_assertions)
+        existing = (SharedActivation & group_key).to_dicts()
+        if existing:
+            return {k: existing[0][k] for k in SharedActivation.primary_key}
+
+        key = {**group_key, "activation_id": 0}
+        SharedActivation.insert1({**key, "request_key": idempotency_key,
+                                  "created_at": _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)})
+        SharedActivation.ProbeRun.insert([{**key, "run_number": number} for number in sorted(set(run_numbers))])
         return key
 
 

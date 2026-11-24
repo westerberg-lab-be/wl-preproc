@@ -6,7 +6,7 @@ import datetime
 
 import pytest
 
-from tests.positions import put, seed_montage
+from tests.positions import put, seed_group, seed_montage
 
 _AT = datetime.datetime(2027, 6, 1, 9, 0)
 
@@ -165,6 +165,39 @@ def test_after_the_first_request_the_set_is_fixed(landed_session, prefix):
     with pytest.raises(PositionsConflict) as stale:
         put(key, _two(), seq=8, prefix=prefix)
     assert stale.value.positions_seq == 9
+
+
+def test_a_shared_request_also_fixes_the_set(landed_session, prefix):
+    """Section 4.1 for a session whose only accepted request is a shared group's (D11): a changed set is refused,
+    naming its key."""
+    from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
+    from wl_preproc.responder.handler import PositionsConflict
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request
+
+    key = landed_session("pstshare", _AT)
+    put(key, _two(), seq=2, prefix=prefix)
+    for montage_id, start, end, run in ((1, 0.0, 5.0, 1), (2, 5.0, 12.0, 2)):
+        seed_montage(key, {"montage_id": montage_id, "start_s": start, "end_s": end},
+                     probes=[{"serial": "19011110001", "insertion_number": 1, "sortable_runs": [run]}])
+    seed_group(key, {"group_id": 1, "serial": "19011110001", "insertion_number": 1, "montage_ids": [1, 2],
+                     "sortable_runs": [1, 2]})
+    job = JobRequest(
+        domain="neural", parameters={}, idempotency_key="pstshare-k1",
+        selection={"role": "shared", "group_id": 1, "session_datetime": _AT,
+                   "probe_runs": {"19011110001": [1, 2]}},
+        metadata=MetadataBundle(
+            runs=[{"run_number": n, "start_s": a, "end_s": b, "works_run_id": f"wr-{n}"}
+                  for n, a, b in ((1, 0.0, 4.0), (2, 5.0, 11.0))],
+            probes=[{"serial": "19011110001", "insertion_number": 1}], experimenter="jw", subject="pstshare",
+            task_types=[]))
+    accept(job, prefix=prefix)
+    assert not request.Activation & key
+
+    with pytest.raises(PositionsConflict) as raised:
+        put(key, [_position(1)], seq=9, prefix=prefix)
+    assert raised.value.positions_seq == 2 and "pstshare-k1" in str(raised.value)
+    assert len(_stored(key)[1]) == 2
 
 
 def test_before_t0_is_the_stored_reference_floored_less_minutes(dj_conn, prefix, tmp_path_factory):
