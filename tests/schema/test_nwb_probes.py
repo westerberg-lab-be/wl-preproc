@@ -307,10 +307,9 @@ def test_an_imro_table_too_long_to_keep_is_not_a_probe_note(daemon_module, prefi
 _BANKED = "19011110014"
 
 
-def _bank_note(serial, run, montage_id, ending=None):
+def _bank_note(serial, run, montage_id):
     return (f"probe {serial} records two site maps under this file's runs, the change inside run {run}: the file "
-            f"gives it the site map its sortable runs in montage {montage_id} share"
-            + (f", and run {run} is not sorted for it" if ending is None else ending))
+            f"gives it the site map its sortable runs in montage {montage_id} share, and run {run} is not sorted for it")
 
 
 @pytest.fixture(scope="module")
@@ -396,12 +395,47 @@ def test_a_probe_with_no_sortable_run_in_its_montage_has_no_electrodes(daemon_mo
     first = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m1", []))
     (probe,) = first.probes
     assert (probe["insertion_number"], probe["electrodes"]) == (1, [])
-    assert _bank_note(serial, 1, 1, "; it has no sortable run in montage 1, so it has no electrodes in this file") \
-        in first.probe_notes
+    assert (f"probe {serial} records two site maps under this file's runs, the change inside run 1; it has no "
+            "sortable run in montage 1, so it has no electrodes in this file") in first.probe_notes
+    # That note says why already; the one for a probe left out otherwise is not added.
+    assert not [note for note in first.probe_notes if note.startswith(f"probe {serial} has no sortable run")]
     second = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m2", [], montage_id=2))
     (probe,) = second.probes
     assert [electrode["electrode"] for electrode in probe["electrodes"]] == [384, 385, 386, 387]
     assert not [note for note in second.probe_notes if "two site maps" in note]
+
+
+def test_a_probe_left_out_of_its_one_run_by_an_inside_edge_says_why(daemon_module, prefix, tmp_path_factory):
+    """Section 4.2: run 1 is long enough (135 s) for an edge's window, a
+    minute each side of the manifest's t = 0, to lie wholly inside it. The
+    probe is withdrawn inside run 1, its only covered run, which the edge
+    leaves out, so it sorts no run in montage 1: its file lists it with no
+    electrodes, and says why."""
+    from wl_preproc.contracts.events import TaskTypeCode
+    from wl_preproc.nwb.gather import gather
+    from wl_preproc.schema import core, timebase
+
+    serial = new_serial()
+    blocks = [{"task_type": TaskTypeCode.RF_MAP, "n_trials": 45, "trial_duration_s": 3.0},
+              {"task_type": TaskTypeCode.RESTING_DARK, "n_trials": 1, "trial_duration_s": 6.0}]
+    _recipe, key = _new_session(tmp_path_factory, probe_serial=serial, blocks=blocks,
+                                montages=[{"start_s": 0.0, "end_s": 141.0}])
+    daemon_module.run_once(prefix=prefix)
+    first = (core.Run & {**key, "run_number": 1}).fetch1()
+    assert first["run_stop_time"] - first["run_start_time"] > 130.0
+    # A time with seconds stands for its second (plan decision D5); the half second keeps it off a whole minute.
+    reference = (timebase.ClockReference & key).fetch1("reference_time")
+    inside = reference + datetime.timedelta(seconds=round(first["run_start_time"]) + 67, microseconds=500_000)
+    _positioned(daemon_module, prefix, key,
+                [_position(serial, 1, before_t0(key), ended_at=inside, end_kind="withdrawn")])
+    flags = (core.MontageDerivation.Flag & key).to_arrays("code")
+    assert list(flags) == ["position_edge_inside_run"]
+
+    data = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m1", []))
+
+    (probe,) = data.probes
+    assert (probe["serial"], probe["insertion_number"], probe["electrodes"]) == (serial, 1, [])
+    assert f"probe {serial} has no sortable run in montage 1, so it has no electrodes in this file" in data.probe_notes
 
 
 def test_a_file_waits_for_the_census_of_its_session(three_probes):

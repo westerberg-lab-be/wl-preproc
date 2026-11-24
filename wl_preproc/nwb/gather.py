@@ -902,14 +902,19 @@ def _probes(key: dict, session_key: dict, run_rows: list[dict], stored) -> tuple
         if problems:
             notes.append(f"probe {serial}: {'; '.join(problems)}"
                          + ("" if electrodes else "; it has no electrodes in this file"))
+        changed = []
         if listed is not None and len({part["electrode_config_hash"] for part in recorded
                                        if part["electrode_config_hash"] is not None}) > 1:
-            for run in _changed_inside(serial, run_rows, segments, recorded):
-                notes.append(f"probe {serial} records two site maps under this file's runs, the change inside run "
-                             f"{run}: the file gives it the site map its sortable runs in montage {montage_id} share"
-                             + (f", and run {run} is not sorted for it" if listed["sortable_runs"] else
-                                f"; it has no sortable run in montage {montage_id}, so it has no electrodes in "
-                                "this file"))
+            changed = _changed_inside(serial, run_rows, segments, recorded)
+        unsortable = f"it has no sortable run in montage {montage_id}, so it has no electrodes in this file"
+        for run in changed:
+            notes.append(f"probe {serial} records two site maps under this file's runs, the change inside run {run}"
+                         + (f": the file gives it the site map its sortable runs in montage {montage_id} share, and "
+                            f"run {run} is not sorted for it" if listed["sortable_runs"] else f"; {unsortable}"))
+        if listed is not None and not listed["sortable_runs"] and not changed:
+            # Left out for another reason, such as an edge inside its one run: the file still says why.
+            notes.append(f"probe {serial} has no sortable run in montage {montage_id}, so it has no electrodes in "
+                         "this file")
         report = None
         if listed is None and serial not in positioned:
             notes.append(f"probe {serial} is named by no position from wl.works, so its insertion and area are "
