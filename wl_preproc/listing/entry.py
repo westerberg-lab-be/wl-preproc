@@ -65,7 +65,8 @@ class SessionFacts:
     # its time (design spec `2026-10-18-training-records-and-backup-clock-design.md`
     # section 3.4).
     parameter_changes: int  # a person's acts on a setting among its core.ParameterChange rows
-    control_kinds: dict[str, int]  # control kind -> its core.RigControl rows
+    control_kinds: dict[str, int]  # control kind -> its core.RigControl rows, whoever sent them
+    system_pauses: int  # of its `pause` rows, those the rig itself sent (by_kind "system")
     clock: str | None  # timebase.SessionClock's source; None until chosen
     # The wall-clock time of t = 0: its timebase.ClockReference row's reference_time and
     # reference_source; None until stored.
@@ -251,7 +252,8 @@ def _rig_session(facts: SessionFacts) -> dict:
                 "kind": warning["by_kind"], "name": warning["by_name"], "account": warning["by_account"]},
         } for warning in sorted(facts.warnings, key=lambda warning: warning["warning_number"])],
         "training_records": None if facts.rig_session is None else {
-            "parameter_changes": facts.parameter_changes, "pauses": facts.control_kinds.get("pause", 0),
+            "parameter_changes": facts.parameter_changes, "pauses": facts.control_kinds.get("pause", 0) - facts.system_pauses,
+            "system_pauses": facts.system_pauses,
             "manual_rewards": facts.control_kinds.get("reward", 0)},
     }
 
@@ -330,6 +332,8 @@ def gather_all(keys: list[dict]) -> dict[tuple[str, datetime.datetime], SessionF
     control_kinds = collections.defaultdict(dict)
     for row in dj.U("subject", "session_datetime", "kind").aggr(core.RigControl & keys, n="count(*)").to_dicts():
         control_kinds[_session(row)][row["kind"]] = int(row["n"])
+    system_pauses = collections.Counter(
+        _session(row) for row in (core.RigControl & keys & {"kind": "pause", "by_kind": "system"}).proj().to_dicts())
     clocks = {_session(row): row["source"] for row in (timebase.SessionClock & keys).proj("source").to_dicts()}
     references = {_session(row): row for row in (timebase.ClockReference & keys).proj(
         "reference_time", "reference_source").to_dicts()}
@@ -363,6 +367,7 @@ def gather_all(keys: list[dict]) -> dict[tuple[str, datetime.datetime], SessionF
             warnings=warnings.get(session, []),
             parameter_changes=changes.get(session, 0),
             control_kinds=dict(control_kinds.get(session, {})),
+            system_pauses=system_pauses.get(session, 0),
             clock=clocks.get(session),
             reference=references.get(session),
         )

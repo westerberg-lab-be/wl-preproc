@@ -194,3 +194,23 @@ def test_a_lone_surrogate_in_a_controls_text_is_kept_and_the_stage_completes(eve
     row = (core.RigControl & key).fetch1()
     assert json.loads(row["detail"]) == {"note": "lid \ud83d"}
     assert row["by_name"] == "J\\ud83d"
+
+
+def test_the_rig_is_an_actor_and_its_pause_without_a_code_is_timed_by_the_rigs_clock(events_activated, dj_conn,
+                                                                                    tmp_path):
+    """wl-xcon's display process pauses the session itself: `by` is `{"kind": "system", "name": "display"}`.
+    The row is stored with that actor, and a system pause that strobed nothing is timed through the clock fit."""
+    from wl_preproc.schema import core
+    from wl_preproc.synth.recipe import RigControlSpec
+
+    system = {"kind": "system", "name": "display"}
+    controls = (RigControlSpec(trial=2, by=system), RigControlSpec(trial=3, event_code=None, by=system),
+                RigControlSpec(trial=3, kind="resume", event_code=4132, by=system))
+    _recipe, key = _land(tmp_path, "trrec9", 9, controls=controls)
+    rows = (core.RigControl & key).to_dicts(order_by="control_line")
+    assert [(row["kind"], row["by_kind"], row["by_name"], row["event_code"], row["time_source"])
+            for row in rows] == [("pause", "system", "display", 4131, "code"),
+                                 ("pause", "system", "display", None, "rig_clock"),
+                                 ("resume", "system", "display", 4132, "code")]
+    assert rows[1]["session_time"] is not None
+    assert len(core.RunRecordProblem & key) == 0

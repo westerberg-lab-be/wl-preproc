@@ -627,13 +627,14 @@ Authorization: Bearer <token>
     `run_number` it was accepted for (null at the open, for a run the recording did not
     measure, for one with no start row in wl-xcon's record, or for one whose number could not
     be stored, only the last flagged as a `rig_record_problem`), `at_local` (the rig's local time, not the recording's clock) and `by`: `kind` (`box`
-    for a name typed at the rig, `member` for a wl.works member), `name` and `account` (null for a
+    for a name typed at the rig, `member` for a wl.works member, `system` for the rig itself), `name` and `account` (null for a
     box), never the token or its issuer. A session wl-xcon did not run, one whose record predates
     its engine build B, and one read before this host carried them (2026-10-14) list null, null and
     `[]` alike;
   - `training_records`, how many of wl-xcon's training records the session has (design spec
     `2026-10-18-training-records-and-backup-clock-design.md` §3.4): its `parameter_changes`, and of
-    its console controls its `pauses` and `manual_rewards`; the rows are in the database and the
+    its console controls its `pauses` (a person's) and `manual_rewards`, and `system_pauses`, the
+    rig's own, sent when its display process died, counted apart; the rows are in the database and the
     NWB file, never listed. Null for a session wl-xcon did not run; a session read before this host
     carried them (2026-10-18) lists zeros;
   - `clock`, which clock kept the session's time: `syncbox`, `nidq` (built since part

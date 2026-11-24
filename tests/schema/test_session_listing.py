@@ -94,7 +94,8 @@ def test_an_entry_counts_the_training_records_and_names_its_clock(listed):
 
     _recipe, key = listed["runs"]
     entry = session_entry(key)
-    assert entry["training_records"] == {"parameter_changes": 1, "pauses": 1, "manual_rewards": 1}
+    assert entry["training_records"] == {"parameter_changes": 1, "pauses": 1, "manual_rewards": 1,
+                                         "system_pauses": 0}
     assert entry["clock"] == "syncbox"
     plain = session_entry(listed["plain"][1])
     assert (plain["training_records"], plain["clock"]) == (None, "syncbox")

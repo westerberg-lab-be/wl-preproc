@@ -269,7 +269,7 @@ class AcceptedWarning(dj.Manual):
     run_number = null   : smallint       # the measured run's; null at the open or when not measured
     at = null           : double         # the rig's wall clock, seconds
     at_local = null     : varchar(64)
-    by_kind = null      : varchar(16)    # box or member; null for nobody
+    by_kind = null      : varchar(16)    # box, member or system (the rig itself); null for nobody
     by_name = null      : varchar(255)
     by_account = null   : varchar(255)
     by_issuer = null    : varchar(255)
@@ -300,7 +300,7 @@ class ParameterChange(dj.Manual):
     event_code = null   : smallint unsigned  # the code its act strobed; null for none, or when the row does not say
     run_index = null    : smallint unsigned  # wl-xcon's run, from 0; null for none, or when it will not fit
     run_number = null   : smallint           # the measured run's; null when the run was not measured
-    by_kind = null      : varchar(16)        # box or member
+    by_kind = null      : varchar(16)        # box, member or system (the rig itself)
     by_name = null      : varchar(255)
     by_account = null   : varchar(255)
     by_issuer = null    : varchar(255)
@@ -331,7 +331,7 @@ class RigControl(dj.Manual):
     run_index = null    : smallint unsigned  # wl-xcon's run, from 0; null for none, or when it will not fit
     run_number = null   : smallint           # the measured run's; null when the run was not measured
     detail              : mediumtext         # the row's own fields, as JSON text
-    by_kind = null      : varchar(16)        # box or member; null for nobody
+    by_kind = null      : varchar(16)        # box, member or system (the rig itself); null for nobody
     by_name = null      : varchar(255)
     by_account = null   : varchar(255)
     by_issuer = null    : varchar(255)

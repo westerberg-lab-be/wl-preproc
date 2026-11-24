@@ -588,7 +588,8 @@ class ListedWarning(BaseModel):
 class ListedTrainingRecords(BaseModel):
     """How many of wl-xcon's training records the session has: its live
     parameter changes, and of its console controls the pauses and the manual
-    rewards. The rows are in the database and the NWB file, not here (design
+    rewards. `pauses` are a person's (a row with no actor included); `system_pauses` are the rig's own,
+    sent when its display process died (`by_kind` "system"). The rows are in the database and the NWB file, not here (design
     spec `2026-10-18-training-records-and-backup-clock-design.md` section 3.4).
     Since 2026-11-07 `parameter_changes` counts a person's acts on a setting,
     one per act among a set, a hand-back, a range edit and a revert; a clear
@@ -600,6 +601,7 @@ class ListedTrainingRecords(BaseModel):
     parameter_changes: int
     pauses: int
     manual_rewards: int
+    system_pauses: int = 0
 
 
 class RejectedFile(BaseModel):

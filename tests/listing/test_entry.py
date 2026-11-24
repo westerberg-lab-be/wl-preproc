@@ -34,7 +34,7 @@ def _facts(**changes):
         census=[_probe("100.nidq.bin", "a" * 32)],
         electrodes={("a" * 32, "NP1000"): [0, 1, 2]},
         strobed_runs=[1, 2], strobed_blocks=[1, 2], censused=frozenset({"100.nidq.bin"}), rig_problems=[],
-        rig_session=None, run_calibrations={}, warnings=[], parameter_changes=0, control_kinds={}, clock="syncbox",
+        rig_session=None, run_calibrations={}, warnings=[], parameter_changes=0, control_kinds={}, system_pauses=0, clock="syncbox",
         reference=None,
     )
     return dataclasses.replace(facts, **changes)
@@ -286,7 +286,8 @@ def test_a_session_lists_how_many_training_records_it_has_and_its_clock():
 
     entry = build_entry(_facts(rig_session={"session_kind": "training"}, parameter_changes=3,
                                control_kinds={"pause": 2, "resume": 3, "reward": 1, "note": 4}))
-    assert entry["training_records"] == {"parameter_changes": 3, "pauses": 2, "manual_rewards": 1}
+    assert entry["training_records"] == {"parameter_changes": 3, "pauses": 2, "manual_rewards": 1,
+                                         "system_pauses": 0}
     assert entry["clock"] == "syncbox"
     plain = build_entry(_facts(clock=None))
     assert (plain["training_records"], plain["clock"]) == (None, None)
@@ -326,7 +327,8 @@ def test_a_session_read_before_its_training_records_were_kept_lists_zeros():
     from wl_preproc.listing.entry import build_entry
 
     entry = build_entry(_facts(rig_session={"session_kind": "training"}))
-    assert entry["training_records"] == {"parameter_changes": 0, "pauses": 0, "manual_rewards": 0}
+    assert entry["training_records"] == {"parameter_changes": 0, "pauses": 0, "manual_rewards": 0,
+                                         "system_pauses": 0}
 
 
 def test_a_listed_run_carries_its_task_hash():
@@ -414,3 +416,24 @@ def test_equal_times_are_listed():
     assert entry["flags"] == []
     assert [block["block_number"] for block in entry["runs"][1]["blocks"]] == [2]
     assert [segment["segment_id"] for segment in entry["segments"]] == ["100.nidq.bin", "200.nidq.bin"]
+
+
+def test_the_rigs_pauses_are_counted_apart():
+    """wl-xcon's display process pauses the session itself when it dies; those rows carry
+    `by.kind` "system" and are the rig's, not a person's. A row with no actor is a person's."""
+    from wl_preproc.listing.entry import build_entry
+
+    # three pause rows: by_kind "member", "system" and null
+    entry = build_entry(_facts(rig_session={"session_kind": "training"}, control_kinds={"pause": 3},
+                               system_pauses=1))
+    assert entry["training_records"]["pauses"] == 2
+    assert entry["training_records"]["system_pauses"] == 1
+
+
+def test_a_person_pausing_during_a_rig_pause_counts_once_each():
+    """The rig's pause (carrying PAUSE's code) and the person's (event_code null), and one resume."""
+    from wl_preproc.listing.entry import build_entry
+
+    entry = build_entry(_facts(rig_session={"session_kind": "training"},
+                               control_kinds={"pause": 2, "resume": 1}, system_pauses=1))
+    assert (entry["training_records"]["pauses"], entry["training_records"]["system_pauses"]) == (1, 1)
