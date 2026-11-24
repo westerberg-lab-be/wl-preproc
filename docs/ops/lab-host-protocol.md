@@ -662,6 +662,27 @@ Authorization: Bearer <token>
     It is the one flag that means something was withheld. Equal start and end is listed.
     **None of them blocks anything here.**
 
+### `t0_datetime` is fixed when it is stored: re-timing a session
+
+A session's t = 0 wall time is fixed when a daemon pass stores its `timebase.ClockReference` row,
+with the NI machine's time zone that pass had (`wlpp daemon --nidq-timezone <IANA name>`, such as
+`America/New_York`; unset, an NI file's creation time places nothing). That row is what
+`GET /sessions` lists as `t0_datetime` and `t0_source`, and what every NWB file of the session
+starts at. Starting the daemon later with another zone, or with one where it had none, changes no
+session already stored. `wlpp nwb build` takes no zone at all: it reads the stored row.
+
+**To re-time a session**, delete its row, then run a daemon pass with the zone set:
+
+    python -c "from wl_preproc.daemon import activate_all; activate_all(prefix='wlpp_'); \
+      from wl_preproc.schema import timebase; \
+      (timebase.ClockReference & {'subject': '<subject>', 'session_datetime': '<session_datetime>'}).delete_quick()"
+    wlpp daemon --nidq-timezone America/New_York …
+
+Until that pass, the session lists `t0_datetime` and `t0_source` as null and its NWB files wait.
+Once it has run, the session's entry changes, so `GET /sessions` lists it again. **Files already
+built keep the value they were built with** (their `quality.reference_source` and
+`timebase/clock_reference` say which); only a file built after the pass carries the new one.
+
 ---
 
 ## Status codes
