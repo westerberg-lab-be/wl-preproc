@@ -709,7 +709,10 @@ def link_insertions(session_key: dict) -> int:
                 (ProbeInsertion & where).delete_quick()
                 changed += 1
         for number, (serial, segments) in want.items():
-            changed += _link({**session_key, "insertion_number": number}, serial, reports.get(number), segments)
+            report = reports.get(number)
+            # A report names a probe: one about another serial than the position's is about another probe.
+            changed += _link({**session_key, "insertion_number": number}, serial,
+                             report if report and report["probe_serial"] == serial else None, segments)
     return changed
 
 

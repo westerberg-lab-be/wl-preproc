@@ -931,9 +931,13 @@ def _probes(key: dict, session_key: dict, run_rows: list[dict], stored) -> tuple
                              report, electrodes, session_key))
     intan = bool(core.AcquisitionSystem & session_key & {"system": "rhs"})
     for serial, listed in in_montage.items():
-        if serial in recorded_anywhere:
+        if serial in by_serial:
             continue
         number = listed["insertion_number"]
+        if serial in recorded_anywhere:
+            notes.append(f"probe {serial} (insertion {number}) is in montage {montage_id}, and no SpikeGLX file under "
+                         "this file's runs records it, so it has no electrodes in this file")
+            continue
         if intan:
             notes.append(f"probe {serial} (insertion {number}) is listed from wl.works' report alone: no SpikeGLX "
                          "recording names it, and an Intan (RHS) header does not name its probe")

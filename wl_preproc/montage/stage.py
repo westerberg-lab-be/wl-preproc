@@ -72,7 +72,7 @@ def _selections(key: dict, runs: tuple[RunSpan, ...]) -> tuple[dict[tuple[int, s
             # As the listing spans a run with segments: each overlaps it.
             over = sorted(s for s in found if s[0] < run.end_s and s[1] > run.start_s)
             if over:
-                selections[(run.run_number, serial)] = RunSelection(over[0][3], over[-1][3])
+                selections[(run.run_number, serial)] = RunSelection(over[0][3], over[-1][3], len({s[3] for s in over}) > 1)
     return selections, recorded
 
 

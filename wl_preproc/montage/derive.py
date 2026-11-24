@@ -38,10 +38,11 @@ class PositionIn:
 @dataclass(frozen=True)
 class RunSelection:
     """A run's selection for one serial: the `electrode_config_hash` of the first and the last SpikeGLX segment that
-    overlaps the run and places that serial's sites (D6)."""
+    overlaps the run and places that serial's sites (D6), and whether the selection changed inside the run."""
 
     first_hash: str
     last_hash: str
+    changed: bool  # any two of the run's segment hashes for the serial differ: A -> B -> A counts (D6)
 
 
 @dataclass(frozen=True)
@@ -223,7 +224,7 @@ def _splits(facts: DerivationInput, placed: list[_Placed]) -> tuple[set[int], se
                 continue
             if previous is not None and sel.first_hash != previous.last_hash:
                 cuts.add(i)
-            if sel.first_hash != sel.last_hash:
+            if sel.changed:
                 cuts.add(i + 1)
                 changed_inside.add((r.run_number, serial))
             previous = sel

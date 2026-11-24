@@ -30,7 +30,7 @@ def pos(n, inserted_at, ended_at=None, end_kind=None, serial="S1", inserted_afte
 
 def facts(positions, selections=None, **kw):
     if selections is None:
-        selections = {(r.run_number, "S1"): RunSelection("A", "A") for r in RUNS}
+        selections = {(r.run_number, "S1"): RunSelection("A", "A", False) for r in RUNS}
     base = DerivationInput(
         has_ephys=True,
         runs=RUNS,
@@ -84,8 +84,8 @@ def test_a_reinsertion_after_a_withdrawal_splits():
 
 
 def test_a_selection_change_between_runs_splits():
-    selections = {(1, "S1"): RunSelection("A", "A"), (2, "S1"): RunSelection("A", "A"),
-                  (3, "S1"): RunSelection("B", "B")}
+    selections = {(1, "S1"): RunSelection("A", "A", False), (2, "S1"): RunSelection("A", "A", False),
+                  (3, "S1"): RunSelection("B", "B", False)}
     d = derive(facts((pos(1, M(8, 50)),), selections))
     assert d.status == "placed"
     assert runs_of(d) == [(1, 2), (3,)]
@@ -94,13 +94,23 @@ def test_a_selection_change_between_runs_splits():
 
 
 def test_a_selection_change_inside_a_run_splits_after_it():
-    selections = {(1, "S1"): RunSelection("A", "A"), (2, "S1"): RunSelection("A", "B"),
-                  (3, "S1"): RunSelection("B", "B")}
+    selections = {(1, "S1"): RunSelection("A", "A", False), (2, "S1"): RunSelection("A", "B", True),
+                  (3, "S1"): RunSelection("B", "B", False)}
     d = derive(facts((pos(1, M(8, 50)),), selections))
     assert d.status == "placed"
     assert runs_of(d) == [(1, 2), (3,)]
     assert probes_of(d) == [(DerivedProbe("S1", 1, "A", (1,)),), (DerivedProbe("S1", 1, "B", (3,)),)]
     assert d.flags == ()
+
+
+def test_a_selection_that_returns_inside_a_run_still_leaves_the_run_out():
+    # A -> B -> A inside run 2: its first and last hashes agree, but its selection changed inside it (D6).
+    selections = {(1, "S1"): RunSelection("A", "A", False), (2, "S1"): RunSelection("A", "A", True),
+                  (3, "S1"): RunSelection("A", "A", False)}
+    d = derive(facts((pos(1, M(8, 50)),), selections))
+    assert d.status == "placed"
+    assert runs_of(d) == [(1, 2), (3,)]
+    assert probes_of(d) == [(DerivedProbe("S1", 1, "A", (1,)),), (DerivedProbe("S1", 1, "A", (3,)),)]
 
 
 def test_an_edge_inside_a_run_is_placed_after_it():
@@ -242,15 +252,15 @@ def test_a_serial_the_census_never_names_bounds_montages_alone():
 
 
 def test_a_recorded_serial_is_not_sortable_where_it_has_no_selection():
-    selections = {(1, "S1"): RunSelection("A", "A"), (3, "S1"): RunSelection("A", "A")}
+    selections = {(1, "S1"): RunSelection("A", "A", False), (3, "S1"): RunSelection("A", "A", False)}
     d = derive(facts((pos(1, M(8, 50)),), selections))
     assert d.montages == (DerivedMontage(1, 0.0, 800.0, (1, 2, 3), (DerivedProbe("S1", 1, "A", (1, 3)),)),)
     assert d.placed == (PlacedPosition("S1", 1, (1, 2, 3)),)
 
 
 def test_a_probe_with_no_sortable_run_in_a_montage_is_listed_without_a_hash():
-    selections = {(1, "S1"): RunSelection("A", "A"), (2, "S1"): RunSelection("A", "B"),
-                  (3, "S1"): RunSelection("B", "B")}
+    selections = {(1, "S1"): RunSelection("A", "A", False), (2, "S1"): RunSelection("A", "B", True),
+                  (3, "S1"): RunSelection("B", "B", False)}
     d = derive(facts((pos(1, M(8, 50)),), selections, runs=RUNS[1:]))
     assert runs_of(d) == [(2,), (3,)]
     assert probes_of(d) == [(DerivedProbe("S1", 1, None, ()),), (DerivedProbe("S1", 1, "B", (3,)),)]

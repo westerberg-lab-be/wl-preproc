@@ -277,3 +277,21 @@ def test_a_position_moved_to_an_unrecorded_serial_takes_its_link_back(daemon_mod
     assert (core.PlacedPosition & key).fetch1("probe_serial") == stranger
     assert _links(key) == {}
     assert not [error for error in report["errors"] if key["subject"] in error]
+
+
+def test_a_report_for_another_serial_gives_the_insertion_no_trajectory_or_aim(
+        daemon_module, prefix, tmp_path_factory):
+    """Insertion 1 is placed for `serial_1`, and the report stored under number 1 names `serial_2` (a request is
+    checked against the positions when it is accepted, so the row is written as an earlier one left it): the report
+    is about another probe, so the insertion takes none of its trajectory or aim."""
+    from wl_preproc.schema import ephys
+
+    serial_2 = new_serial()
+    key, serial_1 = _landed(tmp_path_factory, serial_2)
+    daemon_module.run_once(prefix=prefix)
+    put(key, [_position(serial_1, 1, before_t0(key))], prefix=prefix)
+    ephys.InsertionReport.insert1({**key, "insertion_number": 1, "probe_serial": serial_2, "trajectory_id": "T-1",
+                                   "target_area": "V4d", "target_atlas": "CHARM", "target_atlas_level": 6})
+    daemon_module.run_once(prefix=prefix)
+
+    assert _links(key) == {1: (serial_1, None, None, _recorded(key, serial_1))}

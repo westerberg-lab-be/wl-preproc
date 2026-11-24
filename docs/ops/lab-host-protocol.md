@@ -767,10 +767,12 @@ The body is [`docs/schemas/positions_request.json`](../schemas/positions_request
   the whole set. The same seq with the same set is a `200` with `changed` false; the same seq with another
   set, or a lower seq, is a `409`.
 - **After it, the set is fixed** (the request's activation covers montages derived from it). A changed set is a
-  `409`. A **higher seq with the same set** records the seq alone (`changed` false), and the listed
-  `positions_seq` follows it on the same call, so wl.works' gate that compares its own seq with the listed one
+  `409`. A **higher seq with the same set** records the seq alone (`changed` false); the stored
+  derivation's `positions_seq` moves on the same call, and a `GET /sessions` cursor reader sees the new
+  seq after the next listing pass, so wl.works' gate that compares its own seq with the listed one
   never sticks. An empty set sent for a session whose request was accepted with no positions on file
-  records its seq the same way. **A non-empty set for a session that was accepted with no positions** is a
+  records its seq the same way, but answers `changed` **true**: no set was stored before, so this is the first.
+  **A non-empty set for a session that was accepted with no positions** is a
   `409` carrying `positions_seq` `0`: nothing is stored, so there is no seq to carry.
 
 **Refusals.** `422` for a body that fails the schema, each message naming the field and the position's
@@ -889,13 +891,14 @@ Authorization: Bearer <token>
     - `positions_seq`: the seq of the positions the stored derivation was made from, null until the daemon has
       passed the session (and while no positions were sent). **Compare it with the seq you sent**: a request
       built before it lists your seq is refused. After the session's first accepted request it follows a
-      seq-only `PUT /positions` at once.
+      seq-only `PUT /positions` after the next listing pass (the stored derivation moves on the PUT itself).
     - `montages`, null unless `positions_status` is `placed` or `not_needed`: each a `montage_id` (this host's,
       from 1), `start_s` and `end_s` (the window `[start_s, end_s)` in session seconds; the last ends at its
       last run's end, or 1 ms after a zero-length last run's start), `run_numbers` (the runs whose start lies in
       the window), and its `probes`, each a `serial`, `insertion_number` (wl.works', from the position), the
       site map it records there as `electrode_config_hash` (null for a probe the census does not name, such as an
-      Intan probe) and `sortable_runs` (the montage's runs its position covers, less a run an edge of that
+      Intan probe; also null, with `sortable_runs` `[]`, for a probe that has no sortable run in that montage, which
+      is not the no-channel-map case) and `sortable_runs` (the montage's runs its position covers, less a run an edge of that
       position falls inside and a run in which its selection changes). **A montage splits where a probe moves
       or its selection changes.**
     - `shared_groups`, null as `montages` is, `[]` when nothing is shared: each a `group_id` (this host's, from

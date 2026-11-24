@@ -498,7 +498,7 @@ def test_a_moved_probe_takes_each_montages_insertion_and_area(daemon_module, pre
         assert [(probe["insertion_number"], probe["area_from"], probe["area"]) for probe in data.probes] == [
             expected]
         assert [len(probe["electrodes"]) for probe in data.probes] == [4]
-        assert not [note for note in data.probe_notes if "reported for insertions" in note]
+        assert data.probe_notes == []
 
 
 def test_a_recorded_probe_without_a_position_is_unknown_and_says_why(daemon_module, prefix, tmp_path_factory):

@@ -77,8 +77,10 @@ class MontageDerivation(dj.Manual):
     # could be placed (`waiting` for positions, t = 0, the census or a run;
     # `ambiguous` while an edge cannot be placed), and from which positions
     # seq, whatever the status (plan decision D13). Rewritten only when the
-    # result changes, and never once the session has an accepted request
-    # (plan decision D8). Key: (subject, session_datetime).
+    # result changes, and never re-derived once the session has an accepted
+    # request (plan decision D8); but its positions_seq follows a seq-only
+    # PUT /positions after that, so the request check sees the seq wl.works
+    # holds. Key: (subject, session_datetime).
     -> pipeline.Session
     ---
     positions_status : enum('not_needed','waiting','placed','ambiguous')
