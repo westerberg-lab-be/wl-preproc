@@ -183,3 +183,38 @@ def test_before_t0_is_the_stored_reference_floored_less_minutes(dj_conn, prefix,
     reference = (timebase.ClockReference & key).fetch1("reference_time")
     assert before_t0(key, 3) == reference.replace(second=0, microsecond=0) - datetime.timedelta(minutes=3)
     assert before_t0(key).second == 0
+
+
+def test_a_request_accepted_while_the_put_waits_for_its_lock_fixes_the_set(landed_session, prefix, monkeypatch):
+    """The `PUT` takes the derivation's lock before it reads the positions, as `accept()` does, and reads after it
+    in `READ COMMITTED`. A request committed on another connection after the `PUT`'s transaction began and before
+    it held the lock, as when `accept()` held that lock first, is seen: a changed set is refused, never stored
+    under the activation."""
+    from tests.schema.test_request import _raw_connection
+    from wl_preproc.montage import stored as stored_montages
+    from wl_preproc.responder.handler import PositionsConflict
+    from wl_preproc.schema import request
+
+    key = landed_session("pstrace", _AT)
+    put(key, _two(), seq=1, prefix=prefix)
+    seed_montage(key, {"montage_id": 0, "start_s": 0.0, "end_s": 12.0})
+    request.Request.insert1({"idempotency_key": "pstrace-k1", "task_type": "neural", "origin": "wl_works",
+                             "payload": {}, "requested_by": "jw", "requested_at": _AT})
+    locked = stored_montages.lock_derivation
+
+    def accepted_meanwhile(session_key):
+        connection = _raw_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"INSERT INTO {request.Activation.full_table_name} (subject, session_datetime, montage_id, "
+                    "activation_id, role, request_key, created_at) VALUES (%s, %s, 0, 0, 'canonical', %s, %s)",
+                    (key["subject"], key["session_datetime"], "pstrace-k1", _AT))
+        finally:
+            connection.close()
+        return locked(session_key)
+
+    monkeypatch.setattr(stored_montages, "lock_derivation", accepted_meanwhile)
+    with pytest.raises(PositionsConflict, match="fixed by the request 'pstrace-k1'"):
+        put(key, [_position(1)], seq=2, prefix=prefix)
+    assert len(_stored(key)[1]) == 2

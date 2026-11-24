@@ -336,6 +336,67 @@ def test_a_request_accepted_while_the_write_waits_for_its_lock_is_seen(daemon_mo
     assert _rows(key) == before
 
 
+def _job(key, idempotency_key: str, **selection):
+    """wl.works' request naming montage 1, asserting every run, with no probes."""
+    from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
+
+    runs = [{"run_number": row["run_number"], "start_s": row["run_start_time"], "end_s": row["run_stop_time"],
+             "works_run_id": f"wr-{row['run_number']}"} for row in _runs(key)]
+    return JobRequest(
+        domain="neural", parameters={}, idempotency_key=idempotency_key,
+        selection={"session_datetime": key["session_datetime"].replace(tzinfo=datetime.UTC), "montage_id": 1,
+                   **selection},
+        metadata=MetadataBundle(runs=runs, probes=[], experimenter="jw", subject=key["subject"], task_types=[]))
+
+
+def test_a_seq_recorded_alone_after_a_request_is_listed_and_requests_go_on(daemon_module, prefix, tmp_path_factory):
+    """D2: after the first request, the same set at a higher seq records the seq alone. The stage never derives the
+    session again (D8), so the derivation takes the seq with it: `GET /sessions` lists it, and a request is not
+    refused for positions its montages were not derived from."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.responder.sessions import list_sessions
+    from wl_preproc.schema import request
+
+    key, serial = _landed(tmp_path_factory)
+    _pass(daemon_module, prefix, key)
+    positions = [_position(serial, 1, before_t0(key))]
+    put(key, positions, seq=1, prefix=prefix)
+    _pass(daemon_module, prefix, key)
+    first = accept(_job(key, f"{key['subject']}-k1"), prefix=prefix)
+    montages = _rows(key)
+
+    assert put(key, positions, seq=2, prefix=prefix) == {"positions_seq": 2, "changed": False}
+    _pass(daemon_module, prefix, key)
+
+    (entry,) = [e for e in list_sessions(None, prefix=prefix)["sessions"] if e["subject"] == key["subject"]]
+    assert (entry["positions_status"], entry["positions_seq"]) == ("placed", 2)
+    derivative = accept(_job(key, f"{key['subject']}-k2", run_numbers=[1]), prefix=prefix)
+    assert (request.Activation & derivative).fetch1("role") == "derivative"
+    assert accept(_job(key, f"{key['subject']}-k1"), prefix=prefix) == first
+    # Nothing but the seq moved.
+    after = _rows(key)
+    assert [{k: v for k, v in row.items() if k != "positions_seq"} for row in after.pop("MontageDerivation")] == [
+        {k: v for k, v in row.items() if k != "positions_seq"} for row in montages.pop("MontageDerivation")]
+    assert after == montages
+
+
+def test_an_empty_set_after_a_request_on_a_session_without_ephys_leaves_requests_accepted(
+        daemon_module, prefix, tmp_path_factory):
+    """The other route to a seq the derivation never had: a session without ephys is requested with no positions on
+    file, and an empty set arrives after. Its derivation takes the seq, and the next request is accepted."""
+    from wl_preproc.responder.jobs import accept
+
+    key, _serial = _landed(tmp_path_factory, systems=("syncbox",))
+    _pass(daemon_module, prefix, key)
+    assert _derivation(key) == ("not_needed", None)
+    first = accept(_job(key, f"{key['subject']}-k1"), prefix=prefix)
+
+    assert put(key, [], seq=1, prefix=prefix) == {"positions_seq": 1, "changed": True}
+
+    assert _derivation(key) == ("not_needed", 1)
+    assert accept(_job(key, f"{key['subject']}-k2", run_numbers=[1]), prefix=prefix) != first
+
+
 def test_the_derivation_changes_only_when_its_result_does(daemon_module, prefix, tmp_path_factory):
     from wl_preproc.montage.stage import derive_session, run_stage
 

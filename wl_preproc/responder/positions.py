@@ -62,10 +62,23 @@ def put_positions(request: PositionsRequest, prefix: str = DEFAULT_PREFIX) -> di
     In order: a session not landed is a `NotFoundError`; a seq below the stored one, or an equal seq with
     another set, is a `PositionsConflict`; once the session has an accepted request a changed set is a
     `PositionsConflict` naming it, and the same set records the seq alone (D2); otherwise the parts are
-    replaced and the master updated in one transaction."""
+    replaced and the master updated in one transaction.
+
+    **After the first accepted request, a seq recorded alone is the derivation's too.** The stage never derives
+    such a session again (D8), so its `MontageDerivation.positions_seq` would stay behind the stored seq for good,
+    and `responder/jobs.py::accept` refuses every request whose positions are not the seq its montages were derived
+    from. The set is the same, so the montages are what that seq derives: the seq is written on the derivation's
+    row in the same transaction, and nothing else on it or any other montage row. So is the seq of an empty set
+    sent after a request was accepted with none on file.
+
+    **The derivation's row is taken first**, `FOR UPDATE`, as `accept()` takes it, before anything reads or writes
+    the positions: the two take their locks in one order (derivation, then positions) and never interleave. The
+    reads after it are in `READ COMMITTED`, as `montage/stored.py::write`'s are, so a request accepted while this
+    waited for the lock is seen, not missed in a snapshot taken before it."""
     import datajoint as dj
 
-    from wl_preproc.schema import pipeline
+    from wl_preproc.montage import stored as stored_montages
+    from wl_preproc.schema import core, pipeline
     from wl_preproc.schema import request as schema_request
 
     schema_request.activate(prefix=prefix)
@@ -75,32 +88,36 @@ def put_positions(request: PositionsRequest, prefix: str = DEFAULT_PREFIX) -> di
         raise NotFoundError(f"no session of subject {request.subject!r} at {moment.isoformat()} has landed here")
     sent = [position.model_dump() for position in request.positions]
     seq = request.positions_seq
-    current = stored_positions(key, prefix=prefix)
-    first = schema_request.first_accepted_request(key)
-    if current is None:
-        stored_seq, same = None, False
-    else:
-        stored_seq = current[0]
-        same = _set_of(current[1]) == _set_of(sent)
-        if seq < stored_seq:
-            raise PositionsConflict(
-                f"positions_seq {seq} is below the {stored_seq} this host holds", stored_seq)
-        if seq == stored_seq:
-            if not same:
-                raise PositionsConflict(
-                    f"positions_seq {seq} is the one this host holds, with another set of positions", stored_seq)
-            return PositionsResponse(positions_seq=stored_seq, changed=False).model_dump()
-        if first is not None and not same:
-            raise PositionsConflict(
-                f"the positions are fixed by the request {first!r}; positions_seq {seq} changes them", stored_seq)
-    if current is None and first is not None:
-        # A request accepted with no positions on file (a session without ephys): the set is fixed as empty,
-        # and there is no stored seq to carry, so the 409 says 0.
-        if sent:
-            raise PositionsConflict(
-                f"the positions are fixed by the request {first!r}; positions_seq {seq} adds them", 0)
     received = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-    with dj.conn().transaction:
+    connection = dj.conn()
+    # For this one transaction. A reconnect before it begins loses it, and the reads fall back to the snapshot.
+    connection.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+    with connection.transaction:
+        derivation = stored_montages.lock_derivation(key)
+        current = stored_positions(key)
+        first = schema_request.first_accepted_request(key)
+        if current is None:
+            stored_seq, same = None, False
+        else:
+            stored_seq = current[0]
+            same = _set_of(current[1]) == _set_of(sent)
+            if seq < stored_seq:
+                raise PositionsConflict(
+                    f"positions_seq {seq} is below the {stored_seq} this host holds", stored_seq)
+            if seq == stored_seq:
+                if not same:
+                    raise PositionsConflict(
+                        f"positions_seq {seq} is the one this host holds, with another set of positions", stored_seq)
+                return PositionsResponse(positions_seq=stored_seq, changed=False).model_dump()
+            if first is not None and not same:
+                raise PositionsConflict(
+                    f"the positions are fixed by the request {first!r}; positions_seq {seq} changes them", stored_seq)
+        if current is None and first is not None:
+            # A request accepted with no positions on file (a session without ephys): the set is fixed as empty,
+            # and there is no stored seq to carry, so the 409 says 0.
+            if sent:
+                raise PositionsConflict(
+                    f"the positions are fixed by the request {first!r}; positions_seq {seq} adds them", 0)
         if current is not None and same:
             schema_request.PositionSet.update1({**key, "positions_seq": seq, "received_at": received})
         else:
@@ -114,4 +131,7 @@ def put_positions(request: PositionsRequest, prefix: str = DEFAULT_PREFIX) -> di
                  "inserted_at": _naive(p["inserted_at"]), "ended_at": _naive(p["ended_at"]),
                  "end_kind": p["end_kind"], "inserted_after_run": p["inserted_after_run"],
                  "ended_after_run": p["ended_after_run"]} for p in sent])
+        if first is not None and derivation is not None:
+            # The set is fixed (above), so these are the montages this seq derives (the docstring).
+            core.MontageDerivation.update1({**key, "positions_seq": seq})
     return PositionsResponse(positions_seq=seq, changed=not (current is not None and same)).model_dump()

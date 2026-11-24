@@ -173,14 +173,12 @@ def test_no_run_numbers_is_canonical_and_some_run_numbers_is_derivative(landed_s
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         montage_id=0,
         idempotency_key="jbcd001-k1",
-       
     )
     derivative_job = _request(
         subject=subject,
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         montage_id=0,
         idempotency_key="jbcd001-k2",
-       
         run_numbers=[1, 2],
     )
 
@@ -1449,3 +1447,18 @@ def test_positions_sent_while_a_request_is_checked_are_a_422(landed_session, pre
                               probe_runs={"S1": [1, 2]}), prefix=prefix)
     assert str(refused.value) == _positions_changed(key)
     assert _nothing_written(key, "jbseq02-k1")
+
+
+def test_positions_sent_to_a_session_derived_with_none_are_a_422_saying_so(landed_session, prefix):
+    """A session derived before any positions were stored has no seq to name: the 422 says so."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _landed_with_runs(landed_session, "jbseq03", 30, montages=())
+    seed_montage(key, _M1, status="not_needed")
+    _positions(key, ("S1", 1), prefix=prefix)
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, "jbseq03-k1", serials=(), montage_id=1), prefix=prefix)
+    assert str(refused.value) == (
+        f"session {key['subject']} {key['session_datetime'].isoformat()}: its positions changed (seq 1) since its "
+        "montages were derived with no positions; send the request again once GET /sessions lists seq 1")
+    assert _nothing_written(key, "jbseq03-k1")

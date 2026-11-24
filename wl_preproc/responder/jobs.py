@@ -618,8 +618,9 @@ def _check_positions_seq(session_key: dict, derivation: dict | None, positions_s
     positions stored there is nothing to compare."""
     derived = derivation["positions_seq"] if derivation else None
     if positions_seq is not None and positions_seq != derived:
+        since = "with no positions" if derived is None else f"(seq {derived})"
         raise ValueError(f"session {session_key['subject']} {session_key['session_datetime'].isoformat()}: its "
-                         f"positions changed (seq {positions_seq}) since its montages were derived (seq {derived}); "
+                         f"positions changed (seq {positions_seq}) since its montages were derived {since}; "
                          f"send the request again once GET /sessions lists seq {positions_seq}")
 
 
