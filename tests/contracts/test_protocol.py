@@ -605,18 +605,36 @@ def test_one_serials_positions_do_not_overlap():
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "field"),
     [
-        _position(0),
-        _position(256),
-        _position(1, serial="x" * 33),
-        _position(1, inserted_after_run=-1),
-        _position(1, inserted_after_run=32768),
+        (_position(5, serial="x" * 33), "serial"),
+        (_position(5, serial=""), "serial"),
+        (_position(5, inserted_after_run=-1), "inserted_after_run"),
+        (_position(5, inserted_after_run=32768), "inserted_after_run"),
+        (_position(5, start="09:00", end="09:05", kind="moved", ended_after_run=-1), "ended_after_run"),
+        (_position(5, start="09:00", end="09:05", kind="moved", ended_after_run=32768), "ended_after_run"),
+        (_position(5, end_kind="sideways"), "end_kind"),
     ],
 )
-def test_the_bounds_refused(body):
-    with pytest.raises(ValidationError):
+def test_the_bounds_refused(body, field):
+    with pytest.raises(ValidationError) as caught:
         PositionsRequest.model_validate(_positions(body))
+    message = str(caught.value)
+    assert "insertion_number 5" in message
+    assert field in message
+    assert {error["type"] for error in caught.value.errors()}.isdisjoint({"value_error"})
+
+
+@pytest.mark.parametrize("number", [0, 256, None])
+def test_an_unusable_number_is_refused_as_pydantic_words_it(number):
+    body = _position(1)
+    if number is None:
+        del body["insertion_number"]
+    else:
+        body["insertion_number"] = number
+    with pytest.raises(ValidationError) as caught:
+        PositionsRequest.model_validate(_positions(body))
+    assert "insertion_number" in str(caught.value)
 
 
 def test_the_bounds():

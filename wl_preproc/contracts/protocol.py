@@ -15,7 +15,7 @@ import datetime
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 SCHEMA_VERSION = 1
@@ -400,6 +400,31 @@ class ProbePosition(BaseModel):
     end_kind: Literal["withdrawn", "moved"] | None = None
     inserted_after_run: Annotated[int, Field(ge=0, le=32767)] | None = None
     ended_after_run: Annotated[int, Field(ge=0, le=32767)] | None = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _a_refusal_names_the_insertion(cls, data: Any, handler: Any) -> ProbePosition:
+        """wl.works quotes our refusals to a person, so each names the field
+        and the position's `insertion_number`. A field's own bound message
+        does not carry it; this re-raises one that does, taking the number from
+        the input. When the input's number is missing or invalid, the bound
+        message stands as pydantic wrote it."""
+        try:
+            return handler(data)
+        except ValidationError as error:
+            number = data.get("insertion_number") if isinstance(data, dict) else None
+            if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 255:
+                raise
+            parts = []
+            for item in error.errors():
+                if item["type"].startswith("position_"):
+                    parts.append(item["msg"])  # already names the insertion
+                else:
+                    field = ".".join(str(part) for part in item["loc"]) or "position"
+                    parts.append(f"{field}: {item['msg']} (insertion_number {number})")
+            raise PydanticCustomError(
+                "position_field_invalid", "{detail}", {"detail": "; ".join(parts)}
+            ) from None
 
     @model_validator(mode="after")
     def _an_end_comes_whole_and_in_order(self) -> ProbePosition:
