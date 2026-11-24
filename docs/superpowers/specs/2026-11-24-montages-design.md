@@ -63,13 +63,12 @@ A new request, **`PUT /positions`**, carries the *whole* set of one session's pr
 `PUT /nwb/active` already uses):
 
 ```
-{ "subject": ..., "session_datetime": ...,
+{ "subject": ..., "session_datetime": ..., "positions_seq": <int, >= 0>,
   "positions": [ { "serial": "...", "insertion_number": 1..255,
                    "inserted_at": <wall time>, "ended_at": <wall time> | null,
                    "end_kind": "withdrawn" | "moved" | null,
                    "inserted_after_run": <run_number> | null,
-                   "ended_after_run": <run_number> | null } ],
-  "requested_by": ... }
+                   "ended_after_run": <run_number> | null } ] }
 ```
 
 - `insertion_number` stays wl.works' (1-255, stored once, never renumbered: its P12). `ephys.InsertionReport` stays
@@ -79,9 +78,20 @@ A new request, **`PUT /positions`**, carries the *whole* set of one session's pr
   second. This host places them on session time through `timebase.ClockReference`'s t = 0 (stored by the
   wl.works-facing piece).
 - `*_after_run` is the gap a person named when the time alone is ambiguous (§4.2); it overrides the time.
-- **Latest wins until the session's first accepted job request**; after it, a `PUT /positions` that changes the set is
-  a `409` naming that request, and one that repeats it is a no-op `200`. (Answers wl.works' question 2.) A correction
-  after firing is out of scope here, as a montage correction is today.
+- **The highest `positions_seq` wins, until the session's first accepted job request** (wl.works' objection O1,
+  2026-11-24: two quick edits can put two requests in flight, and arrival order is not edit order). `positions_seq` is
+  wl.works' own revision counter for that session's positions. A request whose seq is below the stored one is a `409`
+  carrying the stored seq; an equal seq with the same set is a no-op `200`, and with a different set a `409`. After
+  the first accepted job request, a changed set is a `409` naming that request, and the same set again is a no-op.
+  (wl.works' question 2.) That `409` holds for the session's life in this piece: a replacement does not reopen
+  positions. Reopening them under a replacement is later work, since it re-derives montages a stored activation names.
+- **No author is carried** (objection O3): positions are written by many people and agents, and a person's name
+  leaves wl.works only in a job request.
+- **A session this host has not landed** is a `404`, as `GET` of an unknown session is; wl.works sends positions only
+  once the landed session is linked to its visit, and sends the whole set then.
+- **Gaps in `insertion_number` are fine** (1, 3, 4): it is wl.works' identity for a position, not an ordinal here.
+  Until the first accepted request nothing is fixed, so a number that leaves and comes back is whatever the latest set
+  says.
 - wl.works sends positions **as soon as they are typed and on every edit**, not at Confirm, so the listing carries the
   montages before a person confirms and the person confirms what they see. (wl.works' question 1.)
 - **A session with no ephys recording** (no SpikeGLX and no Intan files) needs no positions: it has one montage over
@@ -162,6 +172,9 @@ waveform spans neighbouring electrodes, and a group cut to disjoint electrodes w
   `insertion_number`, `electrode_config_hash`, `sortable_runs`.
 - `shared_groups: list[ListedSharedGroup] | None`: `group_id`, `serial`, `insertion_number`, `montage_ids`,
   `n_electrodes`, `electrodes` (null for an Intan probe, §4.4), `sortable_runs`.
+- `positions_seq: int | None`: the seq the listed montages and groups were derived from (objection O2). wl.works
+  refuses *Confirm* while it is behind its own, and fires only requests naming montages and groups listed at its
+  current seq, so a person cannot confirm one set and fire another. Null when no positions are stored.
 - `positions_status`: `"not_needed" | "waiting" | "placed" | "ambiguous"`, so wl.works can say why montages are null
   (`waiting` covers both "no positions yet" and "no t = 0 yet").
 - New flag codes: `position_edge_ambiguous`, `position_edge_inside_run`, `probe_without_position` (a recorded serial
@@ -173,7 +186,8 @@ waveform spans neighbouring electrodes, and a group cut to disjoint electrodes w
   retired the way `metadata.blocks` was: kept in the shape, `maxItems: 0`, deprecated, so a sender is told what
   replaced it.
 - **A shared group's request is a new role, `shared`**, naming `selection.group_id` and its `probe_runs` for that one
-  probe. It is neither a canonical (it spans montages) nor a hand-picked derivative (its electrodes and montages are
+  probe. Its `metadata.probes` is exactly that one probe's entry (one `InsertionReport` row, written as today); its
+  idempotency key and its answers are a canonical's (wl.works' question Q4). It is neither a canonical (it spans montages) nor a hand-picked derivative (its electrodes and montages are
   fixed by the listing). wl.works fires it **on the same person's act that fires the canonicals** — Confirm — one per
   listed group (wl.works' question 4; "always" means every confirmed session, never an agent).
 - Until sorting exists, a `shared` activation is accepted and stored, and its build waits ("waiting on sorting").
@@ -219,7 +233,15 @@ waveform spans neighbouring electrodes, and a group cut to disjoint electrodes w
   its key names what unit identity holds over.
 - The order montages and groups are derived in, and the daemon stage that does it.
 
-## 8. Open, for the requester
+## 8. wl.works' review (2026-11-24)
+
+Three objections, adopted: O1 `positions_seq` orders the requests (§4.1), O2 the listing echoes it (§4.5), O3 no
+author in positions (§4.1). Four questions, answered in place: Q1 a session not landed is a `404`, Q2 gaps are fine,
+Q3 the `409` after firing holds for the session's life in this piece, Q4 a `shared` request carries its one probe and
+keys and answers like a canonical. wl.works ships 20b-1b against today's contract, and adopts this piece in a plan of
+its own.
+
+## 9. Open, for the requester
 
 - None. The builder check (2026-11-24) asked four questions: overlapping groups (answered by §2 decision 3, and §4.4
   now says so), the edge window (kept as wl.works has it, §4.2), the canonical file holding a mid-run selection change
