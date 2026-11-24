@@ -224,11 +224,15 @@ def _subject(subject_id: str) -> dict:
     row = (pipeline.subject.Subject & {"subject": subject_id}).fetch1()
     species = [row["species"] for row in (pipeline.subject.Subject.Species & {"subject": subject_id}).to_dicts()]
     birth = row["subject_birth_date"]
+    nickname = row["subject_nickname"]
     return {
         "subject_id": subject_id,
         "species": str(species[0]) if len(species) else None,
         "sex": row["sex"],
         "date_of_birth": None if birth in (None, SUBJECT_BIRTH_DATE_UNKNOWN) else birth,
+        # The landing stub writes the subject id here; only a nickname
+        # wl.works sent is one (design spec 2026-11-24 section 4.2).
+        "nickname": None if nickname in (None, "", subject_id) else nickname,
     }
 
 

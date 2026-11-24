@@ -122,6 +122,42 @@ def test_the_file_is_written_valid_and_describes_the_activation(built):
     assert (built.path.parent.parent.name, built.path.parent.name) == ("nwbstep1", "2025-07-20_01")
 
 
+def _built_with_nickname(activation, tmp_path_factory, nickname):
+    """A fresh build of the activation while `Subject.subject_nickname` holds
+    `nickname`; the subject's row is restored after."""
+    from pynwb import NWBHDF5IO
+
+    from wl_preproc.nwb.build import build
+    from wl_preproc.schema import pipeline
+
+    _session_key, key, _runs = activation
+    restrict = {"subject": _SUBJECT}
+    before = (pipeline.subject.Subject & restrict).fetch1("subject_nickname")
+    pipeline.subject.Subject.update1({**restrict, "subject_nickname": nickname})
+    try:
+        result = build(key, tmp_path_factory.mktemp("nwb-nick"))
+    finally:
+        pipeline.subject.Subject.update1({**restrict, "subject_nickname": before})
+    assert result.status == "written", result.findings
+    with NWBHDF5IO(str(result.path), "r") as handle:
+        return result.description["subject"]["nickname"], handle.read().subject.description
+
+
+def test_the_file_states_the_animals_nickname(activation, tmp_path_factory):
+    nickname, text = _built_with_nickname(activation, tmp_path_factory, "Pico")
+    assert text == ("Nickname Pico, as wl.works' record gives it. "
+                    "As wl.works' job request stated it (design spec section 9).")
+    assert nickname == "Pico"
+
+
+@pytest.mark.parametrize("stored", [None, _SUBJECT])
+def test_a_stub_nickname_is_not_stated(activation, tmp_path_factory, stored):
+    """No nickname sent, or one equal to the subject id (the landing stub)."""
+    nickname, text = _built_with_nickname(activation, tmp_path_factory, stored)
+    assert text == "As wl.works' job request stated it (design spec section 9)."
+    assert nickname is None
+
+
 def test_a_synthetic_sessions_clock_falls_back_to_the_manifest(activation, built):
     """Section 4.2's fallback, end to end: the synthetic sync box's barcodes
     are counters from 1,000,000, not seconds since 2020, so they disagree

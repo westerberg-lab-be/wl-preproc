@@ -735,6 +735,28 @@ def test_the_subjects_details_fill_its_own_record(landed_session, prefix):
     assert (pipeline.subject.Subject.Species & {"subject": subject}).fetch1("species") == "Macaca mulatta"
 
 
+def test_a_nickname_is_stored_and_kept_when_absent(landed_session, prefix):
+    """wl.works' nickname for the animal lands in `Subject.subject_nickname`;
+    a later request without one leaves it (the latest request that carries it
+    wins)."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import pipeline
+
+    subject = "jbnick01"
+    naive_dt = datetime.datetime(2027, 5, 11, 9, 0)
+    landed_session(subject, naive_dt)
+    boundaries = [{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}]
+    accept(_request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
+                    idempotency_key="jbnick01-k1", montage_boundaries=boundaries,
+                    subject_details={"sex": "F", "nickname": "Pico"}), prefix=prefix)
+    assert (pipeline.subject.Subject & {"subject": subject}).fetch1("subject_nickname") == "Pico"
+
+    accept(_request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
+                    idempotency_key="jbnick01-k2", montage_boundaries=boundaries,
+                    subject_details={"sex": "F"}), prefix=prefix)
+    assert (pipeline.subject.Subject & {"subject": subject}).fetch1("subject_nickname") == "Pico"
+
+
 def test_a_request_without_details_leaves_the_subject_alone(landed_session, prefix):
     """They are optional: a request that does not carry them changes nothing
     about the subject."""

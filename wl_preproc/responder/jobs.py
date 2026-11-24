@@ -452,7 +452,7 @@ def _build_montage_rows(
 def _record_subject_details(subject: str, details) -> None:
     """wl.works' own record of the animal, when the request carries it,
     written into element-animal's tables: `Subject.sex`,
-    `Subject.subject_birth_date` and `Subject.Species` (design spec
+    `Subject.subject_birth_date`, `Subject.subject_nickname` and `Subject.Species` (design spec
     `2026-09-28-nwb-builder-design.md` section 9). Absent, nothing about the
     subject changes. The latest request wins: the ELN is the authority."""
     if details is None:
@@ -462,6 +462,8 @@ def _record_subject_details(subject: str, details) -> None:
     row = {"subject": subject, "sex": details.sex}
     if details.date_of_birth is not None:
         row["subject_birth_date"] = details.date_of_birth
+    if details.nickname is not None:
+        row["subject_nickname"] = details.nickname
     pipeline.subject.Subject.update1(row)
     if details.species is not None:
         pipeline.subject.Species.insert1({"species": details.species}, skip_duplicates=True)

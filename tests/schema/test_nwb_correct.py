@@ -105,6 +105,20 @@ def test_a_written_file_is_stale_once_its_subjects_details_change(published):
     assert not _is_stale(key)
 
 
+def test_a_changed_nickname_marks_no_file_stale(published):
+    """Spec section 4.2: a nickname corrects no built file."""
+    from wl_preproc.nwb.correct import stale_files
+    from wl_preproc.schema import pipeline
+
+    _session_key, _key, _runs, _root = published
+    before = (pipeline.subject.Subject & {"subject": _SUBJECT}).fetch1("subject_nickname")
+    pipeline.subject.Subject.update1({"subject": _SUBJECT, "subject_nickname": "Pico"})
+    try:
+        assert not [stale for stale in stale_files() if stale["subject"] == _SUBJECT]
+    finally:
+        pipeline.subject.Subject.update1({"subject": _SUBJECT, "subject_nickname": before})
+
+
 def test_a_derivative_and_a_superseded_file_are_stale_too(published, daemon_module, prefix, shares):
     """Spec section 2: every written file of the animal, whatever its role
     or whether a replacement superseded it."""

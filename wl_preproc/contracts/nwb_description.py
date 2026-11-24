@@ -77,6 +77,8 @@ class SubjectInfo(_Frozen):
     sex: Literal["M", "F", "U"]
     date_of_birth: datetime.date | None
     age_days: int | None
+    # Added within version 3: a description stored before it reads None.
+    nickname: str | None = None
 
 
 class EyeData(_Frozen):

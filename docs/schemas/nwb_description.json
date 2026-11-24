@@ -964,6 +964,18 @@
           ],
           "title": "Date Of Birth"
         },
+        "nickname": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nickname"
+        },
         "sex": {
           "enum": [
             "M",

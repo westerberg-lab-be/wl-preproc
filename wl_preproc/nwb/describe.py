@@ -96,6 +96,7 @@ def describe(data, *, status: str, n_critical: int, checksums: list[dict], built
             "sex": subject["sex"],
             "date_of_birth": subject["date_of_birth"],
             "age_days": _age_days(subject["date_of_birth"], session["session_datetime"]),
+            "nickname": subject.get("nickname"),
         },
         "data_types": {
             "eye": None if eye is None else {
