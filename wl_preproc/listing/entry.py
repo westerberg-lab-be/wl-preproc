@@ -33,6 +33,7 @@ from wl_preproc.events.runs import starts_inside
 from wl_preproc.listing import order
 
 from wl_preproc.contracts.protocol import SessionEntry
+from wl_preproc.montage.stored import StoredMontages, read_stored
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,6 +72,9 @@ class SessionFacts:
     # The wall-clock time of t = 0: its timebase.ClockReference row's reference_time and
     # reference_source; None until stored.
     reference: dict | None
+    # What the montage stage stored for the session; None until it has passed it. `electrodes` also holds each
+    # stored group's (electrode_config_hash, probe_type).
+    montages: StoredMontages | None = None
 
 
 def _repeats(numbers: list[int]) -> list[tuple[int, int]]:
@@ -209,6 +213,10 @@ def build_entry(facts: SessionFacts) -> dict:
                                    f"block {block['block_id']} lies in no measured run: its run's RUN_START was "
                                    "lost, or it was strobed outside a run", block_number=block["block_id"]))
 
+    stored = facts.montages
+    if stored is not None:
+        flags.extend(dict(flag) for flag in stored.flags)
+
     entry = {
         "subject": facts.subject, "session_datetime": facts.session_datetime, "session_name": facts.session_name,
         "tier": facts.tier, "rejected_segments": sorted(facts.rejected, key=lambda row: (row["system"],
@@ -220,8 +228,42 @@ def build_entry(facts: SessionFacts) -> dict:
         "t0_datetime": None if facts.reference is None else facts.reference["reference_time"],
         "t0_source": None if facts.reference is None else facts.reference["reference_source"],
         **_rig_session(facts),
+        **_montages(facts, ordered_runs),
     }
     return SessionEntry.model_validate(entry).model_dump(mode="json")
+
+
+def _montages(facts: SessionFacts, ordered_runs: list[dict]) -> dict:
+    """The stored derivation's seq and status, and at `placed` or `not_needed` its montages and shared groups
+    (plan decision D13). A montage's runs are the orderly runs whose start lies in `[start_s, end_s)`; a group's
+    electrodes are its configuration's, null where it has none (D10)."""
+    stored = facts.montages
+    if stored is None:
+        return {"positions_status": "waiting", "positions_seq": None, "montages": None, "shared_groups": None}
+    listed = {"positions_status": stored.status, "positions_seq": stored.positions_seq, "montages": None,
+              "shared_groups": None}
+    if stored.status not in ("placed", "not_needed"):
+        return listed
+    listed["montages"] = [{
+        "montage_id": montage["montage_id"], "start_s": montage["start_s"], "end_s": montage["end_s"],
+        "run_numbers": [run["run_number"] for run in ordered_runs
+                        if montage["start_s"] <= run["run_start_time"] < montage["end_s"]],
+        "probes": [{"serial": probe["serial"], "insertion_number": probe["insertion_number"],
+                    "electrode_config_hash": probe["electrode_config_hash"],
+                    "sortable_runs": list(probe["sortable_runs"])} for probe in montage["probes"]],
+    } for montage in stored.montages]
+    shared = []
+    for group in stored.groups:
+        electrodes = (facts.electrodes.get((group["electrode_config_hash"], group["probe_type"]))
+                      if group["electrode_config_hash"] else None)
+        shared.append({
+            "group_id": group["group_id"], "serial": group["serial"], "insertion_number": group["insertion_number"],
+            "montage_ids": list(group["montage_ids"]), "n_electrodes": group["n_electrodes"],
+            "electrodes": None if electrodes is None else list(electrodes),
+            "sortable_runs": list(group["sortable_runs"]),
+        })
+    listed["shared_groups"] = shared
+    return listed
 
 
 _CALIBRATION_COLUMNS = ("calibration_id", "calibration_standard", "calibration_measured_on")
@@ -287,8 +329,11 @@ def gather_all(keys: list[dict]) -> dict[tuple[str, datetime.datetime], SessionF
     for row in (pipeline.trial.Block.Attribute & keys).to_dicts():
         attributes[_session(row)][row["block_id"]][row["attribute_name"]] = row["attribute_value"]
     census = _by_session((ephys.ProbeCensus.Probe & keys).to_dicts())
+    stored = read_stored(keys)
     configs = sorted({(part["electrode_config_hash"], part["probe_type"])
-                      for parts in census.values() for part in parts if part["electrode_config_hash"]})
+                      for parts in census.values() for part in parts if part["electrode_config_hash"]}
+                     | {(group["electrode_config_hash"], group["probe_type"])
+                        for found in stored.values() for group in found.groups if group["electrode_config_hash"]})
     electrodes = collections.defaultdict(list)
     if configs:
         restriction = [{"electrode_config_hash": config_hash, "probe_type": probe_type}
@@ -357,7 +402,10 @@ def gather_all(keys: list[dict]) -> dict[tuple[str, datetime.datetime], SessionF
             census=mine,
             electrodes={config: sorted(electrodes[config]) for config in
                         {(part["electrode_config_hash"], part["probe_type"]) for part in mine
-                         if part["electrode_config_hash"]}},
+                         if part["electrode_config_hash"]}
+                        | {(group["electrode_config_hash"], group["probe_type"])
+                           for group in (stored[session].groups if session in stored else ())
+                           if group["electrode_config_hash"]}},
             strobed_runs=strobed_runs.get(session, []),
             strobed_blocks=strobed_blocks.get(session, []),
             censused=frozenset(str(row["segment_id"]) for row in censused.get(session, [])),
@@ -370,6 +418,7 @@ def gather_all(keys: list[dict]) -> dict[tuple[str, datetime.datetime], SessionF
             system_pauses=system_pauses.get(session, 0),
             clock=clocks.get(session),
             reference=references.get(session),
+            montages=stored.get(session),
         )
     return facts
 

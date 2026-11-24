@@ -562,6 +562,9 @@ ListedFlagCode = Literal[
     "block_outside_runs",
     "rig_record_problem",
     "ends_before_start",
+    "position_edge_ambiguous",
+    "position_edge_inside_run",
+    "probe_without_position",
 ]
 
 
@@ -758,6 +761,49 @@ class RejectedFile(BaseModel):
     reason: str
 
 
+class ListedMontageProbe(BaseModel):
+    """One probe in one montage: its position's `insertion_number` (wl.works'),
+    the site map it records there (null for a probe this host reads no channel
+    map for), and the montage's runs sortable for it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    serial: str
+    insertion_number: int
+    electrode_config_hash: str | None
+    sortable_runs: list[int]
+
+
+class ListedMontage(BaseModel):
+    """A span of the session over which every probe holds one position and
+    one selection (design spec `2026-11-24-montages-design.md` section 4.5).
+    `run_numbers` are the runs whose start lies in `[start_s, end_s)`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    montage_id: int
+    start_s: float
+    end_s: float
+    run_numbers: list[int]
+    probes: list[ListedMontageProbe]
+
+
+class ListedSharedGroup(BaseModel):
+    """The montages in which one probe held one electrode selection at one
+    position. `electrodes` and `n_electrodes` are null for a probe this host
+    reads no channel map for."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    group_id: int
+    serial: str
+    insertion_number: int
+    montage_ids: list[int]
+    n_electrodes: int | None
+    electrodes: list[int] | None
+    sortable_runs: list[int]
+
+
 class SessionEntry(BaseModel):
     """One landed session, as it stands now. A naive `session_datetime` is
     UTC, as every one this host issues is. `tier` is the timing tier, null
@@ -794,6 +840,13 @@ class SessionEntry(BaseModel):
     # requester's choice of 2026-11-24).
     t0_datetime: datetime.datetime | None = None
     t0_source: Literal["barcode", "rig_clock", "nidq_meta", "manifest"] | None = None
+    # The montages and shared groups the stored derivation made from the
+    # positions at `positions_seq`: null unless `positions_status` is `placed`
+    # or `not_needed` (design spec `2026-11-24-montages-design.md` section 4.5).
+    montages: list[ListedMontage] | None = None
+    shared_groups: list[ListedSharedGroup] | None = None
+    positions_status: Literal["not_needed", "waiting", "placed", "ambiguous"] = "waiting"
+    positions_seq: int | None = None
 
 
 class SessionListing(BaseModel):

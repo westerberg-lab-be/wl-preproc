@@ -724,6 +724,12 @@ Authorization: Bearer <token>
     the value it was built with (see below). Both are null until it is stored. It is what places a
     time of day between runs: `session_datetime` may be up to 60 s from it, and a run's `start_s` counts
     from it;
+  - `montages`, each a `montage_id`, `start_s`, `end_s`, `run_numbers` and its `probes` (each a `serial`,
+    `insertion_number`, `electrode_config_hash` and `sortable_runs`), and `shared_groups`, each a `group_id`,
+    `serial`, `insertion_number`, `montage_ids`, `n_electrodes`, `electrodes` and `sortable_runs`; both null unless
+    `positions_status` is `placed` or `not_needed`; `positions_status` is `not_needed`, `waiting`, `placed` or
+    `ambiguous`, and `positions_seq` the seq of the positions the stored derivation was made from, null until
+    the daemon has passed the session (Task 12 writes the prose);
   - `flags`, each a `code`, a `message`, and the `run_number`, `block_number` or `segment_id` (a
     SpikeGLX file) it is about:
     `waiting_for_run_markers` (no measured run yet), `repeated_run_number` and
@@ -737,6 +743,7 @@ Authorization: Bearer <token>
     `ends_before_start`: a run, block or file whose end comes before its start, **left out of the
     entry** and named here with both its times (a block with its run's number, when it lies in one).
     It is the one flag that means something was withheld. Equal start and end is listed.
+    The montages add `position_edge_ambiguous`, `position_edge_inside_run` and `probe_without_position`.
     **None of them blocks anything here.**
 
 ### `t0_datetime` is fixed when it is stored: re-timing a session
