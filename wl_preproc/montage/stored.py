@@ -63,14 +63,18 @@ def read_stored(keys: list[dict]) -> dict[tuple[str, datetime.datetime], StoredM
     masters = (core.MontageDerivation & keys).to_dicts()
     if not masters:
         return {}
-    flags = _by_session((core.MontageDerivation.Flag & keys).to_dicts(order_by=[*_SESSION, "flag_number"]))
-    montages = _by_session((core.Montage & keys).to_dicts(order_by=[*_SESSION, "montage_id"]))
-    probes = _by_session((core.MontageProbe & keys).to_dicts(order_by=[*_SESSION, "montage_id", "probe_serial"]))
+    # Ordered here, never by ORDER BY: MySQL's collation orders strings without case ("a1" before "B2"), Python
+    # with it, and `stage.to_stored` orders in Python. Two orders would never compare equal, and the session would
+    # be rewritten on every pass (the montages review's M1).
+    flags = _by_session(sorted((core.MontageDerivation.Flag & keys).to_dicts(), key=lambda r: int(r["flag_number"])))
+    montages = _by_session(sorted((core.Montage & keys).to_dicts(), key=lambda r: int(r["montage_id"])))
+    probes = _by_session(sorted((core.MontageProbe & keys).to_dicts(),
+                                key=lambda r: (int(r["montage_id"]), str(r["probe_serial"]))))
     probe_runs = collections.defaultdict(list)
     for row in (core.MontageSortableRun & keys).to_dicts():
         probe_runs[(*_session(row), int(row["montage_id"]), row["probe_serial"])].append(int(row["run_number"]))
-    placed = _by_session((core.PlacedPosition & keys).to_dicts(order_by=[*_SESSION, "insertion_number"]))
-    groups = _by_session((core.SharedGroup & keys).to_dicts(order_by=[*_SESSION, "group_id"]))
+    placed = _by_session(sorted((core.PlacedPosition & keys).to_dicts(), key=lambda r: int(r["insertion_number"])))
+    groups = _by_session(sorted((core.SharedGroup & keys).to_dicts(), key=lambda r: int(r["group_id"])))
     members = collections.defaultdict(list)
     for row in (core.SharedGroup.Member & keys).to_dicts():
         members[(*_session(row), int(row["group_id"]))].append(int(row["montage_id"]))

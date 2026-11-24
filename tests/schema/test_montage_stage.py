@@ -276,3 +276,48 @@ def test_the_derivation_changes_only_when_its_result_does(daemon_module, prefix,
     assert derive_session(key) is False
     written, _errors = run_stage()
     assert written == 0
+
+
+def test_serials_that_sql_and_python_order_differently_are_written_once(daemon_module, prefix, tmp_path_factory):
+    """The montages review's M1: MySQL orders "a1" before "B2" (without case), Python after. The stored probes are
+    ordered as the derivation's are, so a second derivation finds them equal and writes nothing."""
+    from wl_preproc.montage.stage import derive_session
+    from wl_preproc.montage.stored import read_stored
+
+    key, serial = _landed(tmp_path_factory)
+    _pass(daemon_module, prefix, key)
+    put(key, [_position(serial, 1, before_t0(key)), _position("a1", 2, before_t0(key)),
+              _position("B2", 3, before_t0(key))], seq=1, prefix=prefix)
+    _pass(daemon_module, prefix, key)
+    assert _derivation(key) == ("placed", 1)
+
+    (montage,) = read_stored([key])[(key["subject"], key["session_datetime"])].montages
+    assert [probe["serial"] for probe in montage["probes"]] == sorted([serial, "a1", "B2"])
+    assert derive_session(key) is False
+
+
+def test_a_session_with_intan_and_no_spikeglx_is_placed_once_its_positions_arrive(
+        daemon_module, prefix, tmp_path_factory):
+    """Plan decision D7: Intan is ephys, so the session waits for positions; with no SpikeGLX there is no census to
+    wait for. An Intan probe is never in the census (D10): it is listed with no selection, sortable on the runs its
+    position covers. A session of Intan alone, with no sync box, has no events stage to give it runs or t = 0, so
+    this is the standalone Intan rig's session, the sync box beside it."""
+    from wl_preproc.schema import core
+
+    key, _serial = _landed(tmp_path_factory, systems=("syncbox", "rhs"))
+    _pass(daemon_module, prefix, key)
+    assert _derivation(key) == ("waiting", None)
+    assert not core.Montage & key
+
+    intan = new_serial()
+    put(key, [_position(intan, 1, before_t0(key))], seq=1, prefix=prefix)
+    _pass(daemon_module, prefix, key)
+
+    assert _derivation(key) == ("placed", 1)
+    first, second = _runs(key)
+    assert _montages(key) == [(1, first["run_start_time"], second["run_stop_time"])]
+    assert _probes(key) == {(1, intan): (1, None, [1, 2])}
+    assert (core.MontageProbe & key).fetch1("probe_type") is None
+    placed = (core.PlacedPosition & key).fetch1()
+    assert (placed["probe_serial"], placed["start_s"], placed["end_s"]) == (
+        intan, first["run_start_time"], second["run_stop_time"])

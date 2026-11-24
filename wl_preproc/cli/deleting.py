@@ -58,7 +58,42 @@ _PARENTS: dict[str, tuple[str, ...]] = {
     "RunCoverage": ("AcquisitionSystem",),
     "ActivationRun": ("Activation",),
     "ActivationProbeRun": ("Activation",),
+    # What the montage stage derives (design spec
+    # `2026-11-24-montages-design.md` section 4.3-4.4): a montage's probes and
+    # their sortable runs, and the shared groups whose members name it.
+    # `SharedGroup` is here as `Request` is, because its parts name it; their
+    # other parent, `core.Run`, is left out of the map as above.
+    "MontageProbe": ("Montage",),
+    "MontageSortableRun": ("MontageProbe",),
+    "SharedGroup": (),
+    "SharedGroup.Member": ("SharedGroup", "Montage"),
+    "SharedGroup.SortableRun": ("SharedGroup",),
 }
+
+
+def _tables() -> dict:
+    """The real table class behind each stage name in `_PARENTS`. Importing
+    them needs no database."""
+    from wl_preproc.schema import core, coverage, request
+
+    return {
+        "Montage": core.Montage,
+        "AcquisitionSystem": core.AcquisitionSystem,
+        "Request": request.Request,
+        "Activation": request.Activation,
+        "Segment": core.Segment,
+        "RejectedSegment": core.RejectedSegment,
+        "TrialCoverage": coverage.TrialCoverage,
+        "RunAssertion": core.RunAssertion,
+        "RunCoverage": coverage.RunCoverage,
+        "ActivationRun": request.ActivationRun,
+        "ActivationProbeRun": request.ActivationProbeRun,
+        "MontageProbe": core.MontageProbe,
+        "MontageSortableRun": core.MontageSortableRun,
+        "SharedGroup": core.SharedGroup,
+        "SharedGroup.Member": core.SharedGroup.Member,
+        "SharedGroup.SortableRun": core.SharedGroup.SortableRun,
+    }
 
 
 def _assert_known_tables_are_real() -> None:
@@ -88,19 +123,7 @@ def _assert_known_tables_are_real() -> None:
     """
     from wl_preproc.schema import core, coverage, request
 
-    tables = {
-        "Montage": core.Montage,
-        "AcquisitionSystem": core.AcquisitionSystem,
-        "Request": request.Request,
-        "Activation": request.Activation,
-        "Segment": core.Segment,
-        "RejectedSegment": core.RejectedSegment,
-        "TrialCoverage": coverage.TrialCoverage,
-        "RunAssertion": core.RunAssertion,
-        "RunCoverage": coverage.RunCoverage,
-        "ActivationRun": request.ActivationRun,
-        "ActivationProbeRun": request.ActivationProbeRun,
-    }
+    tables = _tables()
     assert tables.keys() == _PARENTS.keys(), (
         "the stage-name graph and the real schema tables have drifted apart: "
         f"{sorted(tables.keys() ^ _PARENTS.keys())}"

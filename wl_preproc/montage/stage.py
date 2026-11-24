@@ -146,9 +146,10 @@ def to_stored(derivation: Derivation, groups: tuple[DerivedGroup, ...], runs: tu
             config_hash = ephys.intersect_electrode_configs(list(g.member_hashes))
             config = (ephys.ElectrodeConfig & {"electrode_config_hash": config_hash}).fetch1()
             probe_type, n_electrodes = str(config["probe_type"]), int(config["n_electrodes"])
-            assert n_electrodes == len(g.electrodes), (
-                f"group {g.group_id}'s minted config {config_hash} holds {n_electrodes} electrodes, not the "
-                f"{len(g.electrodes)} its members share")
+            if n_electrodes != len(g.electrodes):  # raised, not asserted: `python -O` strips an assert
+                raise AssertionError(
+                    f"group {g.group_id}'s minted config {config_hash} holds {n_electrodes} electrodes, not the "
+                    f"{len(g.electrodes)} its members share")
         stored_groups.append({
             "group_id": g.group_id, "serial": g.serial, "insertion_number": g.insertion_number,
             "electrode_config_hash": config_hash, "probe_type": probe_type, "n_electrodes": n_electrodes,
