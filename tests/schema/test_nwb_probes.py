@@ -1,7 +1,11 @@
-"""Probes and areas in the NWB file, through the builder (design spec
-`2026-09-30-nwb-probes-design.md` sections 3.1, 3.3 and 5). Subjects, dates
-and serials checked unclaimed across `tests/` on 2026-09-30; the dates are in
-the PAST, since `nwbinspector` calls a future `session_start_time` critical."""
+"""Probes and areas in the NWB file, through the builder (design specs
+`2026-09-30-nwb-probes-design.md` sections 3.1, 3.3 and 5, and
+`2026-11-24-montages-design.md` sections 4.3 and 4.7): each file takes its
+probes' insertions and site maps from the montage it is built for, which the
+montage stage derives from the positions wl.works sends. Subjects, dates and
+serials written by hand were checked unclaimed across `tests/` on 2026-09-30;
+newer tests take theirs from `tests/identities.py`. The dates are in the PAST,
+since `nwbinspector` calls a future `session_start_time` critical."""
 
 from __future__ import annotations
 
@@ -9,6 +13,8 @@ import datetime
 
 import pytest
 
+from tests.identities import new_animal, new_serial
+from tests.positions import before_t0, put
 from tests.schema.test_spikeglx_restart import RESTART
 from tests.schema.test_spikeglx_restart import _session as _restart_session
 
@@ -21,6 +27,7 @@ def _session(tmp_path_factory, mutate=None, **update):
 
 _S1, _S2, _S3 = "19011110011", "19011110012", "19011110013"
 _AIM = {"area": "V4d", "atlas": "CHARM", "atlas_level": 6}
+_V1 = {"area": "V1", "atlas": "CHARM", "atlas_level": 6}
 _ASSIGNED = {"area": "V4v", "source": "at_rig", "asserted_at": "2025-06-22T11:00:00Z"}
 
 
@@ -38,25 +45,56 @@ def _bad_part(directory):
         meta.write_text(meta.read_text().replace("imDatPrb_pn=NP1000", "imDatPrb_pn=NP9999"))
 
 
-def _canonical(daemon_module, prefix, key, idempotency_key, probes, run_numbers=None):
-    """wl.works' canonical over the session's measured runs, as
-    `tests/schema/test_nwb_build.py`'s fixture asks for it, every probe's
-    sort covering every run, then a pass. With `run_numbers`, a derivative
-    over those runs instead. Montage 0 is stored first, as this host would
-    list it, after the session's last pass (`tests/positions.py::seed_montage`)."""
-    from tests.positions import seed_montage
+def _position(serial, number, inserted_at, **more):
+    return {"serial": serial, "insertion_number": number, "inserted_at": inserted_at, **more}
+
+
+def _positioned(daemon_module, prefix, key, positions):
+    """wl.works' `PUT /positions` for the session, then a pass: the montage
+    stage derives its montages and shared groups from them. Call it after the
+    session's first pass, which stores the `ClockReference` `before_t0` reads."""
+    from wl_preproc.schema import core
+
+    put(key, positions, prefix=prefix)
+    report = daemon_module.run_once(prefix=prefix)
+    assert not [error for error in report["errors"] if key["subject"] in error]
+    assert (core.MontageDerivation & key).fetch1("positions_status") == "placed"
+
+
+def _position_each_probe(daemon_module, prefix, key):
+    """`_positioned` with one position for each serial the session's census
+    names, numbered from 1 in serial order, each over the whole session: what
+    a test whose subject is not its probes needs before `_canonical`."""
+    from wl_preproc.schema import ephys
+
+    serials = sorted({serial for serial in (ephys.ProbeCensus.Probe & key).to_arrays("probe_serial") if serial})
+    _positioned(daemon_module, prefix, key,
+                [_position(serial, number, before_t0(key)) for number, serial in enumerate(serials, start=1)])
+
+
+def _canonical(daemon_module, prefix, key, idempotency_key, probes, run_numbers=None, montage_id=1):
+    """wl.works' canonical over montage `montage_id`'s measured runs, as
+    `tests/schema/test_nwb_build.py`'s fixture asks for it, each probe's sort
+    covering its sortable runs there as this host lists them, then a pass.
+    With `run_numbers`, a derivative over those runs instead. The montage is
+    the stage's, from the session's stored positions: call `_positioned` (or
+    `_position_each_probe`) first."""
     from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
+    from wl_preproc.montage.stored import read_stored
     from wl_preproc.responder.jobs import accept
     from wl_preproc.schema import core
 
     runs = [{"run_number": row["run_number"], "start_s": row["run_start_time"], "end_s": row["run_stop_time"],
              "works_run_id": f"wr-{row['run_number']}"}
             for row in (core.Run & key).to_dicts(order_by="run_number")]
-    every = {probe["serial"]: [run["run_number"] for run in runs] for probe in probes}
-    seed_montage(key, {"montage_id": 0, "start_s": 0.0, "end_s": 16.0})
+    (stored,) = read_stored([key]).values()
+    (montage,) = [montage for montage in stored.montages if montage["montage_id"] == montage_id]
+    sortable = {probe["serial"]: list(probe["sortable_runs"]) for probe in montage["probes"]}
+    every = {probe["serial"]: sortable.get(probe["serial"], []) for probe in probes}
     activation = accept(JobRequest(
         domain="neural", parameters={}, idempotency_key=idempotency_key,
-        selection={"session_datetime": key["session_datetime"].replace(tzinfo=datetime.UTC), "montage_id": 0,
+        selection={"session_datetime": key["session_datetime"].replace(tzinfo=datetime.UTC),
+                   "montage_id": montage_id,
                    **({"probe_runs": every} if run_numbers is None else {"run_numbers": run_numbers})},
         metadata=MetadataBundle(
             blocks=[], runs=runs, probes=probes, experimenter="jw", subject=key["subject"], task_types=[],
@@ -66,17 +104,28 @@ def _canonical(daemon_module, prefix, key, idempotency_key, probes, run_numbers=
     return activation
 
 
+def _new_session(tmp_path_factory, mutate=None, **update):
+    """`_session` for a new animal, its `imec0` a new serial unless `update` names one."""
+    session = new_animal().session()
+    update.setdefault("probe_serial", new_serial())
+    return _session(tmp_path_factory, mutate, subject=session.subject, session_id=session.session_id,
+                    session_datetime=session.session_datetime, **update)
+
+
 @pytest.fixture(scope="module")
 def three_probes(daemon_module, prefix, tmp_path_factory):
     """Three probes, one per area label: imec0 has an aim and an
-    assignment, imec1 an aim only, and imec2 no report and a part number
-    probeinterface does not know. A restart that keeps every bank makes two
-    segments with one map each."""
+    assignment, imec1 an aim only, and imec2 no position, so no report, and
+    a part number probeinterface does not know. A restart that keeps every
+    bank makes two segments with one map each."""
     _recipe, key = _session(
         tmp_path_factory, _bad_part, subject="pnwb1", session_id="2025-06-22_01", probe_serial=_S1,
         extra_probes=[{"serial": _S2, "part_number": "NP1032", "bank": 1}, {"serial": _S3}],
         spikeglx_restart=RESTART)
     daemon_module.run_once(prefix=prefix)
+    # A typo: no recording in the session names 19011119998.
+    _positioned(daemon_module, prefix, key, [_position(_S1, 1, before_t0(key)), _position(_S2, 2, before_t0(key)),
+                                             _position("19011119998", 4, before_t0(key))])
     activation = _canonical(daemon_module, prefix, key, "pnwb1-k1", [
         {"serial": _S1, "insertion_number": 1, "trajectory_id": "T-1", "target": _AIM, "area_assignment": _ASSIGNED},
         {"serial": _S2, "insertion_number": 2, "target": _AIM},
@@ -151,6 +200,7 @@ def test_a_new_form_header_places_the_same_sites_in_the_file(daemon_module, pref
                             probe_part_number="NP1032", probe_bank=2, imro_header="part_number",
                             extra_probes=[{"serial": "19011110032", "bank": 1}])
     daemon_module.run_once(prefix=prefix)
+    _position_each_probe(daemon_module, prefix, key)
     activation = _canonical(daemon_module, prefix, key, "pnwb8-k1", [])
 
     result = build(activation, tmp_path_factory.mktemp("nwb-new-form"))
@@ -190,6 +240,7 @@ def test_an_intan_probe_is_listed_from_its_report_alone(daemon_module, prefix, t
     generate_session(root, recipe)
     key = _land(root, recipe, datetime.datetime(2025, 6, 25, 9), acquisition_systems=("syncbox", "rhs"))
     daemon_module.run_once(prefix=prefix)
+    _positioned(daemon_module, prefix, key, [_position("R-19", 1, before_t0(key))])
     activation = _canonical(daemon_module, prefix, key, "pnwb4-k1",
                             [{"serial": "R-19", "insertion_number": 1, "target": _AIM}])
 
@@ -217,6 +268,8 @@ def test_a_meta_naming_no_serial_is_noted_by_its_segment(daemon_module, prefix, 
 
     recipe, key = _session(tmp_path_factory, _no_serial, subject="pnwb5", session_id="2025-06-26_01")
     daemon_module.run_once(prefix=prefix)
+    # The census names no serial, so wl.works' set is empty.
+    _position_each_probe(daemon_module, prefix, key)
     activation = _canonical(daemon_module, prefix, key, "pnwb5-k1", [])
 
     data = gather(activation)
@@ -242,6 +295,7 @@ def test_an_imro_table_too_long_to_keep_is_not_a_probe_note(daemon_module, prefi
     parts = (ephys.ProbeCensus.Probe & key).to_dicts()
     assert parts and all(part["problem"].endswith("so it is not kept") and part["electrode_config_hash"]
                          for part in parts)
+    _position_each_probe(daemon_module, prefix, key)
     activation = _canonical(daemon_module, prefix, key, "pnwb7-k1",
                             [{"serial": "19011110020", "insertion_number": 1, "target": _AIM}])
 
@@ -250,47 +304,104 @@ def test_an_imro_table_too_long_to_keep_is_not_a_probe_note(daemon_module, prefi
     assert data.probe_notes == []
 
 
-def test_a_bank_change_inside_a_montage_refuses_the_file(daemon_module, prefix, tmp_path_factory):
-    """Section 5's one refusing case: a file across it would later be
-    sorted across it. The reason names both segments."""
-    from wl_preproc.nwb.build import build
-    from wl_preproc.schema import core
+_BANKED = "19011110014"
 
-    _recipe, key = _session(tmp_path_factory, subject="pnwb2", session_id="2025-06-23_01", probe_serial="19011110014",
+
+def _bank_note(serial, run, montage_id, ending=None):
+    return (f"probe {serial} records two site maps under this file's runs, the change inside run {run}: the file "
+            f"gives it the site map its sortable runs in montage {montage_id} share"
+            + (f", and run {run} is not sorted for it" if ending is None else ending))
+
+
+@pytest.fixture(scope="module")
+def bank_change(daemon_module, prefix, tmp_path_factory):
+    """SpikeGLX restarts at 11 s, inside run 2, with another bank (design
+    spec `2026-11-24-montages-design.md` section 4.3): one montage over both
+    runs, in which the probe's one sortable run is run 1, so the montage lists
+    the site map of the first segment, bank 0's. Returns the session's key
+    and its canonical, whose report names the probe."""
+    _recipe, key = _session(tmp_path_factory, subject="pnwb2", session_id="2025-06-23_01", probe_serial=_BANKED,
                             spikeglx_restart={**RESTART, "probe_bank": 1})
     daemon_module.run_once(prefix=prefix)
-    activation = _canonical(daemon_module, prefix, key, "pnwb2-k1", [])
-
-    result = build(activation, tmp_path_factory.mktemp("nwb-refused"))
-
-    assert result.status == "refused"
-    assert "19011110014" in result.reason and "two active-site maps" in result.reason
-    for path in (core.Segment & key & {"system": "spikeglx"}).to_arrays("segment_id"):
-        assert path in result.reason
+    _positioned(daemon_module, prefix, key, [_position(_BANKED, 1, before_t0(key))])
+    return key, _canonical(daemon_module, prefix, key, "pnwb2-k1",
+                           [{"serial": _BANKED, "insertion_number": 1, "target": _AIM}])
 
 
-def test_a_file_on_one_side_of_a_bank_change_builds(daemon_module, prefix, tmp_path_factory):
-    """The final review's I1: a file's probes come from the segments its own
-    runs overlap, not from its whole montage. A derivative of the run before
-    the bank change is recorded through one site map and builds -- parent
-    spec section 8.3's remedy for a montage wl.works drew across a bank
-    change -- and one whose run crosses the change is refused, as the
-    canonical is."""
+def _electrodes(result):
     from pynwb import NWBHDF5IO
 
+    with NWBHDF5IO(str(result.path), "r") as handle:
+        return handle.read().electrodes.to_dataframe()["electrode"].tolist()
+
+
+def test_a_bank_change_inside_a_run_builds_with_the_sortable_site_map(bank_change, tmp_path_factory):
+    """Section 4.3: the canonical of a montage holding the run is built, no
+    longer refused, with the site map run 1 was recorded through, and its
+    notes name run 2 as the one where the map changed."""
     from wl_preproc.nwb.build import build
 
-    _recipe, key = _session(tmp_path_factory, subject="pnwb6", session_id="2025-06-27_01", probe_serial="19011110019",
-                            spikeglx_restart={**RESTART, "probe_bank": 1})
-    daemon_module.run_once(prefix=prefix)
-    before = _canonical(daemon_module, prefix, key, "pnwb6-k1", [], run_numbers=[1])
-    across = _canonical(daemon_module, prefix, key, "pnwb6-k2", [], run_numbers=[2])
+    _key, canonical = bank_change
+    result = build(canonical, tmp_path_factory.mktemp("nwb-bank-canonical"))
 
-    built = build(before, tmp_path_factory.mktemp("nwb-before"))
-    assert built.status == "written", (built.reason, built.findings)
-    with NWBHDF5IO(str(built.path), "r") as handle:
-        assert handle.read().electrodes.to_dataframe()["electrode"].tolist() == [0, 1, 2, 3]
-    assert build(across, tmp_path_factory.mktemp("nwb-across")).status == "refused"
+    assert result.status == "written", (result.reason, result.findings)
+    assert _electrodes(result) == [0, 1, 2, 3]
+    assert _bank_note(_BANKED, 2, 1) in result.description["notes"]
+    (probe,) = result.description["probes"]
+    assert (probe["insertion_number"], probe["sorted_runs"]) == (1, [1])
+
+
+def test_a_file_on_one_side_of_a_bank_change_builds(daemon_module, prefix, bank_change, tmp_path_factory):
+    """The final review's I1: a file's site maps come from the segments its
+    own runs overlap, not from its whole montage. A derivative of run 1 is
+    recorded through one site map, and says nothing of the change."""
+    from wl_preproc.nwb.build import build
+
+    key, _canonical_key = bank_change
+    before = _canonical(daemon_module, prefix, key, "pnwb2-k2", [], run_numbers=[1])
+
+    result = build(before, tmp_path_factory.mktemp("nwb-bank-before"))
+    assert result.status == "written", (result.reason, result.findings)
+    assert _electrodes(result) == [0, 1, 2, 3]
+    assert not [note for note in result.description["notes"] if "two site maps" in note]
+
+
+def test_a_derivative_across_the_change_builds_too(daemon_module, prefix, bank_change, tmp_path_factory):
+    """Run 2 spans both segments, so its derivative's probe records two site
+    maps; it carries the montage's, and the canonical's note."""
+    from wl_preproc.nwb.build import build
+
+    key, _canonical_key = bank_change
+    across = _canonical(daemon_module, prefix, key, "pnwb2-k3", [], run_numbers=[2])
+
+    result = build(across, tmp_path_factory.mktemp("nwb-bank-across"))
+    assert result.status == "written", (result.reason, result.findings)
+    assert _electrodes(result) == [0, 1, 2, 3]
+    assert _bank_note(_BANKED, 2, 1) in result.description["notes"]
+
+
+def test_a_probe_with_no_sortable_run_in_its_montage_has_no_electrodes(daemon_module, prefix, tmp_path_factory):
+    """Section 4.3: SpikeGLX restarts at 4 s, inside run 1, with another
+    bank, so montage 1 is run 1 alone and the probe sorts no run in it: its
+    canonical lists the probe with no electrodes, and says why. Montage 2's
+    file has bank 1's sites, with nothing to say."""
+    from wl_preproc.nwb.gather import gather
+
+    serial = new_serial()
+    _recipe, key = _new_session(tmp_path_factory, probe_serial=serial,
+                                spikeglx_restart={**RESTART, "at_s": 4.0, "probe_bank": 1})
+    daemon_module.run_once(prefix=prefix)
+    _positioned(daemon_module, prefix, key, [_position(serial, 1, before_t0(key))])
+
+    first = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m1", []))
+    (probe,) = first.probes
+    assert (probe["insertion_number"], probe["electrodes"]) == (1, [])
+    assert _bank_note(serial, 1, 1, "; it has no sortable run in montage 1, so it has no electrodes in this file") \
+        in first.probe_notes
+    second = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m2", [], montage_id=2))
+    (probe,) = second.probes
+    assert [electrode["electrode"] for electrode in probe["electrodes"]] == [384, 385, 386, 387]
+    assert not [note for note in second.probe_notes if "two site maps" in note]
 
 
 def test_a_file_waits_for_the_census_of_its_session(three_probes):
@@ -327,24 +438,106 @@ def test_the_description_lists_each_probe_and_says_what_it_could_not_place_or_jo
     notes = built.description["notes"]
     assert any(note.startswith(f"probe {_S3}: part number NP9999") and "no electrodes in this file" in note
                for note in notes)
-    assert f"probe {_S3} has no report from wl.works, so its insertion and area are unknown" in notes
+    assert f"probe {_S3} is named by no position from wl.works, so its insertion and area are unknown" in notes
     assert ("insertion 4 names probe 19011119998, which no recording in this session names, so the report is "
             "not joined") in notes
 
 
-def test_a_serial_reported_for_two_insertions_is_listed_once_and_noted(daemon_module, prefix, tmp_path_factory):
-    from wl_preproc.nwb.build import build
+def test_a_moved_probe_takes_each_montages_insertion_and_area(daemon_module, prefix, tmp_path_factory):
+    """Section 4.7: the probe moves after run 1 with no restart, so one
+    SpikeGLX file spans the move, and each montage's file carries the
+    insertion, and the area, of the position over its own runs."""
+    from wl_preproc.nwb.gather import gather
 
-    _recipe, key = _session(tmp_path_factory, subject="pnwb3", session_id="2025-06-24_01", probe_serial="19011110017")
+    serial = new_serial()
+    _recipe, key = _new_session(tmp_path_factory, probe_serial=serial)
     daemon_module.run_once(prefix=prefix)
-    activation = _canonical(daemon_module, prefix, key, "pnwb3-k1", [
-        {"serial": "19011110017", "insertion_number": 1, "target": _AIM},
-        {"serial": "19011110017", "insertion_number": 2}])
+    _positioned(daemon_module, prefix, key, [
+        _position(serial, 1, before_t0(key), ended_at=before_t0(key, 0), end_kind="moved", ended_after_run=1),
+        _position(serial, 2, before_t0(key, 0), inserted_after_run=1)])
+    probes = [{"serial": serial, "insertion_number": 1, "target": _AIM},
+              {"serial": serial, "insertion_number": 2, "target": _V1}]
 
-    result = build(activation, tmp_path_factory.mktemp("nwb-twice"))
+    for montage_id, expected in ((1, (1, "target", "V4d")), (2, (2, "target", "V1"))):
+        data = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m{montage_id}", probes,
+                                 montage_id=montage_id))
+        assert [(probe["insertion_number"], probe["area_from"], probe["area"]) for probe in data.probes] == [
+            expected]
+        assert [len(probe["electrodes"]) for probe in data.probes] == [4]
+        assert not [note for note in data.probe_notes if "reported for insertions" in note]
 
-    assert result.status == "written", (result.reason, result.findings)
-    (probe,) = result.description["probes"]
-    assert (probe["insertion_number"], probe["area_from"], probe["n_electrodes"]) == (None, "unknown", 4)
-    assert ("probe 19011110017 is reported for insertions 1 and 2, and which segments each covers is not known, "
-            "so neither is joined and its area is unknown") in result.description["notes"]
+
+def test_a_recorded_probe_without_a_position_is_unknown_and_says_why(daemon_module, prefix, tmp_path_factory):
+    """Three probes in one SpikeGLX file: `a` is withdrawn after run 1, `b`
+    moves after run 1, and `c` is named by no position. Montage 2's file
+    lists each, and says why `a` and `c` have no insertion and `b` no area:
+    no request reported it."""
+    from wl_preproc.nwb.gather import gather
+
+    a, b, c = new_serial(), new_serial(), new_serial()
+    _recipe, key = _new_session(tmp_path_factory, probe_serial=a,
+                                extra_probes=[{"serial": b, "part_number": "NP1032", "bank": 1}, {"serial": c}])
+    daemon_module.run_once(prefix=prefix)
+    _positioned(daemon_module, prefix, key, [
+        _position(a, 1, before_t0(key), ended_at=before_t0(key, 0), end_kind="withdrawn", ended_after_run=1),
+        _position(b, 2, before_t0(key), ended_at=before_t0(key, 0), end_kind="moved", ended_after_run=1),
+        _position(b, 3, before_t0(key, 0), inserted_after_run=1)])
+
+    data = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m2", [], montage_id=2))
+
+    assert [(probe["serial"], probe["insertion_number"], probe["area_from"], len(probe["electrodes"]))
+            for probe in data.probes] == [(b, 3, "unknown", 4), (a, None, "unknown", 0), (c, None, "unknown", 0)]
+    assert data.probe_notes == [
+        f"probe {a} holds no position over montage 2's runs, so its insertion and area are unknown",
+        f"probe {b} (insertion 3) has no report from wl.works, so its area is unknown",
+        f"probe {c} is named by no position from wl.works, so its insertion and area are unknown"]
+
+
+def _shared_sentence(*groups):
+    return " Electrodes it shares with other montages are sorted in shared groups: " + "; ".join(groups) + "."
+
+
+def test_a_canonical_names_the_shared_groups_over_its_montage(daemon_module, prefix, tmp_path_factory):
+    """Section 4.7 and plan decision D16: `other` moves after run 1, so the
+    stationary probe's four electrodes are shared by montages 1 and 2, in
+    group 1. Each canonical's description names it, last; a derivative's
+    does not."""
+    from wl_preproc.nwb.gather import gather
+
+    serial, other = new_serial(), new_serial()
+    _recipe, key = _new_session(tmp_path_factory, probe_serial=serial,
+                                extra_probes=[{"serial": other, "part_number": "NP1032", "bank": 1}])
+    daemon_module.run_once(prefix=prefix)
+    _positioned(daemon_module, prefix, key, [
+        _position(serial, 1, before_t0(key)),
+        _position(other, 2, before_t0(key), ended_at=before_t0(key, 0), end_kind="moved", ended_after_run=1),
+        _position(other, 3, before_t0(key, 0), inserted_after_run=1)])
+    sentence = _shared_sentence(f"group 1 (probe {serial}, montages 1, 2, 4 electrodes)")
+
+    for montage_id in (1, 2):
+        data = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m{montage_id}", [],
+                                 montage_id=montage_id))
+        assert data.session["description"].endswith(sentence), data.session["description"]
+    derivative = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-d1", [], run_numbers=[1]))
+    assert "shared groups" not in derivative.session["description"]
+
+
+def test_a_group_of_a_probe_with_no_channel_map_shares_every_channel(daemon_module, prefix, tmp_path_factory):
+    """Two Intan probes: `R-b` moves after run 1, so `R-a`, whose channels
+    this host reads no map for, shares every channel over montages 1 and 2."""
+    from tests.positions import land
+    from wl_preproc.nwb.gather import gather
+
+    session = new_animal().session()
+    key = land(tmp_path_factory, systems=("syncbox", "rhs"), subject=session.subject,
+               session_id=session.session_id, session_datetime=session.session_datetime)
+    daemon_module.run_once(prefix=prefix)
+    _positioned(daemon_module, prefix, key, [
+        _position("R-a", 1, before_t0(key)),
+        _position("R-b", 2, before_t0(key), ended_at=before_t0(key, 0), end_kind="moved", ended_after_run=1),
+        _position("R-b", 3, before_t0(key, 0), inserted_after_run=1)])
+
+    data = gather(_canonical(daemon_module, prefix, key, f"{key['subject']}-m1", []))
+
+    assert data.session["description"].endswith(
+        _shared_sentence("group 1 (probe R-a, montages 1, 2, every channel)")), data.session["description"]

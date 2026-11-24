@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.schema.test_nwb_probes import _canonical, _session
+from tests.schema.test_nwb_probes import _canonical, _position_each_probe, _session
 
 
 @pytest.fixture(scope="module")
@@ -35,6 +35,7 @@ def test_the_description_names_a_repeated_number_and_one_too_large(daemon_module
     _recipe, key = _session(tmp_path_factory, _no_task_file, subject="rtnwb1", session_id="2025-06-28_01",
                             trial_numbers=[1, 2, 2, 40000])
     daemon_module.run_once(prefix=prefix)
+    _position_each_probe(daemon_module, prefix, key)
     activation = _canonical(daemon_module, prefix, key, "rtnwb1-k1", [])
 
     result = build(activation, tmp_path_factory.mktemp("nwb-trials"))

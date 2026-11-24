@@ -28,11 +28,13 @@ def daemon_module(dj_conn, prefix):
 
 def _request(key, idempotency_key, montage, runs, run_numbers=None):
     """wl.works' request naming `montage`, which is stored for the session first as this host would list it
-    (`tests/positions.py::seed_montage`): call it after the session's last daemon pass before `accept()`."""
+    (`tests/positions.py::seed_montage`): call it after the session's last daemon pass before `accept()`. The
+    session records no ephys, so the daemon derived it `not_needed`, and the derivation keeps that status."""
     from tests.positions import seed_montage
     from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
+    from wl_preproc.schema import core
 
-    seed_montage(key, montage)
+    seed_montage(key, montage, status=(core.MontageDerivation & key).fetch1("positions_status"))
     selection = {"session_datetime": key["session_datetime"].replace(tzinfo=datetime.UTC),
                  "montage_id": montage["montage_id"]}
     if run_numbers is not None:

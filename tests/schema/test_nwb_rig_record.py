@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.schema.test_nwb_probes import _canonical
+from tests.schema.test_nwb_probes import _canonical, _position_each_probe
 from tests.schema.test_spikeglx_restart import _session as _restart_session
 
 _MEMBER = {"kind": "member", "name": "Jay Dubya", "account": "acct-rk1", "issuer": "https://wl.works",
@@ -39,6 +39,7 @@ def recorded(daemon_module, prefix, tmp_path_factory):
             "controls": [{"trial": 2}, {"trial": 2, "kind": "note", "event_code": None, "detail": {"note": "ok"}},
                          {"trial": 4, "kind": "reward", "event_code": 4134, "detail": {"ml": 0.1}, "by": _MEMBER}]})
     daemon_module.run_once(prefix=prefix)
+    _position_each_probe(daemon_module, prefix, key)
     canonical = _canonical(daemon_module, prefix, key, "rknwb1-k1", [])
     derivative = _canonical(daemon_module, prefix, key, "rknwb1-k2", [], run_numbers=[1])
     return recipe, canonical, derivative
