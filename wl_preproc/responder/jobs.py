@@ -491,8 +491,8 @@ def _check_probe_runs(probes: list[ProbeEntry], probe_runs, file_runs: list[int]
 
 def _check_shared_probe(group: dict, probes: list[ProbeEntry], probe_runs) -> list[int]:
     """The runs the group's one probe is sorted on, from `selection.probe_runs`, once `metadata.probes` is exactly
-    that probe's entry, at the group's insertion, and `selection.probe_runs` states its runs alone (design spec
-    `2026-11-24-montages-design.md` section 4.6)."""
+    that probe's entry, at the group's insertion, and `selection.probe_runs` states its runs alone, at least one
+    (design spec `2026-11-24-montages-design.md` section 4.6)."""
     serial, number = group["serial"], group["insertion_number"]
     its = f"group {group['group_id']} is probe {serial} at insertion_number {number}"
     if len(probes) != 1:
@@ -502,11 +502,20 @@ def _check_shared_probe(group: dict, probes: list[ProbeEntry], probe_runs) -> li
     if (probe.serial, probe.insertion_number) != (serial, number):
         raise ValueError(f"metadata.probes names probe {probe.serial} at insertion_number {probe.insertion_number}, "
                          f"and {its}")
+    # One activation per group, never superseded (plan decision D11): one with no run would hold the group's sort
+    # for good with nothing to sort, so a missing or empty list is refused.
+    none_named = (f"group {group['group_id']}: a shared request names at least one of its sortable runs for probe "
+                  f"{serial} in selection.probe_runs")
+    if probe_runs is None or probe_runs == {}:
+        raise ValueError(none_named)
     if not isinstance(probe_runs, dict) or sorted(probe_runs) != [serial]:
         named = sorted(probe_runs) if isinstance(probe_runs, dict) else probe_runs
         raise ValueError(f"selection.probe_runs names {named!r}, and group {group['group_id']} is probe {serial}: a "
                          "shared request states its one probe's runs")
-    return _run_numbers(probe_runs[serial], name=f"selection.probe_runs[{serial!r}]")
+    runs = _run_numbers(probe_runs[serial], name=f"selection.probe_runs[{serial!r}]")
+    if not runs:
+        raise ValueError(none_named)
+    return runs
 
 
 def _check_shared_runs(session_key: dict, group: dict, asserted: list[RunEntry],

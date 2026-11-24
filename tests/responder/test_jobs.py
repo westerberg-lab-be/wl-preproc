@@ -1596,3 +1596,20 @@ def test_a_shared_request_on_a_group_derived_again_while_checked_is_a_422(landed
         f"the montages of {_session_of(key)} were derived again while this request was checked: positions_status "
         "is placed; rebuild the request from a fresh GET /sessions")
     assert _nothing_written(key, "jbshrace-k1")
+
+
+@pytest.mark.parametrize("subject, probe_runs", [("jbshe01", {"S1": []}), ("jbshe02", None)])
+def test_a_shared_request_names_at_least_one_run(landed_session, prefix, subject, probe_runs):
+    """D11: a group has one shared activation, never superseded, so one with no run would hold the group's sort for
+    good with nothing to sort. A missing or empty list for its probe is a 422, and writes nothing."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _shared_session(landed_session, subject, prefix=prefix)
+    job = _shared_job(key, f"{subject}-k1", probe_runs=probe_runs)
+    if probe_runs is None:
+        del job.selection["probe_runs"]
+    with pytest.raises(ValueError) as refused:
+        accept(job, prefix=prefix)
+    assert str(refused.value) == ("group 1: a shared request names at least one of its sortable runs for probe S1 in "
+                                  "selection.probe_runs")
+    assert _nothing_written(key, f"{subject}-k1")
