@@ -77,7 +77,8 @@ A new request, **`PUT /positions`**, carries the *whole* set of one session's pr
   minute `m` stands for `[m, m + 60 s)`, as wl.works' `deriveMontages` reads it; one with seconds stands for that
   second. This host places them on session time through `timebase.ClockReference`'s t = 0 (stored by the
   wl.works-facing piece).
-- `*_after_run` is the gap a person named when the time alone is ambiguous (§4.2); it overrides the time.
+- `*_after_run` is the gap a person named when the time alone is ambiguous (§4.2): the gap after that run, `0` for
+  the gap before the first run. It chooses among the gaps the time touches, as in wl.works.
 - **The highest `positions_seq` wins, until the session's first accepted job request** (wl.works' objection O1,
   2026-11-24: two quick edits can put two requests in flight, and arrival order is not edit order). `positions_seq` is
   wl.works' own revision counter for that session's positions. A request whose seq is below the stored one is a `409`
@@ -106,11 +107,15 @@ Each position's start and end is an **edge**, placed in a gap between runs (the 
 (§4.1), widened by 60 s each side only when t = 0 came from the manifest (`t0_source == "manifest"`, up to 60 s off);
 with t = 0 from the barcodes, the rig's clock or the NI's metadata it is not widened. Until t = 0 is stored, no edge
 is placed (`positions_status` stays `waiting`).
-- **Placed:** the window touches exactly one gap and no run. Or a person named the gap with `*_after_run`.
-- **Ambiguous:** the window touches more than one gap. Flag `position_edge_ambiguous` (run numbers of the candidate
+The rule is wl.works' `place()` (wl-works `75c78af5`, `src/features/recording/montage.ts`), kept exactly:
+- **Inside a run:** the window lies wholly inside one run.
+- **Placed:** otherwise, the window touches exactly one gap, even where it also overlaps a run's start or end (a
+  minute typed near a run's end means the gap after it). Or it touches several and a person named one of them with
+  `*_after_run`. A named gap the window does not touch is a contradiction: flagged `position_edge_ambiguous`, never
+  trusted.
+- **Ambiguous:** the window touches more than one gap and none is named. Flag `position_edge_ambiguous` (run numbers of the candidate
   gaps in the message); **no montage is listed for the session** until a person names the gap.
-- **Inside a run:** the window touches one run and no gap, or one run and one gap's edge only by overlap with
-  the run. The edge is placed in the gap *after* that run, the run is left out
+- **For an edge inside a run**, the edge is placed in the gap *after* that run, the run is left out
   of that probe's sortable runs (§4.4), and flag `position_edge_inside_run` names the run and the probe. Nothing is
   guessed: no part of that run is used for that probe either side of the move.
 - A probe's first insertion and its last withdrawal split nothing (wl.works' P11).
