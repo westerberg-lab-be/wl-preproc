@@ -129,12 +129,20 @@ status:
     inputs is placed over its whole recording by that copy, its lag measured
     against the barcodes where the box covered it. Its camera half
     (amendment 83) waits on the camera package writing each video file's
-    start and end wall times. Next, our reader of
+    start and end wall times. The piece facing wl.works is merged
+    (b75cc85; docs/handoffs/2026-11-24-wl-works-requests.md): runs marked
+    bad with a reason, the animal's nickname, the task's hash on listed
+    runs, paged listings, t = 0's wall time, runs that end before they
+    start left out and flagged, and the rig counted as an actor. Next,
+    montages recognized here and the electrodes they share (spec
+    docs/superpowers/specs/2026-11-24-montages-design.md, building); then
+    our reader of
     wl-xcon's console settings (XC-513, accepted 2026-11-18); then its
     pop-out revision (XC-543); then part 2, the bridges; then lab time,
     part 4, once wl-xcon writes its words and clock files.
     Fine-tuning U'n'Eye waits for hand-labelled lab data.
-    Done: the eye placed by its analog copy (8fd6f26). Before it, part
+    Done: the piece facing wl.works (b75cc85). Before it, the eye placed
+    by its analog copy (8fd6f26). Before it, part
     3b-3, a partial sync box (291bbea). Before it, wl-sync's
     notes 7 and 8 (c31dd89). Before it, part 3b-2,
     Intan by strobes (2c35577). Before it, part 3b-1,
@@ -311,8 +319,9 @@ status:
   # Was `2c35577` until wl-sync's notes 7-8 merge `c31dd89` on 2026-11-20.
   # Was `c31dd89` until part 3b-3's merge `291bbea` on 2026-11-21.
   # Was `291bbea` until the analog copy's merge `8fd6f26` on 2026-11-22.
+  # Was `8fd6f26` until the wl.works-facing piece's merge `b75cc85` on 2026-11-24.
   # Quoted: an all-digit SHA is otherwise read by YAML as an integer.
-  describes: "8fd6f26"
+  describes: "b75cc85"
 
 runs_on: [serv]
 # The pipeline is deployed to the preprocessing server, but it is written and

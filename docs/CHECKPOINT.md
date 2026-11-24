@@ -1,10 +1,21 @@
 # Where this build actually is
 
-**Last updated 2026-11-22**, describing `main` at `8fd6f26`: the merge of `feat/eye-analog-copy`, the eye tracker
-placed by its analog copy on the NI (`handoffs/2026-11-21-eye-by-analog-copy.md`). CI read off `8fd6f26` is green on
-both interpreters, 3405 passed on each with 39 skipped and 1 xfailed, and the manifest check is green
-(`gh run view 45028287108`, `45028287074`). Since the move to `westerberg-lab-be`, CI's jobs wait for one another.
-- **The eye placed by its analog copy (spec amendments 77-86):**
+**Last updated 2026-11-24**, describing `main` at `b75cc85`: the merge of `feat/wl-works-requests`, the piece facing
+wl.works (`handoffs/2026-11-24-wl-works-requests.md`). CI read off `b75cc85` is green on both interpreters, 3484
+passed on each with 39 skipped and 1 xfailed (`gh run view 45448653376`).
+- **The piece facing wl.works:**
+  - A request can mark a run bad with a reason, and give the animal's nickname (stored, and stated in the NWB
+    subject). Listed runs carry the task's hash.
+  - `GET /sessions` and `GET /nwb` page with `?since=&limit=`.
+  - t = 0's wall time is stored once (`timebase.ClockReference`) and listed with its source.
+  - A run, block or SpikeGLX file that ends before it starts is left out and flagged `ends_before_start`.
+  - The rig's own pauses are counted apart from a person's.
+  - The full suite with every reference set passed 3520 on each interpreter at `afdaac7`.
+  - wl.works is told the merge commit and re-vendors three schema files.
+- **Next:** montages recognized here, with the electrodes they share sorted across them (the requester's choice,
+  2026-11-24; spec `superpowers/specs/2026-11-24-montages-design.md`, building on `feat/montages`). Then wl-xcon's
+  console-settings reader (XC-513), the pop-out revision reader (XC-543), and part 2's bridges.
+- **The eye placed by its analog copy (spec amendments 77-86; `8fd6f26`, CI green, run 45028287108, 3405 on each):**
   - Under the NI, an OpenIrisDPI file whose copy is on one of the NI's analog inputs is placed over its whole
     recording by that copy (`time_source` `analog`), so a session whose eye file holds no barcode can be tier N.
   - The copy's lag is measured against the barcodes where the box covered the file, carried from the rig's last
@@ -15,8 +26,6 @@ both interpreters, 3405 passed on each with 39 skipped and 1 xfailed, and the ma
   - The full suite with every reference set passed 3441 on each interpreter at `170c5ed`.
   - wl.works is told, and has confirmed that nothing in its 20b-1a reader breaks.
   - Its camera half (amendment 83) waits on the camera package.
-- **Next:** wl-xcon's console-settings reader (XC-513, with XC-529's withdrawn rows), then the pop-out revision
-  reader (XC-543), then part 2's bridges, then the piece facing wl.works.
 - **Part 3b-3 (`291bbea`, CI green, run 44906246212, 3323 on each):**
   - Under the NI, the NI's own barcodes are the barcode reference. The sync box, the eye tracker and the cameras
     are placed by them over the part the box covered (its covered span, stored on `TimingProvenance`).
