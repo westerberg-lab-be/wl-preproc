@@ -124,7 +124,7 @@ def build_entry(facts: SessionFacts) -> dict:
             })
         runs.append({
             "run_number": run["run_number"], "task_code": run["task_type"], "task": record.get("task"),
-            "start_s": start, "end_s": stop, "closed": bool(run["closed"]),
+            "task_hash": record.get("task_hash"), "start_s": start, "end_s": stop, "closed": bool(run["closed"]),
             "stopped_because": record.get("stopped_because"), "stop_kind": record.get("stop_kind"),
             "calibration": facts.run_calibrations.get(run["run_number"]),
             "segments": [segment["segment_id"] for segment in spanned], "blocks": listed_blocks,

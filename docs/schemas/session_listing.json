@@ -394,6 +394,18 @@
         "task_code": {
           "title": "Task Code",
           "type": "integer"
+        },
+        "task_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Hash"
         }
       },
       "required": [

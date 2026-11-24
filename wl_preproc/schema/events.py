@@ -638,7 +638,8 @@ def populate_session(key: dict, session_dir: Path) -> None:
     measured = {row["run_number"] for row in run_rows}
     record_rows = [
         {**session_key, "run_number": run.number, "task": _clip(run.task, 255),
-         "stopped_because": _clip(run.stopped_because, 1024), "stop_kind": _clip(run.stop_kind, 64)}
+         "stopped_because": _clip(run.stopped_because, 1024), "stop_kind": _clip(run.stop_kind, 64),
+         "task_hash": _clip(run.task_hash, 255)}
         for run in (rig_runs.runs if rig_runs is not None else ())
         if run.number in measured
     ]

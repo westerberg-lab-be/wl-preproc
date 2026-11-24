@@ -603,7 +603,8 @@ Authorization: Bearer <token>
     eye-tracker file whose analog copy on the NI was found but refused and which no barcode placed, or an eye
     file that is not the one its copy placed (another, or one changed since): it makes the session `D`);
   - `runs`, measured from the recording's `RUN_START` (`0x8006`) and `RUN_END` (4): `run_number`
-    (wl-xcon's `run_in_session`), `task_code`, `task` (wl-xcon's name for it), `start_s` and
+    (wl-xcon's `run_in_session`), `task_code`, `task` (wl-xcon's name for it), `task_hash` (the content hash of the task file it ran, `sha256:` and
+    its digest, from its start row, or null where the rig named none or named a path), `start_s` and
     `end_s` on the recording's clock, `closed`, wl-xcon's `stopped_because` and `stop_kind`,
     `calibration` (the display calibration the run ran against, from its start row in wl-xcon's
     record, or null), `segments` (the `segment_id`s of the SpikeGLX segments it spans), and `blocks`;

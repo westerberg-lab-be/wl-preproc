@@ -167,6 +167,7 @@ class RunRecord(dj.Manual):
     task = null            : varchar(255)   # the start row's task
     stopped_because = null : varchar(1024)  # the end row's; null when its process was killed
     stop_kind = null       : varchar(64)    # the end row's, e.g. completed, operator, limit
+    task_hash = null       : varchar(255)   # the start row's `versions.task` where it is a content hash
     """
 
 

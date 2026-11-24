@@ -299,3 +299,15 @@ def test_a_session_read_before_its_training_records_were_kept_lists_zeros():
 
     entry = build_entry(_facts(rig_session={"session_kind": "training"}))
     assert entry["training_records"] == {"parameter_changes": 0, "pauses": 0, "manual_rewards": 0}
+
+
+def test_a_listed_run_carries_its_task_hash():
+    from wl_preproc.listing.entry import build_entry
+
+    digest = "sha256:" + "cd34" * 16
+    records = {1: {"task": "rf_map", "stopped_because": None, "stop_kind": None, "task_hash": digest},
+               2: {"task": "fixation", "stopped_because": None, "stop_kind": None, "task_hash": None}}
+    first, second = build_entry(_facts(records=records))["runs"]
+    assert (first["task_hash"], second["task_hash"]) == (digest, None)
+    (without,) = [run for run in build_entry(_facts(records={}))["runs"] if run["run_number"] == 1]
+    assert without["task_hash"] is None

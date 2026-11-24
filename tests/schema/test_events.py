@@ -966,3 +966,27 @@ def test_populate_session_keeps_the_rigs_display_setup(events_activated, dj_conn
     assert (core.SessionSetup & key).fetch1("view", "half_field_h_deg", "half_field_v_deg") == (
         "direct", *RIG_SETUP["half_field_deg"])
     assert len(core.SessionSetup & bare) == 0
+
+
+def test_the_run_record_keeps_the_task_hash(events_activated, dj_conn, tmp_path):
+    """A start row whose `versions.task` is a content hash stores it; one
+    naming a path (wl-xcon before its engine build C1) stores null."""
+    import json
+
+    from wl_preproc.schema import core
+
+    digest = "sha256:" + "ab12" * 16
+
+    def name_the_versions(session_dir):
+        path = session_dir / "xcon" / "runs.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        starts = [row for row in rows if "versions" in row]
+        starts[0]["versions"]["task"] = digest
+        starts[1]["versions"]["task"] = "tasks/rf_map.py"
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+    _recipe, key = _populate_generated(tmp_path, "slhash1", datetime.datetime(2027, 8, 1, 9, 0),
+                                       mutate=name_the_versions, runs=True,
+                                       rig_record=_rig_record(fields=True))
+    records = (core.RunRecord & key).to_dicts(order_by="run_number")
+    assert [(row["run_number"], row["task_hash"]) for row in records] == [(1, digest), (2, None)]

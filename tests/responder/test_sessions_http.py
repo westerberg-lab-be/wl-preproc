@@ -67,3 +67,21 @@ def test_a_failure_behind_it_is_a_clean_500(serve_sessions):
 
     status, body = _request(f"{serve_sessions(broken)}/sessions", method="GET", token=TOKEN)
     assert (status, json.loads(body)) == (500, {"error": "RuntimeError: the database went away"})
+
+
+def test_get_sessions_lists_the_task_hash(serve_sessions, dj_conn, prefix, tmp_path_factory):
+    """One landed session, through HTTP: each run lists the hash of the task
+    file it ran (the synthetic rig's start rows carry one)."""
+    from tests.schema.test_spikeglx_restart import _session
+    from wl_preproc import daemon
+    from wl_preproc.responder.sessions import list_sessions
+
+    daemon.activate_all(prefix=prefix)
+    _recipe, key = _session(tmp_path_factory, subject="slhttp1", session_id="2025-08-01_01", runs=True,
+                                 rig_record={"session_kind": "recording", "fields": True})
+    daemon.run_once(prefix=prefix)
+    base = serve_sessions(lambda since: list_sessions(since, prefix=prefix))
+    status, body = _request(f"{base}/sessions", method="GET", token=TOKEN)
+    assert status == 200
+    (entry,) = [entry for entry in json.loads(body)["sessions"] if entry["subject"] == key["subject"]]
+    assert [run["task_hash"] for run in entry["runs"]] == ["sha256:synthetic", "sha256:synthetic"]

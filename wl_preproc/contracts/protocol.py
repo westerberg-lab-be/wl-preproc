@@ -492,6 +492,9 @@ class ListedRun(BaseModel):
     run_number: int
     task_code: int
     task: str | None
+    # The content hash of the task file the run ran (`sha256:` and its digest),
+    # from its start row; null where the rig named none, or named a path.
+    task_hash: str | None = None
     start_s: float
     end_s: float
     closed: bool
