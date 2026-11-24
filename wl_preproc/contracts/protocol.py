@@ -415,13 +415,19 @@ ListedFlagCode = Literal[
     "task_unknown",
     "block_outside_runs",
     "rig_record_problem",
+    "ends_before_start",
 ]
 
 
 class ListedFlag(BaseModel):
     """A fact wl.works shows beside the session as a hint. None blocks
     anything here. `run_number` and `block_number` say where, when it is one
-    run or one block."""
+    run or one block; `segment_id` when it is one SpikeGLX file.
+
+    `ends_before_start` is the one flag that means something was withheld: a
+    run, block or file whose end comes before its start is left out of the
+    entry, and this flag names it, with both its times, in its stead (design
+    spec `2026-11-24-wl-works-requests-design.md` section 4.5)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -429,6 +435,19 @@ class ListedFlag(BaseModel):
     message: str
     run_number: int | None = None
     block_number: int | None = None
+    segment_id: str | None = None
+
+
+def _in_order(item: str, start_s: float, end_s: float) -> None:
+    """The backstop behind `listing/entry.py::build_entry`, which leaves out
+    what ends before it starts by `listing/order.py`'s same rule, so this
+    cannot fire from it. Equal start and end is allowed. A
+    `PydanticCustomError`, for the reason `MetadataBundle._blocks_are_retired`
+    gives."""
+    if end_s < start_s:
+        raise PydanticCustomError(
+            "ends_before_start", "{item} ends at {end_s} s, before its start at {start_s} s",
+            {"item": item, "start_s": start_s, "end_s": end_s})
 
 
 class ListedProbe(BaseModel):
@@ -463,6 +482,11 @@ class ListedSegment(BaseModel):
     end_s: float
     probes: list[ListedProbe] | None
 
+    @model_validator(mode="after")
+    def _ends_after_it_starts(self) -> ListedSegment:
+        _in_order(f"file {self.segment_id}", self.start_s, self.end_s)
+        return self
+
 
 class ListedBlock(BaseModel):
     """A measured block: consecutive trials under one block type, inside a
@@ -480,6 +504,11 @@ class ListedBlock(BaseModel):
     end_s: float
     closed: bool | None
     n_trials: int
+
+    @model_validator(mode="after")
+    def _ends_after_it_starts(self) -> ListedBlock:
+        _in_order(f"block {self.block_number}", self.start_s, self.end_s)
+        return self
 
 
 class ListedRun(BaseModel):
@@ -506,6 +535,11 @@ class ListedRun(BaseModel):
     calibration: str | None
     segments: list[str]
     blocks: list[ListedBlock]
+
+    @model_validator(mode="after")
+    def _ends_after_it_starts(self) -> ListedRun:
+        _in_order(f"run {self.run_number}", self.start_s, self.end_s)
+        return self
 
 
 class ListedCalibration(BaseModel):

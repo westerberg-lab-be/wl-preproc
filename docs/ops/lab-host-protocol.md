@@ -638,7 +638,8 @@ Authorization: Bearer <token>
     carried them (2026-10-18) lists zeros;
   - `clock`, which clock kept the session's time: `syncbox`, `nidq` (built since part
     3b-1) or `lab` (part 4, not built yet), or null until the daemon has chosen it;
-  - `flags`, each a `code`, a `message`, and the `run_number` or `block_number` it is about:
+  - `flags`, each a `code`, a `message`, and the `run_number`, `block_number` or `segment_id` (a
+    SpikeGLX file) it is about:
     `waiting_for_run_markers` (no measured run yet), `repeated_run_number` and
     `repeated_block_number` (a crash restart before wl-xcon's XC-026; only the first is
     listed), `run_without_block`, `bank_change_in_run`, `block_type_unknown`, `task_unknown`,
@@ -646,7 +647,10 @@ Authorization: Bearer <token>
     `rig_record_problem` (what wl-xcon's record could not supply, each naming its file, line by
     line: `runs.jsonl`, `config.json`, `warnings.jsonl`, `parameter_changes.jsonl` or
     `controls.jsonl`, the last two also when a count of codes disagrees or rows cannot be timed; or
-    the run record's absence; a problem stored before 2026-10-14 names no file).
+    the run record's absence; a problem stored before 2026-10-14 names no file), and
+    `ends_before_start`: a run, block or file whose end comes before its start, **left out of the
+    entry** and named here with both its times (a block with its run's number, when it lies in one).
+    It is the one flag that means something was withheld. Equal start and end is listed.
     **None of them blocks anything here.**
 
 ---

@@ -415,3 +415,32 @@ def test_a_request_without_the_new_fields_reads_as_before():
         _bundle(runs=[_run_entry()], subject_details={"species": "Macaca mulatta"}))
     assert bundle.runs[0].marked_bad is False and bundle.runs[0].bad_reason is None
     assert bundle.subject_details.nickname is None
+
+
+# --- A listed run, block or file never ends before it starts. ---------------------------------------
+# Design spec `2026-11-24-wl-works-requests-design.md` section 4.5: the backstop behind `build_entry`.
+
+
+def test_listed_items_refuse_an_end_before_the_start():
+    from wl_preproc.contracts.protocol import ListedBlock, ListedRun, ListedSegment
+
+    items = {
+        ListedSegment: {"segment_id": "a.nidq.bin", "probes": None},
+        ListedRun: {"run_number": 3, "task_code": 0, "task": None, "closed": True, "stopped_because": None,
+                    "stop_kind": None, "calibration": None, "segments": [], "blocks": []},
+        ListedBlock: {"block_number": 4, "block_in_run": 1, "block_type": None, "closed": None, "n_trials": 0},
+    }
+    for model, fields in items.items():
+        with pytest.raises(ValidationError, match="ends at 4.999 s, before its start at 5.0 s") as excinfo:
+            model.model_validate({**fields, "start_s": 5.0, "end_s": 4.999})
+        assert excinfo.value.errors()[0]["type"] == "ends_before_start"
+        assert model.model_validate({**fields, "start_s": 5.0, "end_s": 5.0}).end_s == 5.0
+        assert model.model_validate({**fields, "start_s": 5.0, "end_s": 6.0}).end_s == 6.0
+
+
+def test_a_listed_flag_may_name_a_file():
+    from wl_preproc.contracts.protocol import ListedFlag
+
+    flag = ListedFlag.model_validate({"code": "ends_before_start", "message": "m", "segment_id": "a.nidq.bin"})
+    assert (flag.segment_id, flag.run_number, flag.block_number) == ("a.nidq.bin", None, None)
+    assert ListedFlag.model_validate({"code": "task_unknown", "message": "m"}).segment_id is None

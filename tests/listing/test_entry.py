@@ -311,3 +311,78 @@ def test_a_listed_run_carries_its_task_hash():
     assert (first["task_hash"], second["task_hash"]) == (digest, None)
     (without,) = [run for run in build_entry(_facts(records={}))["runs"] if run["run_number"] == 1]
     assert without["task_hash"] is None
+
+
+# --- What ends before it starts is left out, flagged, and breaks no page. ---------------------------
+# Design spec `2026-11-24-wl-works-requests-design.md` section 4.5.
+
+
+def _where(flags):
+    return [(flag["code"], flag["run_number"], flag["block_number"], flag["segment_id"]) for flag in flags]
+
+
+def test_a_reversed_file_is_left_out_and_flagged():
+    from wl_preproc.listing.entry import build_entry
+
+    reversed_file = {"segment_id": "200.nidq.bin", "start_s": 15.0, "end_s": 14.0}
+    entry = build_entry(_facts(segments=[*_facts().segments, reversed_file]))
+    assert [segment["segment_id"] for segment in entry["segments"]] == ["100.nidq.bin"]
+    assert [run["segments"] for run in entry["runs"]] == [["100.nidq.bin"], ["100.nidq.bin"]]
+    assert _where(entry["flags"]) == [("ends_before_start", None, None, "200.nidq.bin")]
+    assert entry["flags"][0]["message"] == (
+        "file 200.nidq.bin ends at 14.000 s, before its start at 15.000 s: left out of this listing")
+
+
+def test_a_reversed_run_is_left_out_and_flagged():
+    """Its block starts between its stop and its start, so lies in no run
+    that is listed: the run's blocks are not dropped with it."""
+    from wl_preproc.listing.entry import build_entry
+
+    runs = [_facts().runs[0], {"run_number": 2, "task_type": 0, "run_start_time": 20.0, "run_stop_time": 12.0,
+                               "closed": 1}]
+    entry = build_entry(_facts(runs=runs))
+    assert [run["run_number"] for run in entry["runs"]] == [1]
+    assert _where(entry["flags"]) == [("ends_before_start", 2, None, None), ("block_outside_runs", None, 2, None)]
+    assert entry["flags"][0]["message"] == (
+        "run 2 ends at 12.000 s, before its start at 20.000 s: left out of this listing")
+
+
+def test_a_reversed_block_is_left_out_and_flagged():
+    """Its run's other blocks are numbered without it, as the file's
+    `_blocks` counts only the blocks it holds. One in no run names no run,
+    and is not also flagged as outside the runs."""
+    from wl_preproc.listing.entry import build_entry
+
+    blocks = [{"block_id": 1, "start_s": 1.004, "stop_s": 3.0}, {"block_id": 3, "start_s": 3.5, "stop_s": 3.2},
+              {"block_id": 5, "start_s": 4.0, "stop_s": 9.9}, *_facts().blocks[1:],
+              {"block_id": 7, "start_s": 25.0, "stop_s": 24.0}]
+    attributes = {number: {"closed": "1", "block_type": "Bt1"} for number in (1, 2, 3, 5, 7)}
+    entry = build_entry(_facts(blocks=blocks, block_attributes=attributes, strobed_blocks=[1, 2, 3, 5, 7]))
+    assert [(block["block_number"], block["block_in_run"]) for block in entry["runs"][0]["blocks"]] == [
+        (1, 1), (5, 2)]
+    assert [block["block_number"] for block in entry["runs"][1]["blocks"]] == [2]
+    assert _where(entry["flags"]) == [("ends_before_start", 1, 3, None), ("ends_before_start", None, 7, None)]
+    assert [flag["message"] for flag in entry["flags"]] == [
+        "block 3 of run 1 ends at 3.200 s, before its start at 3.500 s: left out of this listing",
+        "block 7 ends at 24.000 s, before its start at 25.000 s: left out of this listing"]
+
+
+def test_a_run_whose_only_block_was_left_out_has_no_run_without_block_flag():
+    """It did not stop before its first trial, which is what that flag says."""
+    from wl_preproc.listing.entry import build_entry
+
+    blocks = [_facts().blocks[0], {"block_id": 2, "start_s": 12.004, "stop_s": 12.002}]
+    entry = build_entry(_facts(blocks=blocks))
+    assert entry["runs"][1]["blocks"] == []
+    assert _where(entry["flags"]) == [("ends_before_start", 2, 2, None)]
+
+
+def test_equal_times_are_listed():
+    from wl_preproc.listing.entry import build_entry
+
+    entry = build_entry(_facts(blocks=[_facts().blocks[0], {"block_id": 2, "start_s": 12.004, "stop_s": 12.004}],
+                               segments=[*_facts().segments, {"segment_id": "200.nidq.bin", "start_s": 21.5,
+                                                              "end_s": 21.5}]))
+    assert entry["flags"] == []
+    assert [block["block_number"] for block in entry["runs"][1]["blocks"]] == [2]
+    assert [segment["segment_id"] for segment in entry["segments"]] == ["100.nidq.bin", "200.nidq.bin"]

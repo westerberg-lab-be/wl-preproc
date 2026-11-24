@@ -13,6 +13,12 @@ it overlaps: runs and segments do not align, since a bank change needs a
 SpikeGLX restart and a run need not stop for one. A block's start and a
 run's are both doubles, as measured (`core.BlockTime`, `core.Run`), compared
 by `events/runs.py::starts_inside`, as the NWB builder compares them.
+
+**What ends before it starts is left out, and flagged** (design spec
+`2026-11-24-wl-works-requests-design.md` section 4.5): one such run, block or
+file would fail `SessionEntry`'s validation, and the page with it, for every
+session on it. `listing/order.py` holds the rule, and names what it leaves out
+for the NWB build too.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from pathlib import Path
 
 from wl_preproc.events.rigrecords import acts, change_fields
 from wl_preproc.events.runs import starts_inside
+from wl_preproc.listing import order
 
 from wl_preproc.contracts.protocol import SessionEntry
 
@@ -66,8 +73,10 @@ def _repeats(numbers: list[int]) -> list[tuple[int, int]]:
     return sorted((number, count) for number, count in collections.Counter(numbers).items() if count > 1)
 
 
-def _flag(code: str, message: str, run_number: int | None = None, block_number: int | None = None) -> dict:
-    return {"code": code, "message": message, "run_number": run_number, "block_number": block_number}
+def _flag(code: str, message: str, run_number: int | None = None, block_number: int | None = None,
+          segment_id: str | None = None) -> dict:
+    return {"code": code, "message": message, "run_number": run_number, "block_number": block_number,
+            "segment_id": segment_id}
 
 
 def build_entry(facts: SessionFacts) -> dict:
@@ -87,6 +96,37 @@ def build_entry(facts: SessionFacts) -> dict:
     for problem in facts.rig_problems:
         flags.append(_flag("rig_record_problem", f"the rig's record: {problem}"))
 
+    # What ends before it starts is left out, before any listed item is built.
+    # A dropped run's blocks are not dropped with it: none starts inside it
+    # (`starts_inside` needs start <= t <= stop), so each is outside the runs.
+    def reversed_segment(segment):
+        return order.ends_before_start(segment["start_s"], segment["end_s"])
+
+    def reversed_run(run):
+        return order.ends_before_start(run["run_start_time"], run["run_stop_time"])
+
+    def reversed_block(block):
+        return order.ends_before_start(block["start_s"], block["stop_s"])
+
+    ordered_runs = [run for run in sorted(facts.runs, key=lambda run: run["run_number"]) if not reversed_run(run)]
+    for segment in sorted(facts.segments, key=lambda segment: segment["start_s"]):
+        if reversed_segment(segment):
+            flags.append(_flag("ends_before_start", order.segment_message(
+                segment["segment_id"], segment["start_s"], segment["end_s"], where="listing"),
+                segment_id=segment["segment_id"]))
+    for run in sorted(facts.runs, key=lambda run: run["run_number"]):
+        if reversed_run(run):
+            flags.append(_flag("ends_before_start", order.run_message(
+                run["run_number"], run["run_start_time"], run["run_stop_time"], where="listing"),
+                run_number=run["run_number"]))
+    for block in sorted(facts.blocks, key=lambda block: block["start_s"]):
+        if reversed_block(block):
+            run_number = next((run["run_number"] for run in ordered_runs
+                               if starts_inside(block["start_s"], run["run_start_time"], run["run_stop_time"])), None)
+            flags.append(_flag("ends_before_start", order.block_message(
+                block["block_id"], run_number, float(block["start_s"]), float(block["stop_s"]), where="listing"),
+                run_number=run_number, block_number=block["block_id"]))
+
     probes_of = collections.defaultdict(list)
     for part in sorted(facts.census, key=lambda part: (part["segment_id"], part["stream"])):
         config = (part["electrode_config_hash"], part["probe_type"])
@@ -101,22 +141,25 @@ def build_entry(facts: SessionFacts) -> dict:
         {"segment_id": segment["segment_id"], "start_s": segment["start_s"], "end_s": segment["end_s"],
          "probes": probes_of[segment["segment_id"]] if segment["segment_id"] in facts.censused else None}
         for segment in sorted(facts.segments, key=lambda segment: segment["start_s"])
+        if not reversed_segment(segment)
     ]
 
     runs, in_a_run = [], set()
-    ordered_runs = sorted(facts.runs, key=lambda run: run["run_number"])
     for run in ordered_runs:
         start, stop = run["run_start_time"], run["run_stop_time"]
         record = facts.records.get(run["run_number"], {})
         spanned = [segment for segment in segments if segment["start_s"] < stop and segment["end_s"] > start]
-        blocks = sorted((block for block in facts.blocks if starts_inside(block["start_s"], start, stop)),
+        inside = sorted((block for block in facts.blocks if starts_inside(block["start_s"], start, stop)),
                         key=lambda block: block["start_s"])
+        # Numbered without the blocks left out, as the file's `_blocks` counts
+        # only the blocks it holds.
+        blocks = [block for block in inside if not reversed_block(block)]
         listed_blocks = []
-        in_a_run.update(block["block_id"] for block in blocks)
-        for order, block in enumerate(blocks, start=1):
+        in_a_run.update(block["block_id"] for block in inside)
+        for in_run, block in enumerate(blocks, start=1):
             attributes = facts.block_attributes.get(block["block_id"], {})
             listed_blocks.append({
-                "block_number": block["block_id"], "block_in_run": order,
+                "block_number": block["block_id"], "block_in_run": in_run,
                 "block_type": attributes.get("block_type"),
                 "start_s": float(block["start_s"]), "end_s": float(block["stop_s"]),
                 "closed": None if "closed" not in attributes else attributes["closed"] == "1",
@@ -129,7 +172,9 @@ def build_entry(facts: SessionFacts) -> dict:
             "calibration": facts.run_calibrations.get(run["run_number"]),
             "segments": [segment["segment_id"] for segment in spanned], "blocks": listed_blocks,
         })
-        if not listed_blocks:
+        # A run whose blocks were all left out did not stop before its first
+        # trial: its blocks' flags say what happened instead.
+        if not inside:
             flags.append(_flag("run_without_block",
                                f"run {run['run_number']} recorded no block: it stopped before its first trial",
                                run_number=run["run_number"]))
@@ -155,7 +200,7 @@ def build_entry(facts: SessionFacts) -> dict:
     # is already waiting for its run markers, and every block is outside one.
     if facts.runs:
         for block in sorted(facts.blocks, key=lambda block: block["start_s"]):
-            if block["block_id"] not in in_a_run:
+            if block["block_id"] not in in_a_run and not reversed_block(block):
                 flags.append(_flag("block_outside_runs",
                                    f"block {block['block_id']} lies in no measured run: its run's RUN_START was "
                                    "lost, or it was strobed outside a run", block_number=block["block_id"]))

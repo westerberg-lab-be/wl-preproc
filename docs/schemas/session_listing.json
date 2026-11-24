@@ -153,7 +153,7 @@
     },
     "ListedFlag": {
       "additionalProperties": false,
-      "description": "A fact wl.works shows beside the session as a hint. None blocks\nanything here. `run_number` and `block_number` say where, when it is one\nrun or one block.",
+      "description": "A fact wl.works shows beside the session as a hint. None blocks\nanything here. `run_number` and `block_number` say where, when it is one\nrun or one block; `segment_id` when it is one SpikeGLX file.\n\n`ends_before_start` is the one flag that means something was withheld: a\nrun, block or file whose end comes before its start is left out of the\nentry, and this flag names it, with both its times, in its stead (design\nspec `2026-11-24-wl-works-requests-design.md` section 4.5).",
       "properties": {
         "block_number": {
           "anyOf": [
@@ -177,7 +177,8 @@
             "block_type_unknown",
             "task_unknown",
             "block_outside_runs",
-            "rig_record_problem"
+            "rig_record_problem",
+            "ends_before_start"
           ],
           "title": "Code",
           "type": "string"
@@ -197,6 +198,18 @@
           ],
           "default": null,
           "title": "Run Number"
+        },
+        "segment_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Segment Id"
         }
       },
       "required": [
