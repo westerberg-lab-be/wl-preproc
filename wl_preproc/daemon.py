@@ -780,17 +780,20 @@ def _clocked(table) -> tuple:
 
 
 def _link_stage() -> tuple[int, list[str]]:
-    """Join each session's wl.works reports to the probes it recorded
-    (`ephys.link_insertions`; design spec `2026-09-30-nwb-probes-design.md`
-    section 2.3). Returns `(insertions whose link changed, per-session
-    failures)`, the two quantities one stage of `run_once` contributes.
+    """Join each session's placed positions and wl.works reports to the
+    probes it recorded (`ephys.link_insertions`; design specs
+    `2026-09-30-nwb-probes-design.md` section 2.3 and
+    `2026-11-24-montages-design.md` section 4.7). Returns `(insertions whose
+    link changed, per-session failures)`, the two quantities one stage of
+    `run_once` contributes.
 
-    Every session with a report, on every pass, rather than a computed
-    table's once: a later request can correct a report at any time, and a
-    relink has to follow it. A session with no report has nothing this
-    stage made. Freed sessions are not skipped -- it reads only the database,
-    never scratch."""
-    sessions = {(key["subject"], key["session_datetime"]) for key in ephys.InsertionReport.proj().keys()}
+    Every session with a report or a placed position, on every pass, rather
+    than a computed table's once: a later request can correct a report at any
+    time, and a relink has to follow it. A session with neither has nothing
+    this stage made. Freed sessions are not skipped -- it reads only the
+    database, never scratch."""
+    sessions = {(key["subject"], key["session_datetime"])
+                for table in (ephys.InsertionReport, core.PlacedPosition) for key in table.proj().keys()}
     linked, errors = 0, []
     for subject, session_datetime in sorted(sessions):
         key = {"subject": subject, "session_datetime": session_datetime}

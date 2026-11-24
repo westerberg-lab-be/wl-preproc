@@ -187,10 +187,12 @@ class InsertionReport(dj.Manual):
     #
     # Recorded, never derived, and not a ProbeInsertion: the serial is plain
     # text because the probe may not have been recorded yet, and the probes
-    # stage links the two once it has (section 2.3). The latest request wins,
-    # as with the subject's details -- the ELN is the authority -- and an
-    # insertion a later request does not mention is left alone, since a
-    # request may name only its own montage's insertions.
+    # stage links the two once it has (section 2.3). It supplies an
+    # insertion's trajectory and aim only: when an insertion held, and which
+    # probe, is `core.PlacedPosition`'s (montages spec section 4.7). The
+    # latest request wins, as with the subject's details -- the ELN is the
+    # authority -- and an insertion a later request does not mention is left
+    # alone, since a request may name only its own montage's insertions.
     -> pipeline.Session
     insertion_number : tinyint unsigned
     ---
@@ -652,59 +654,67 @@ def register_electrode_config(part_number: str, electrodes: list[int]) -> str:
 
 
 def link_insertions(session_key: dict) -> int:
-    """Join wl.works' report of each insertion to the probe the recording
-    names, for one session: `ProbeInsertion`, `InsertionLocation` and
-    `SegmentConfig` (design spec `2026-09-30-nwb-probes-design.md` section
-    2.3). Returns how many insertions' links changed.
+    """Join each placed position to the probe the recording names, for one
+    session: `ProbeInsertion`, `InsertionLocation` and `SegmentConfig` (design
+    spec `2026-09-30-nwb-probes-design.md` section 2.3, and
+    `2026-11-24-montages-design.md` section 4.7). Returns how many
+    insertions' links changed.
 
-    Written as the difference between what the reports and the census say
-    now and what is linked, so it can run on every pass, in either arrival
-    order, and a corrected report relinks: a changed trajectory or aim is
-    updated in place, and a changed serial moves the insertion's segments.
+    Written as the difference between what the positions, the reports and the
+    census say now and what is linked, so it can run on every pass, in either
+    arrival order, and a corrected report or position relinks: a changed
+    trajectory or aim is updated in place, and a changed serial moves the
+    insertion's segments.
 
-    **Linked only when the serial is reported for ONE insertion of the
-    session, and the census placed its sites** -- `ProbeInsertion` needs a
-    `Probe`, and `SegmentConfig` a config. A serial reported twice is a moved
-    probe whose segments the request does not assign, and is not guessed at.
+    **A placed position links every SpikeGLX file of its serial that overlaps
+    its time**, `[start_s, end_s]` (`core.PlacedPosition`), so a file that
+    spans a move joins both insertions. It is linked only when the census
+    placed the serial's sites -- `ProbeInsertion` needs a `Probe`, and
+    `SegmentConfig` a config. A position that covers no run has no time and
+    links nothing. The insertion's trajectory and aim come from the latest
+    `InsertionReport` for its number, when there is one.
 
-    **It takes back only links it could have made.** Reports are never
-    deleted, so every insertion it linked has one; an insertion with no report
-    was made some other way and is left alone. A link taken back is deleted
-    with `delete_quick`, which does not cascade: an insertion that something
-    downstream already points at -- a sort -- raises instead of taking the
-    sort with it."""
-    reports = (InsertionReport & session_key).to_dicts()
-    serials = [report["probe_serial"] for report in reports]
+    **It takes back only links it could have made.** An insertion numbered by
+    neither a report nor a placed position was made some other way and is left
+    alone. A link taken back is deleted with `delete_quick`, which does not
+    cascade: an insertion that something downstream already points at -- a
+    sort -- raises instead of taking the sort with it."""
+    reports = {int(r["insertion_number"]): r for r in (InsertionReport & session_key).to_dicts()}
+    positions = {int(p["insertion_number"]): p for p in (core.PlacedPosition & session_key).to_dicts()}
+    times = {(row["system"], row["segment_id"]): (row["start_s"], row["end_s"])
+             for row in (core.Segment & session_key).to_dicts()}
     recorded: dict[str, dict] = {}
     for part in (ProbeCensus.Probe & session_key & "electrode_config_hash IS NOT NULL").to_dicts():
         if part["probe_serial"]:
             segment = (part["system"], part["segment_id"])
             recorded.setdefault(part["probe_serial"], {})[segment] = (part["electrode_config_hash"], part["probe_type"])
-    want = {
-        report["insertion_number"]: report
-        for report in reports
-        if serials.count(report["probe_serial"]) == 1 and report["probe_serial"] in recorded
-    }
-    reported = {int(report["insertion_number"]) for report in reports}
+    want: dict[int, tuple[str, dict]] = {}
+    for number, position in positions.items():
+        if position["start_s"] is None or position["probe_serial"] not in recorded:
+            continue
+        start, end = position["start_s"], position["end_s"]
+        want[number] = (position["probe_serial"], {
+            segment: config for segment, config in recorded[position["probe_serial"]].items()
+            if segment in times and times[segment][0] < end and times[segment][1] > start})
+    numbered = reports.keys() | positions.keys()
     changed = 0
     with dj.conn().transaction:
         for number in (ProbeInsertion & session_key).to_arrays("insertion_number"):
-            if int(number) in reported and int(number) not in want:
+            if int(number) in numbered and int(number) not in want:
                 where = {**session_key, "insertion_number": int(number)}
                 (SegmentConfig & where).delete_quick()
                 (InsertionLocation & where).delete_quick()
                 (ProbeInsertion & where).delete_quick()
                 changed += 1
-        for number, report in want.items():
-            changed += _link(
-                {**session_key, "insertion_number": number}, report, recorded[report["probe_serial"]]
-            )
+        for number, (serial, segments) in want.items():
+            changed += _link({**session_key, "insertion_number": number}, serial, reports.get(number), segments)
     return changed
 
 
-def _link(where: dict, report: dict, segments: dict) -> int:
-    """One insertion's three kinds of row, brought to what `report` and the
-    census say. 1 if anything changed, else 0."""
+def _link(where: dict, serial: str, report: dict | None, segments: dict) -> int:
+    """One insertion's three kinds of row, brought to what the placed
+    position's `serial`, `report` (or None) and the census say. 1 if anything
+    changed, else 0."""
     changed = False
 
     def settle(table, want: dict | None, have: list[dict]) -> None:
@@ -720,9 +730,10 @@ def _link(where: dict, report: dict, segments: dict) -> int:
             return
         changed = True
 
-    settle(ProbeInsertion, {**where, "probe_serial": report["probe_serial"], "trajectory_id": report["trajectory_id"]},
+    settle(ProbeInsertion,
+           {**where, "probe_serial": serial, "trajectory_id": report["trajectory_id"] if report else None},
            (ProbeInsertion & where).to_dicts())
-    aim = None if report["target_area"] is None else {
+    aim = None if report is None or report["target_area"] is None else {
         **where, "area": report["target_area"], "atlas": report["target_atlas"],
         "atlas_level": report["target_atlas_level"]}
     settle(InsertionLocation, aim, (InsertionLocation & where).to_dicts())
