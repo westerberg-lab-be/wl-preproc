@@ -22,17 +22,26 @@ def put(key: dict, positions: list[dict], seq: int = 1, prefix: str = "t_") -> d
 def seed_montage(key: dict, montage: dict, probes: list[dict] = (), status: str = "placed") -> None:
     """Store `montage` ({montage_id, start_s, end_s}) for the session `key` as the montage stage would list it:
     its `core.Montage` row, a `MontageProbe` and its `MontageSortableRun` rows for each of `probes` ({serial,
-    insertion_number, sortable_runs, and optionally electrode_config_hash and probe_type}), and a
-    `MontageDerivation` at `status` if the session has none. A row already stored is kept.
+    insertion_number, sortable_runs, and optionally electrode_config_hash and probe_type}), and the session's
+    `MontageDerivation` at `status`, inserted or updated, derived from the stored positions' seq when there is one.
+    A montage row already stored is kept.
 
-    Call it after the session's last daemon pass before `accept()`: until a request is accepted, a pass derives
-    the session again and replaces whatever does not match its own result, this montage with it."""
+    Call it after the session's last daemon pass and its last `PUT /positions` before `accept()`: until a request
+    is accepted, a pass derives the session again and replaces whatever does not match its own result, this
+    montage with it."""
+    from wl_preproc.responder.positions import stored_positions
     from wl_preproc.schema import core
 
     session = {"subject": key["subject"], "session_datetime": key["session_datetime"]}
-    if not core.MontageDerivation & session:
-        core.MontageDerivation.insert1({**session, "positions_status": status, "positions_seq": None,
-                                        "derived_at": datetime.datetime.now(datetime.UTC).replace(tzinfo=None)})
+    derivation = {**session, "positions_status": status,
+                  "derived_at": datetime.datetime.now(datetime.UTC).replace(tzinfo=None)}
+    positions = stored_positions(session)
+    if positions is not None:
+        derivation["positions_seq"] = positions[0]
+    if core.MontageDerivation & session:
+        core.MontageDerivation.update1(derivation)
+    else:
+        core.MontageDerivation.insert1(derivation)
     where = {**session, "montage_id": montage["montage_id"]}
     core.Montage.insert1({**where, "start_s": montage["start_s"], "end_s": montage["end_s"]}, skip_duplicates=True)
     core.MontageProbe.insert([

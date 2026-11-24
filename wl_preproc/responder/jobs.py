@@ -25,8 +25,10 @@ daemon's montage stage stores them (`montage/stage.py`), which `GET
 /sessions` lists. `metadata.montage_boundaries` is retired as
 `metadata.blocks` was, and a request names a listed montage in
 `selection.montage_id`: `_listed_montage` reads it from the stored rows,
-never deriving it again, and a montage that is not stored is a 422 naming
-the session's `positions_status`, never created. Each probe's runs are among
+never deriving it again, and a montage that is not stored, or not listed
+at the session's `positions_status`, is a 422 naming that status, never
+created. So is a session whose positions changed since its montages were
+derived (`_check_positions_seq`). Each probe's runs are among
 the ones the montage lists as sortable for it, and with positions stored each
 of `metadata.probes` names one of them (plan decision D14; `_check_probes`,
 `_check_probe_runs`). The stage rewrites a session's montages only until its
@@ -280,6 +282,8 @@ class RunIdConflict(Exception):
 
 
 _REBUILD = "rebuild the request from a fresh GET /sessions"
+# The statuses `GET /sessions` lists montages at (plan decision D13).
+_LISTED_STATUSES = ("placed", "not_needed")
 
 
 def _run_numbers(value, *, name: str) -> list[int]:
@@ -588,10 +592,9 @@ def _listed_montage(session_key: dict, montage_id: int) -> tuple[dict | None, di
     the montage `montage_id` as this host lists it (`{montage_id, start_s,
     end_s, probes}`), from the stored rows and never derived again (design
     spec `2026-11-24-montages-design.md` section 5). A `ValueError` (a 422)
-    naming the session's `positions_status` when no such montage is stored:
-    the stage stores montages only at `placed` and `not_needed`, the statuses
-    `GET /sessions` lists them at (plan decision D13), so a stored montage is
-    a listed one.
+    naming the session's `positions_status` when no such montage is stored,
+    or the status is not one `GET /sessions` lists montages at (`placed`,
+    `not_needed`; plan decision D13).
 
     The derivation is read first: a rewrite committed after it changes the
     row `_hold_derivation` compares it with, whatever was read after it."""
@@ -599,27 +602,58 @@ def _listed_montage(session_key: dict, montage_id: int) -> tuple[dict | None, di
     stored = stored_montages.read_stored([session_key]).get((session_key["subject"],
                                                               session_key["session_datetime"]))
     montage = next((m for m in (stored.montages if stored else ()) if m["montage_id"] == montage_id), None)
-    if montage is None:
-        status = stored.status if stored else "waiting"
+    status = stored.status if stored else "waiting"
+    if montage is None or status not in _LISTED_STATUSES:
         raise ValueError(f"no montage {montage_id} is listed for {session_key['subject']}/"
                          f"{session_key['session_datetime'].isoformat()}: positions_status is {status}; send PUT "
                          f"/positions, or {_REBUILD}")
     return derivation, montage
 
 
+def _check_positions_seq(session_key: dict, derivation: dict | None, positions_seq: int | None) -> None:
+    """A 422 when the session's stored positions are not the seq its montages
+    were derived from: positions changed since, and the next pass derives
+    and lists them again (plan decision D17). Accepted now, the request
+    would fix the old montages under the new positions (D8). With no
+    positions stored there is nothing to compare."""
+    derived = derivation["positions_seq"] if derivation else None
+    if positions_seq is not None and positions_seq != derived:
+        raise ValueError(f"session {session_key['subject']} {session_key['session_datetime'].isoformat()}: its "
+                         f"positions changed (seq {positions_seq}) since its montages were derived (seq {derived}); "
+                         f"send the request again once GET /sessions lists seq {positions_seq}")
+
+
+def _locked_positions_seq(session_key: dict) -> int | None:
+    """The session's stored `PositionSet.positions_seq`, read `FOR UPDATE`
+    inside the caller's transaction: the latest committed seq, which a `PUT
+    /positions` cannot change until that transaction ends. An exact
+    primary-key match, as `stored_montages.lock_derivation`'s is."""
+    import datajoint as dj
+
+    key = {name: session_key[name] for name in ("subject", "session_datetime")}
+    sql = (schema_request.PositionSet & key).proj("positions_seq").make_sql() + " FOR UPDATE"
+    rows = list(dj.conn().query(sql, as_dict=True).fetchall())
+    return int(rows[0]["positions_seq"]) if rows else None
+
+
 def _hold_derivation(session_key: dict, derivation: dict | None) -> None:
     """Inside the activation's transaction, before it writes: take the
     session's derivation lock and refuse the request if the derivation is not
-    the one its checks read. Until this transaction ends the montage stage
-    cannot rewrite the session (`montage/stored.py`'s module docstring), and
-    once it has ended with an activation the stage never will (plan decision
-    D8), so what the checks read is what the activation covers."""
+    the one its checks read, or if its positions changed since it was
+    derived (`_check_positions_seq`). Until this transaction ends the
+    montage stage cannot rewrite the session (`montage/stored.py`'s module
+    docstring) and a `PUT /positions` cannot store another seq, and once it
+    has ended with an activation the stage never derives the session again
+    (plan decision D8), so what the checks read is what the activation
+    covers. Both reads lock, so neither comes from the snapshot the
+    transaction began with."""
     held = stored_montages.lock_derivation(session_key)
     if held != derivation:
         status = held["positions_status"] if held else "waiting"
         raise ValueError(f"the montages of {session_key['subject']}/{session_key['session_datetime'].isoformat()} "
                          f"were derived again while this request was checked: positions_status is {status}; "
                          f"{_REBUILD}")
+    _check_positions_seq(session_key, held, _locked_positions_seq(session_key))
 
 
 def _as_current_payload(stored: dict) -> dict:
@@ -654,7 +688,8 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
     (`_require_landed_session` -- the ordinary ELN-before-transfer case,
     which used to reach the database and come back as a `500` telling
     wl.works to retry forever); a `montage_id` that cannot fit its column; a
-    `montage_id` this host has not listed (`_listed_montage`); a probe that
+    `montage_id` this host has not listed (`_listed_montage`); positions
+    changed since the montages were derived (`_check_positions_seq`); a probe that
     names no stored position, or runs a probe cannot be sorted on in the
     montage (`_check_probes`, `_check_probe_runs`); a derivation rewritten
     while the request was checked (`_hold_derivation`); or any run that does
@@ -722,6 +757,10 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
     # The montage this host listed, never one the request describes (design
     # spec `2026-11-24-montages-design.md` section 4.6).
     derivation, montage = _listed_montage(session_key, montage_id)
+    positions = stored_positions(session_key)
+    # Checked again under the lock (`_hold_derivation`); here first, so a
+    # probe is not refused against positions the montages do not come from.
+    _check_positions_seq(session_key, derivation, positions[0] if positions else None)
 
     # Correction 2: accept() owns the montage window (module docstring).
     file_runs, run_assertion_rows = _check_runs(session_key, montage, metadata.runs, run_numbers, canonical)
@@ -732,7 +771,7 @@ def accept(request: JobRequest, prefix: str = DEFAULT_PREFIX) -> dict:
         # states no per-probe list for one (Plan B's final review, I1).
         probe_runs = {probe.serial: file_runs for probe in metadata.probes}
     _check_probe_runs(metadata.probes, probe_runs, file_runs, {p["serial"]: p for p in montage["probes"]},
-                      stored_positions(session_key) is not None, montage_id=montage_id)
+                      positions is not None, montage_id=montage_id)
 
     # ---- Phase 2: every check above passed. Only now does anything get
     # written. ----

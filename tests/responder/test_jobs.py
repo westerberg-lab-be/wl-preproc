@@ -1301,11 +1301,11 @@ def test_probe_runs_must_be_sortable(landed_session, prefix):
     assert _run_rows(schema_request.ActivationProbeRun, activation) == [("S1", 1)]
 
 
-def _positions(key: dict, *probes: tuple[str, int], prefix) -> None:
-    """`PUT /positions` for `probes` ((serial, insertion_number)), each inserted before the session."""
+def _positions(key: dict, *probes: tuple[str, int], prefix, seq: int = 1) -> None:
+    """`PUT /positions` at `seq` for `probes` ((serial, insertion_number)), each inserted before the session."""
     put(key, [{"serial": serial, "insertion_number": number,
                "inserted_at": key["session_datetime"] - datetime.timedelta(minutes=10)} for serial, number in probes],
-        prefix=prefix)
+        seq=seq, prefix=prefix)
 
 
 def test_a_probe_must_name_its_position(landed_session, prefix):
@@ -1388,3 +1388,64 @@ def test_a_derivation_rewritten_while_a_request_is_checked_is_a_422(landed_sessi
         f"the montages of {_session_of(key)} were derived again while this request was checked: positions_status "
         "is placed; rebuild the request from a fresh GET /sessions")
     assert _nothing_written(key, "jbrace01-k1")
+
+
+@pytest.mark.parametrize("status", ["waiting", "ambiguous"])
+def test_a_montage_under_a_derivation_that_lists_none_is_a_422(landed_session, prefix, status):
+    """D13: montages are listed only at `placed` and `not_needed`, so one stored under any other status is not a
+    listed montage, and a request naming it is refused with the status named."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _landed_with_runs(landed_session, {"waiting": "jbstw01", "ambiguous": "jbsta01"}[status], 3, montages=())
+    seed_montage(key, _M1, status=status)
+    idempotency_key = f"{key['subject']}-k1"
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, idempotency_key, serials=(), montage_id=1), prefix=prefix)
+    assert str(refused.value) == (
+        f"no montage 1 is listed for {_session_of(key)}: positions_status is {status}; send PUT /positions, or "
+        "rebuild the request from a fresh GET /sessions")
+    assert _nothing_written(key, idempotency_key)
+
+
+def _positions_changed(key: dict) -> str:
+    return (f"session {key['subject']} {key['session_datetime'].isoformat()}: its positions changed (seq 2) since "
+            "its montages were derived (seq 1); send the request again once GET /sessions lists seq 2")
+
+
+def test_positions_sent_since_the_montages_were_derived_are_a_422(landed_session, prefix):
+    """D17: a `PUT /positions` stores only, and the next pass derives and lists. A request arriving between them
+    names montages of the earlier seq; accepted, it would fix them under the new positions (D8). It is told so,
+    not that its probe names no position: seq 2 renumbered S1's insertion."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _landed_with_runs(landed_session, "jbseq01", 30, montages=())
+    _positions(key, ("S1", 1), prefix=prefix)
+    seed_montage(key, _M1, probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1, 2]}])
+    _positions(key, ("S1", 2), prefix=prefix, seq=2)
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, "jbseq01-k1", montage_id=1, probes=[{"serial": "S1", "insertion_number": 1}],
+                         probe_runs={"S1": [1, 2]}), prefix=prefix)
+    assert str(refused.value) == _positions_changed(key)
+    assert _nothing_written(key, "jbseq01-k1")
+
+
+def test_positions_sent_while_a_request_is_checked_are_a_422(landed_session, prefix, monkeypatch):
+    """The same refusal when the `PUT` lands after the checks and before the activation is written: the insert's
+    transaction reads the stored seq under a lock, never from the snapshot it began with."""
+    from wl_preproc.responder import jobs
+
+    key = _landed_with_runs(landed_session, "jbseq02", 30, montages=())
+    _positions(key, ("S1", 1), prefix=prefix)
+    seed_montage(key, _M1, probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1, 2]}])
+    checked = jobs._check_probes
+
+    def checked_then_moved(session_key, probes):
+        checked(session_key, probes)
+        _positions(key, ("S1", 1), ("S2", 2), prefix=prefix, seq=2)
+
+    monkeypatch.setattr(jobs, "_check_probes", checked_then_moved)
+    with pytest.raises(ValueError) as refused:
+        jobs.accept(_runs_job(key, "jbseq02-k1", montage_id=1, probes=[{"serial": "S1", "insertion_number": 1}],
+                              probe_runs={"S1": [1, 2]}), prefix=prefix)
+    assert str(refused.value) == _positions_changed(key)
+    assert _nothing_written(key, "jbseq02-k1")
