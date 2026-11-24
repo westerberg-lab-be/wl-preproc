@@ -403,6 +403,15 @@ def test_nickname_is_one_to_sixty_four_characters():
         assert SubjectDetails.model_validate({"nickname": good}).nickname == good
 
 
+def test_a_nickname_of_only_white_space_is_refused():
+    from wl_preproc.contracts.protocol import SubjectDetails
+
+    for blank in (" ", "    ", "\t\n"):
+        with pytest.raises(ValidationError, match="nickname"):
+            SubjectDetails.model_validate({"nickname": blank})
+    assert SubjectDetails.model_validate({"nickname": " Pico "}).nickname == " Pico "
+
+
 def test_experimenter_is_at_most_sixty_four_characters():
     for good in ("e" * 64, ""):
         assert MetadataBundle.model_validate(_bundle(experimenter=good)).experimenter == good

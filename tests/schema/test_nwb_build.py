@@ -1869,3 +1869,29 @@ def test_the_masks_screen_region_is_the_sessions_field_plus_its_margin(activatio
     width, height = RIG_SETUP["half_field_deg"]
     assert rows and {(row["region_half_width_deg"], row["region_half_height_deg"], row["region_from_setup"])
                      for row in rows} == {(width + 2.0, height + 2.0, 1)}
+
+
+def test_the_span_note_uses_only_the_spikeglx_files_the_file_keeps(activation):
+    """A SpikeGLX file that ends before it starts is left out of the file, so its times do not move the
+    "eye data outside the covered span" note."""
+    from wl_preproc.nwb.gather import _span_notes
+    from wl_preproc.schema import core
+
+    session_key, _key, _runs = activation
+    ohdpi = (core.Segment & {**session_key, "system": "ohdpi"}).fetch1()
+    kept = {**ohdpi, "system": "spikeglx", "segment_id": "span_g0/span_g0_t0.imec0.ap.bin",
+            "start_s": 0.0, "end_s": 100.0}
+    reversed_ = {**kept, "segment_id": "span_g0/span_g0_t1.imec0.ap.bin", "start_s": -50.0, "end_s": -60.0}
+    core.AcquisitionSystem.insert1({**session_key, "system": "spikeglx"}, skip_duplicates=True)
+    core.Segment.insert([kept, reversed_], allow_direct_insert=True)
+    try:
+        notes = _span_notes(session_key, {"covered_start_s": 10.0, "covered_end_s": 90.0})
+    finally:
+        for added in (kept, reversed_):
+            (core.Segment & {name: added[name] for name in core.Segment.primary_key}).delete_quick()
+        (core.AcquisitionSystem & {**session_key, "system": "spikeglx"}).delete_quick()
+    eye = [note for note in notes if note.startswith("eye data outside")]
+    assert eye == [
+        "eye data outside the sync box's covered span, 0.000 s to 10.000 s, is left out: no barcode placed it",
+        "eye data outside the sync box's covered span, 90.000 s to 100.000 s, is left out: no barcode placed it",
+    ]

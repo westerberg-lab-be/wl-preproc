@@ -734,6 +734,9 @@ session already stored. `wlpp nwb build` takes no zone at all: it reads the stor
       (timebase.ClockReference & {'subject': '<subject>', 'session_datetime': '<session_datetime>'}).delete_quick()"
     wlpp daemon --nidq-timezone America/New_York …
 
+A session whose scratch copy was freed is skipped by the daemon, so rehydrate it first with
+`wlpp rehydrate --session <session folder> --nas-root <mount>`, then delete the row and run the pass.
+
 Until that pass, the session lists `t0_datetime` and `t0_source` as null and its NWB files wait.
 Once it has run, the session's entry changes, so `GET /sessions` lists it again. **Files already
 built keep the value they were built with** (their `quality.reference_source` and

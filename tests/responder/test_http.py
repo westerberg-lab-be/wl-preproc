@@ -2133,3 +2133,24 @@ def test_paging_parameters_are_checked(path, query):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+@pytest.mark.parametrize("path", ["/nwb", "/sessions"])
+@pytest.mark.parametrize("query", ["limit=" + "9" * 5000, "since=" + "9" * 5000])
+def test_a_cursor_int_cannot_convert_is_a_422_not_a_dropped_connection(path, query):
+    """Python refuses `int()` of more than 4300 digits; that is a 422 like any other bad cursor, never an
+    escape from `do_GET` that closes the socket with a traceback."""
+    def listing(since, limit):
+        raise AssertionError("an unconvertible cursor must not reach the listing")
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(
+        TOKEN, _health_ok, _unused, nwb_list_fn=listing, sessions_list_fn=listing))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        status, body = _request(f"{base}{path}?{query}", method="GET", token=TOKEN)
+        assert (status, json.loads(body)) == (422, {"error": "the only parameters are since, one non-negative "
+                                                             "integer, and limit, one positive integer"})
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

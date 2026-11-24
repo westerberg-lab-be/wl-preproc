@@ -574,7 +574,10 @@ def _span_notes(session_key: dict, provenance: dict) -> list[str]:
              "over it"]
     # Session time under the NI is its first file's, the one SpikeGLX
     # segment, from t = 0.
-    session = (core.Segment & {**session_key, "system": "spikeglx"}).to_dicts()
+    # A file that ends before it starts is left out of the file (`_timebase`'s
+    # rule), so its times do not bound the session.
+    session = [row for row in (core.Segment & {**session_key, "system": "spikeglx"}).to_dicts()
+               if not _reversed(row, "end_s")]
     # An eye file its analog copy placed is used past the span (amendment 81),
     # so nothing of it is left out.
     by_copy = timebase.SystemTimebase & session_key & {"system": "ohdpi", "time_source": "analog",

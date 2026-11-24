@@ -248,6 +248,15 @@ class SubjectDetails(BaseModel):
     # What the lab calls the animal; the file's `subject.description` carries it.
     nickname: Annotated[str, Field(min_length=1, max_length=64)] | None = None
 
+    @field_validator("nickname")
+    @classmethod
+    def _a_nickname_has_a_character_that_shows(cls, value: str | None) -> str | None:
+        # `PydanticCustomError`, not `ValueError`, for the reason
+        # `MetadataBundle._blocks_are_retired` gives.
+        if value is not None and not value.strip():
+            raise PydanticCustomError("blank_nickname", "nickname is only white space; leave it out or give one")
+        return value
+
 
 class RunEntry(BaseModel):
     """One run wl.works holds for the session: its copy of a run `GET
