@@ -9,6 +9,7 @@ import re
 
 import pytest
 
+from tests.positions import put, seed_group, seed_montage
 from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
 
 # The runs the event stage measured for every landed session here (design
@@ -16,6 +17,9 @@ from wl_preproc.contracts.protocol import JobRequest, MetadataBundle
 # run 3 lies outside montage 0's window [0, 12), inside montage 1's [12, 24).
 _RUNS = [(1, 0.0, 4.0), (2, 5.0, 11.0), (3, 13.0, 16.0)]
 _SERIAL = "19011110001"
+# The montage most requests here name, as this host lists it (design spec
+# `2026-11-24-montages-design.md` section 4.6): stored by `seed_montage`.
+_M0 = {"montage_id": 0, "start_s": 0.0, "end_s": 12.0}
 
 
 def _asserted(runs=_RUNS, ids: dict | None = None) -> list[dict]:
@@ -30,7 +34,9 @@ def landed_session(dj_conn, prefix):
     file, and its runs measured -- the state `ingest/landing.py`'s
     `land_session` and the event stage would already have produced before
     any job request naming this session could arrive. `runs=()` leaves the
-    session landed and its runs not yet read.
+    session landed and its runs not yet read. Each of `montages` is stored as
+    the montage stage would list it (`tests/positions.py::seed_montage`), as
+    the daemon would have before wl.works could name one.
 
     `accept()` (design spec section 6.1, steps 1-4) is scoped to
     `Montage`/`RunAssertion`/`Request`/`Activation`; it is not what creates
@@ -43,7 +49,7 @@ def landed_session(dj_conn, prefix):
 
     schema_request.activate(prefix=prefix)
 
-    def _land(subject: str, session_datetime: datetime.datetime, runs=_RUNS) -> dict:
+    def _land(subject: str, session_datetime: datetime.datetime, runs=_RUNS, montages=()) -> dict:
         pipeline.lab.Lab.insert1(
             {"lab": "wl", "lab_name": "W", "address": "y", "time_zone": "UTC"},
             skip_duplicates=True,
@@ -63,6 +69,8 @@ def landed_session(dj_conn, prefix):
             core.Run.insert([{**key, "run_number": number, "task_type": 0, "run_start_time": start,
                               "run_stop_time": stop, "closed": 1} for number, start, stop in runs],
                             skip_duplicates=True)
+        for montage in montages:
+            seed_montage(key, montage)
         return key
 
     return _land
@@ -74,7 +82,6 @@ def _request(
     session_datetime,
     idempotency_key: str,
     montage_id: int = 0,
-    montage_boundaries: list[dict] | None = None,
     runs=_RUNS,
     run_numbers: list[int] | None = None,
     domain: str = "neural",
@@ -101,7 +108,6 @@ def _request(
         idempotency_key=idempotency_key,
         metadata=MetadataBundle(
             runs=_asserted(runs),
-            montage_boundaries=montage_boundaries or [],
             probes=probes or [],
             experimenter=experimenter,
             subject=subject,
@@ -109,42 +115,6 @@ def _request(
             subject_details=subject_details,
         ),
     )
-
-
-def test_accept_creates_montage_rows_from_metadata(landed_session, prefix):
-    """Every boundary in `metadata.montage_boundaries` is written, not only
-    the one the selection names -- a session can have more than one montage
-    on file, and a request about one of them still carries the whole set
-    (design spec section 1: "everything wl-preproc needs from the ELN
-    arrives in the request payload")."""
-    from wl_preproc.responder.jobs import accept
-    from wl_preproc.schema import core
-
-    subject = "jbmtg01"
-    naive_dt = datetime.datetime(2027, 5, 4, 9, 0)
-    landed_session(subject, naive_dt)
-    job = _request(
-        subject=subject,
-        session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-        montage_id=1,
-        idempotency_key="jbmtg01-k1",
-        montage_boundaries=[
-            {"montage_id": 0, "start_s": 0.0, "end_s": 12.0},
-            {"montage_id": 1, "start_s": 12.0, "end_s": 24.0},
-        ],
-    )
-
-    key = accept(job, prefix=prefix)
-
-    session_key = {"subject": subject, "session_datetime": naive_dt}
-    m0 = (core.Montage & {**session_key, "montage_id": 0}).fetch1()
-    m1 = (core.Montage & {**session_key, "montage_id": 1}).fetch1()
-    assert m0["start_s"] == pytest.approx(0.0)
-    assert m0["end_s"] == pytest.approx(12.0)
-    assert m1["start_s"] == pytest.approx(12.0)
-    assert m1["end_s"] == pytest.approx(24.0)
-    assert key["montage_id"] == 1
-    assert key["activation_id"] == 0  # no run_numbers -> canonical
 
 
 def test_accept_is_idempotent_on_the_same_key(landed_session, prefix):
@@ -172,13 +142,12 @@ def test_accept_is_idempotent_on_the_same_key(landed_session, prefix):
 
     subject = "jbidm01"
     naive_dt = datetime.datetime(2027, 5, 2, 9, 0)
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
     job = _request(
         subject=subject,
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         montage_id=0,
         idempotency_key="jbidm01-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
     )
 
     first = accept(job, prefix=prefix)
@@ -197,22 +166,19 @@ def test_no_run_numbers_is_canonical_and_some_run_numbers_is_derivative(landed_s
 
     subject = "jbcd001"
     naive_dt = datetime.datetime(2027, 5, 5, 9, 0)
-    landed_session(subject, naive_dt)
-    boundaries = [{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}]
+    landed_session(subject, naive_dt, montages=[_M0])
 
     canonical_job = _request(
         subject=subject,
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         montage_id=0,
         idempotency_key="jbcd001-k1",
-        montage_boundaries=boundaries,
     )
     derivative_job = _request(
         subject=subject,
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         montage_id=0,
         idempotency_key="jbcd001-k2",
-        montage_boundaries=boundaries,
         run_numbers=[1, 2],
     )
 
@@ -226,49 +192,6 @@ def test_no_run_numbers_is_canonical_and_some_run_numbers_is_derivative(landed_s
     assert len(schema_request.ActivationRun & derivative_key) == 2
 
 
-def test_an_existing_montage_survives_a_request_naming_different_boundaries(landed_session, prefix):
-    """Beyond the brief: wl.works owns `Montage`. A second request carrying
-    different boundaries for a montage already on file is wl.works
-    correcting its own record, and that correction is their call to make
-    explicitly -- it is not this pipeline's to infer from whichever payload
-    happened to arrive most recently. So the second request's boundaries are
-    silently ignored, not applied.
-    """
-    from wl_preproc.responder.jobs import accept
-    from wl_preproc.schema import core
-
-    subject = "jbkeep1"
-    naive_dt = datetime.datetime(2027, 5, 8, 9, 0)
-    landed_session(subject, naive_dt)
-
-    first_job = _request(
-        subject=subject,
-        session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-        montage_id=0,
-        idempotency_key="jbkeep1-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
-    )
-    accept(first_job, prefix=prefix)
-
-    # A second request, under a DIFFERENT idempotency key (a distinct ask,
-    # not a retry of the first), naming DIFFERENT boundaries for the SAME
-    # montage_id.
-    correction_job = _request(
-        subject=subject,
-        session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-        montage_id=0,
-        idempotency_key="jbkeep1-k2",
-        montage_boundaries=[{"montage_id": 0, "start_s": 100.0, "end_s": 200.0}],
-    )
-    accept(correction_job, prefix=prefix)
-
-    session_key = {"subject": subject, "session_datetime": naive_dt}
-    montage_row = (core.Montage & {**session_key, "montage_id": 0}).fetch1()
-
-    assert montage_row["start_s"] == pytest.approx(0.0)
-    assert montage_row["end_s"] == pytest.approx(12.0)
-
-
 def test_accept_treats_the_montage_window_as_half_open(landed_session, prefix):
     """[start_s, end_s) -- a run starting inside the montage is the file's
     even when it ends exactly at the montage's end; a run starting exactly
@@ -280,16 +203,15 @@ def test_accept_treats_the_montage_window_as_half_open(landed_session, prefix):
     subject = "jbedg01"
     naive_dt = datetime.datetime(2027, 5, 10, 9, 0)
     runs = [(1, 0.0, 4.0), (2, 8.0, 12.0), (3, 12.0, 16.0)]
-    landed_session(subject, naive_dt, runs=runs)
-    boundaries = [{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}]
+    landed_session(subject, naive_dt, runs=runs, montages=[_M0])
 
     canonical = accept(_request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-                                idempotency_key="jbedg01-k1", montage_boundaries=boundaries, runs=runs),
+                                idempotency_key="jbedg01-k1", runs=runs),
                        prefix=prefix)
     assert sorted(int(n) for n in (schema_request.ActivationRun & canonical).to_arrays("run_number")) == [1, 2]
 
     touching_job = _request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-                            idempotency_key="jbedg01-k2", montage_boundaries=boundaries, runs=runs,
+                            idempotency_key="jbedg01-k2", runs=runs,
                             run_numbers=[3])
     with pytest.raises(ValueError, match=r"run\(s\) \[3\] outside montage 0's window"):
         accept(touching_job, prefix=prefix)
@@ -298,7 +220,7 @@ def test_accept_treats_the_montage_window_as_half_open(landed_session, prefix):
 def test_accept_rejects_a_selection_missing_a_required_key(landed_session, prefix):
     subject = "jbkey01"
     naive_dt = datetime.datetime(2027, 5, 11, 9, 0)
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
 
     job = JobRequest(
         domain="neural",
@@ -307,7 +229,6 @@ def test_accept_rejects_a_selection_missing_a_required_key(landed_session, prefi
         idempotency_key="jbkey01-k1",
         metadata=MetadataBundle(
             runs=_asserted(),
-            montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
             probes=[],
             experimenter="jw",
             subject=subject,
@@ -322,6 +243,8 @@ def test_accept_rejects_a_selection_missing_a_required_key(landed_session, prefi
 
 
 def test_accept_rejects_when_no_montage_is_on_record(landed_session, prefix):
+    """A montage this host has not listed is refused, never created from the
+    request (design spec `2026-11-24-montages-design.md` section 4.6)."""
     from wl_preproc.responder.jobs import accept
     from wl_preproc.schema import request as schema_request
 
@@ -333,10 +256,9 @@ def test_accept_rejects_when_no_montage_is_on_record(landed_session, prefix):
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         montage_id=3,
         idempotency_key="jbnomt1-k1",
-        montage_boundaries=[],  # nothing supplied, and montage_id=3 was never recorded
     )
 
-    with pytest.raises(ValueError, match="montage"):
+    with pytest.raises(ValueError, match="no montage 3 is listed"):
         accept(job, prefix=prefix)
 
     assert len(schema_request.Request & {"idempotency_key": "jbnomt1-k1"}) == 0
@@ -352,7 +274,6 @@ def test_accept_rejects_an_oversized_subject(dj_conn, prefix):
         session_datetime=datetime.datetime(2027, 5, 13, 9, 0, tzinfo=datetime.UTC),
         montage_id=0,
         idempotency_key="jbovr01-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
     )
 
     with pytest.raises(ValueError, match="subject"):
@@ -365,13 +286,14 @@ def test_accept_refuses_to_run_inside_a_transaction(landed_session, prefix):
     fire -- mirroring `tests/schema/test_request.py::
     test_submit_refuses_to_run_inside_a_transaction`.
 
-    Nothing of the request lands: its `Montage` rows, like its run ids, are
-    written inside `submit()`'s own transaction, which its guard refuses to
-    open here, so a caller who makes this mistake and then retries `accept()`
-    correctly, outside any transaction, writes them then. *It said, until the
+    Nothing of the request lands: its run ids are written inside
+    `submit()`'s own transaction, which its guard refuses to open here, so a
+    caller who makes this mistake and then retries `accept()` correctly,
+    outside any transaction, writes them then. *It said, until the
     leftovers' review moved the Montage write into `submit()`, that the
     Montage row still landed here, in the caller's transaction; true when
-    written.*
+    written. A request writes no `Montage` at all since the montages piece
+    (design spec `2026-11-24-montages-design.md` section 4.6).*
     """
     import datajoint as dj
 
@@ -381,13 +303,12 @@ def test_accept_refuses_to_run_inside_a_transaction(landed_session, prefix):
 
     subject = "jbtxn01"
     naive_dt = datetime.datetime(2027, 5, 6, 9, 0)
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
     job = _request(
         subject=subject,
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         montage_id=0,
         idempotency_key="jbtxn01-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
     )
 
     conn = dj.conn()
@@ -397,7 +318,7 @@ def test_accept_refuses_to_run_inside_a_transaction(landed_session, prefix):
 
     assert len(schema_request.Request & {"idempotency_key": "jbtxn01-k1"}) == 0
     session_key = {"subject": subject, "session_datetime": naive_dt}
-    assert len(core.Montage & {**session_key, "montage_id": 0}) == 0
+    assert len(core.RunAssertion & session_key) == 0
 
 
 def test_session_datetime_is_normalised_through_to_naive_utc(landed_session, prefix):
@@ -407,11 +328,11 @@ def test_session_datetime_is_normalised_through_to_naive_utc(landed_session, pre
     and would pass even with tzinfo dropped naively.
     """
     from wl_preproc.responder.jobs import accept
-    from wl_preproc.schema import core
+    from wl_preproc.schema import request as schema_request
 
     subject = "jbtz001"
     naive_dt = datetime.datetime(2027, 5, 7, 14, 0)  # what must actually get stored
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
 
     # 09:00 at a fixed UTC-05:00 offset is the identical instant as 14:00 UTC.
     offset_aware = datetime.datetime(
@@ -422,63 +343,16 @@ def test_session_datetime_is_normalised_through_to_naive_utc(landed_session, pre
         session_datetime=offset_aware,
         montage_id=0,
         idempotency_key="jbtz001-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
     )
 
     key = accept(job, prefix=prefix)
 
     assert key["session_datetime"] == naive_dt
-    assert (
-        len(core.Montage & {"subject": subject, "session_datetime": naive_dt, "montage_id": 0})
-        == 1
-    )
+    assert len(schema_request.Activation & key) == 1
 
 
 # --- Review round 1 (2026-08-16): two Criticals and two Importants, all in
 # territory the original 12 tests above could not reach. ---
-
-
-def test_a_rejected_request_leaves_no_montage_or_run_assertion_and_a_correction_then_succeeds(
-    landed_session, prefix
-):
-    """C1: validate before writing, not after. The first draft inserted the
-    request's rows and only then checked the window, so a rejected request
-    permanently planted the very rows that caused its own rejection --
-    skip_duplicates=True then discarded every later correction, so the
-    request that FIXED it was rejected too, citing the stale values it
-    refused to replace. Here a derivative naming run 3, outside montage
-    [0, 12), is rejected with its montage and its asserted runs unwritten,
-    and the corrected request naming run 1 then succeeds.
-    """
-    from wl_preproc.responder.jobs import accept
-    from wl_preproc.schema import core
-    from wl_preproc.schema import request as schema_request
-
-    subject = "jbres01"
-    naive_dt = datetime.datetime(2027, 5, 14, 9, 0)
-    landed_session(subject, naive_dt)
-    boundaries = [{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}]
-
-    bad_job = _request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-                       idempotency_key="jbres01-k1", montage_boundaries=boundaries, run_numbers=[3])
-    with pytest.raises(ValueError, match="outside montage 0's window"):
-        accept(bad_job, prefix=prefix)
-
-    session_key = {"subject": subject, "session_datetime": naive_dt}
-    assert len(core.Montage & {**session_key, "montage_id": 0}) == 0, (
-        "a rejected request must not plant the Montage row it was rejected over"
-    )
-    assert len(core.RunAssertion & session_key) == 0, (
-        "a rejected request must not plant the runs it asserted"
-    )
-    assert len(schema_request.Request & {"idempotency_key": "jbres01-k1"}) == 0
-
-    corrected_job = _request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-                             idempotency_key="jbres01-k2", montage_boundaries=boundaries, run_numbers=[1])
-    key = accept(corrected_job, prefix=prefix)  # must not raise
-
-    assert (core.RunAssertion & {**session_key, "run_number": 1}).fetch1("works_run_id") == "wr-1"
-    assert (schema_request.Activation & key).fetch1("role") == "derivative"
 
 
 def test_accept_coerces_an_iso8601_string_session_datetime(landed_session, prefix):
@@ -490,26 +364,22 @@ def test_accept_coerces_an_iso8601_string_session_datetime(landed_session, prefi
     proves the actual wire shape works too.
     """
     from wl_preproc.responder.jobs import accept
-    from wl_preproc.schema import core
+    from wl_preproc.schema import request as schema_request
 
     subject = "jbstr01"
     naive_dt = datetime.datetime(2027, 5, 15, 9, 0)
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
     job = _request(
         subject=subject,
         session_datetime="2027-05-15T09:00:00Z",  # a plain string, not a datetime
         montage_id=0,
         idempotency_key="jbstr01-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
     )
 
     key = accept(job, prefix=prefix)
 
     assert key["session_datetime"] == naive_dt
-    assert (
-        len(core.Montage & {"subject": subject, "session_datetime": naive_dt, "montage_id": 0})
-        == 1
-    )
+    assert len(schema_request.Activation & key) == 1
 
 
 def test_accept_rejects_a_session_datetime_that_is_neither_a_datetime_nor_a_string(
@@ -523,13 +393,12 @@ def test_accept_rejects_a_session_datetime_that_is_neither_a_datetime_nor_a_stri
 
     subject = "jbbad01"
     naive_dt = datetime.datetime(2027, 5, 16, 9, 0)
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
     job = _request(
         subject=subject,
         session_datetime=12345,  # neither a datetime nor a string
         montage_id=0,
         idempotency_key="jbbad01-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
     )
 
     with pytest.raises(ValueError, match="session_datetime"):
@@ -550,7 +419,7 @@ def test_accept_normalises_an_aware_datetime_anywhere_in_the_stored_payload(
 
     subject = "jbpar01"
     naive_dt = datetime.datetime(2027, 5, 23, 9, 0)
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
     aware_param = datetime.datetime(2027, 5, 23, 8, 0, tzinfo=datetime.UTC)
     job = JobRequest(
         domain="neural",
@@ -559,7 +428,6 @@ def test_accept_normalises_an_aware_datetime_anywhere_in_the_stored_payload(
         idempotency_key="jbpar01-k1",
         metadata=MetadataBundle(
             runs=_asserted(),
-            montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
             probes=[],
             experimenter="jw",
             subject=subject,
@@ -575,57 +443,25 @@ def test_accept_normalises_an_aware_datetime_anywhere_in_the_stored_payload(
 
 
 def test_an_out_of_range_montage_id_is_refused_with_the_field_named(landed_session, prefix):
-    """I2: `core.Montage.montage_id` is a signed `tinyint` (-128..127).
-
-    **The refusal moved on 2026-08-26 and this test moved with it.** It used to
-    happen inside `accept()`; `contracts.protocol.MontageBoundary` now carries
-    the bound, so the request cannot be CONSTRUCTED with a montage id this
-    column cannot hold. Both are the same answer on the wire -- `handler.py`
-    maps `pydantic.ValidationError` (a `ValueError` subclass) and this module's
-    own `ValueError` to the same `422` -- so the `raises` block now spans the
-    build as well as the call, and asserts what a caller can actually observe:
-    a `ValueError` naming the offending field, from one of the two.
+    """I2: `core.Montage.montage_id` is a signed `tinyint` (-128..127), and a
+    selection naming one it cannot hold is refused with the field named,
+    before anything reads the database for it. *Its boundary case went with
+    `metadata.montage_boundaries` (design spec `2026-11-24-montages-design.md`
+    section 4.6): a request no longer sends a montage's bounds.*
     """
     from wl_preproc.responder.jobs import accept
 
     subject = "jbrng01"
     naive_dt = datetime.datetime(2027, 5, 17, 9, 0)
     landed_session(subject, naive_dt)
+    job = _request(
+        subject=subject,
+        session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
+        montage_id=99999,
+        idempotency_key="jbrng01-k1",
+    )
 
-    with pytest.raises(ValueError, match="montage_id"):
-        job = _request(
-            subject=subject,
-            session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-            montage_id=99999,
-            idempotency_key="jbrng01-k1",
-            montage_boundaries=[{"montage_id": 99999, "start_s": 0.0, "end_s": 12.0}],
-        )
-        accept(job, prefix=prefix)
-
-
-def test_a_non_finite_start_s_or_end_s_is_refused_with_the_field_named(landed_session, prefix):
-    """I2: `start_s`/`end_s` are `double` -- unbounded in magnitude for any
-    realistic session-time-seconds value, but a non-finite float (here,
-    infinity) or a wrong type is exactly the "syntactically fine Python value,
-    wrong for the column" case this whole guard class exists for.
-
-    Refusal moved to `MontageBoundary` on 2026-08-26; see the montage-id test
-    above for why the `raises` block now spans the build as well as the call.
-    """
-    from wl_preproc.responder.jobs import accept
-
-    subject = "jbrng05"
-    naive_dt = datetime.datetime(2027, 5, 21, 9, 0)
-    landed_session(subject, naive_dt)
-
-    with pytest.raises(ValueError, match="end_s"):
-        job = _request(
-            subject=subject,
-            session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-            montage_id=0,
-            idempotency_key="jbrng05-k1",
-            montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": float("inf")}],
-        )
+    with pytest.raises(ValueError, match=re.escape("selection['montage_id']=99999 is outside the column's range")):
         accept(job, prefix=prefix)
 
 
@@ -675,7 +511,6 @@ def test_accept_rejects_a_session_this_host_has_never_ingested(
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         montage_id=0,
         idempotency_key="jbnoses-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
     )
 
     written_tables = [
@@ -718,12 +553,11 @@ def test_the_subjects_details_fill_its_own_record(landed_session, prefix):
 
     subject = "jbsubj01"
     naive_dt = datetime.datetime(2027, 5, 9, 9, 0)
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
     job = _request(
         subject=subject,
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         idempotency_key="jbsubj01-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
         subject_details={"species": "Macaca mulatta", "sex": "F",
                          "date_of_birth": datetime.date(2016, 3, 2)},
     )
@@ -744,15 +578,14 @@ def test_a_nickname_is_stored_and_kept_when_absent(landed_session, prefix):
 
     subject = "jbnick01"
     naive_dt = datetime.datetime(2027, 5, 11, 9, 0)
-    landed_session(subject, naive_dt)
-    boundaries = [{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}]
+    landed_session(subject, naive_dt, montages=[_M0])
     accept(_request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-                    idempotency_key="jbnick01-k1", montage_boundaries=boundaries,
+                    idempotency_key="jbnick01-k1",
                     subject_details={"sex": "F", "nickname": "Pico"}), prefix=prefix)
     assert (pipeline.subject.Subject & {"subject": subject}).fetch1("subject_nickname") == "Pico"
 
     accept(_request(subject=subject, session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-                    idempotency_key="jbnick01-k2", montage_boundaries=boundaries,
+                    idempotency_key="jbnick01-k2",
                     subject_details={"sex": "F"}), prefix=prefix)
     assert (pipeline.subject.Subject & {"subject": subject}).fetch1("subject_nickname") == "Pico"
 
@@ -765,13 +598,12 @@ def test_a_request_without_details_leaves_the_subject_alone(landed_session, pref
 
     subject = "jbsubj02"
     naive_dt = datetime.datetime(2027, 5, 10, 9, 0)
-    landed_session(subject, naive_dt)
+    landed_session(subject, naive_dt, montages=[_M0])
     before = (pipeline.subject.Subject & {"subject": subject}).fetch1()
     job = _request(
         subject=subject,
         session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
         idempotency_key="jbsubj02-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
     )
 
     accept(job, prefix=prefix)
@@ -795,10 +627,9 @@ def test_every_insertion_wl_works_reports_is_recorded(landed_session, prefix):
     from wl_preproc.schema import ephys
 
     naive_dt = datetime.datetime(2027, 5, 11, 9, 0)
-    key = landed_session("jbprob01", naive_dt)
+    key = landed_session("jbprob01", naive_dt, montages=[_M0])
     accept(_request(
         subject="jbprob01", session_datetime=naive_dt.replace(tzinfo=datetime.UTC), idempotency_key="jbprob01-k1",
-        montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}],
         probes=[
             _probe(1, "19011110001", trajectory_id="T-7", target={"area": "V4d", "atlas": "CHARM", "atlas_level": 6},
                    area_assignment={"area": "V4v", "source": "at_rig",
@@ -828,9 +659,9 @@ def test_a_later_request_corrects_the_report_and_adds_the_assignment(landed_sess
 
     naive_dt = datetime.datetime(2027, 5, 12, 9, 0)
     runs = [*_RUNS, (4, 25.0, 30.0)]  # one run in each of the three montages
-    key = landed_session("jbprob02", naive_dt, runs=runs)
+    key = landed_session("jbprob02", naive_dt, runs=runs, montages=[
+        {"montage_id": m, "start_s": 12.0 * m, "end_s": 12.0 * (m + 1)} for m in range(3)])
     first = {"area": "V4d", "source": "at_rig", "asserted_at": "2027-05-12T10:00:00Z"}
-    boundaries = [{"montage_id": m, "start_s": 12.0 * m, "end_s": 12.0 * (m + 1)} for m in range(3)]
     for idempotency_key, montage_id, probes in (
         ("jbprob02-k1", 0, [_probe(1, "19011110001", area_assignment=first), _probe(2, "19011110002")]),
         ("jbprob02-k2", 1, [_probe(1, "19011110003", trajectory_id="T-8", area_assignment={
@@ -841,8 +672,7 @@ def test_a_later_request_corrects_the_report_and_adds_the_assignment(landed_sess
         ("jbprob02-k3", 2, [_probe(1, "19011110003", trajectory_id="T-8")]),
     ):
         accept(_request(subject="jbprob02", session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
-                        idempotency_key=idempotency_key, montage_id=montage_id,
-                        montage_boundaries=boundaries, runs=runs, probes=probes),
+                        idempotency_key=idempotency_key, montage_id=montage_id, runs=runs, probes=probes),
                prefix=prefix)
 
     reports = (ephys.InsertionReport & key).to_dicts(order_by="insertion_number")
@@ -860,7 +690,7 @@ def test_a_refused_request_records_no_report(landed_session, prefix):
 
     naive_dt = datetime.datetime(2027, 5, 13, 9, 0)
     key = landed_session("jbprob03", naive_dt)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="no montage 4 is listed"):
         accept(_request(subject="jbprob03", session_datetime=naive_dt.replace(tzinfo=datetime.UTC),
                         idempotency_key="jbprob03-k1", montage_id=4, probes=[_probe(1, "19011110001")]),
                prefix=prefix)
@@ -870,17 +700,13 @@ def test_a_refused_request_records_no_report(landed_session, prefix):
 
 # -- The canonical lifecycle (design spec 2026-09-30-canonical-lifecycle-design.md section 3)
 
-_LC_BOUNDARIES = [{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}]
-
-
 def _lifecycle_job(subject, session_datetime, key, **selection) -> JobRequest:
     return JobRequest(
         domain="neural",
         selection={"session_datetime": session_datetime, "montage_id": 0, **selection},
         parameters={},
         idempotency_key=key,
-        metadata=MetadataBundle(runs=_asserted(), montage_boundaries=_LC_BOUNDARIES, probes=[],
-                                experimenter="jw", subject=subject, task_types=[]),
+        metadata=MetadataBundle(runs=_asserted(), probes=[], experimenter="jw", subject=subject, task_types=[]),
     )
 
 
@@ -889,7 +715,7 @@ def test_a_replacement_request_supersedes_the_named_canonical(landed_session, pr
     from wl_preproc.schema import request as schema_request
 
     when = datetime.datetime(2027, 5, 20, 10, 0)
-    landed_session("jblc002", when)
+    landed_session("jblc002", when, montages=[_M0])
     first = accept(_lifecycle_job("jblc002", when, "jblc002-k1"), prefix=prefix)
     job = _lifecycle_job("jblc002", when, "jblc002-k2", role="canonical", supersedes_activation_id=0)
     replacement = accept(job, prefix=prefix)
@@ -906,7 +732,7 @@ def test_a_replacement_of_a_superseded_canonical_is_a_conflict(landed_session, p
     from wl_preproc.schema.request import SupersedeConflict
 
     when = datetime.datetime(2027, 5, 20, 11, 0)
-    landed_session("jblc003", when)
+    landed_session("jblc003", when, montages=[_M0])
     accept(_lifecycle_job("jblc003", when, "jblc003-k1"), prefix=prefix)
     accept(_lifecycle_job("jblc003", when, "jblc003-k2", role="canonical", supersedes_activation_id=0), prefix=prefix)
     with pytest.raises(SupersedeConflict, match="current canonical is activation 1"):
@@ -933,7 +759,7 @@ def test_a_selection_the_lifecycle_refuses_is_a_value_error(landed_session, pref
     from wl_preproc.schema import request as schema_request
 
     when = datetime.datetime(2027, 5, 20, 12, 0)
-    landed_session("jblc004", when)
+    landed_session("jblc004", when, montages=[_M0])
     key = f"jblc004-{sorted(selection.items())!r}"
     with pytest.raises(ValueError):
         accept(_lifecycle_job("jblc004", when, key, **selection), prefix=prefix)
@@ -948,7 +774,7 @@ def test_a_canonical_role_with_no_runs_named_takes_every_run_of_the_montage(land
     from wl_preproc.schema import request as schema_request
 
     when = datetime.datetime(2027, 5, 20, 13, 0)
-    landed_session("jblc005", when)
+    landed_session("jblc005", when, montages=[_M0])
     key = accept(_lifecycle_job("jblc005", when, "jblc005-k1", role="canonical", run_numbers=[]), prefix=prefix)
     assert key["activation_id"] == 0 and (schema_request.Activation & key).fetch1("role") == "canonical"
     assert sorted(int(n) for n in (schema_request.ActivationRun & key).to_arrays("run_number")) == [1, 2]
@@ -964,7 +790,7 @@ def test_a_null_supersedes_is_absent(landed_session, prefix, selection):
     from wl_preproc.schema import request as schema_request
 
     when = datetime.datetime(2027, 5, 20, 14, 0)
-    landed_session("jblc006", when)
+    landed_session("jblc006", when, montages=[_M0])
     key = accept(_lifecycle_job("jblc006", when, f"jblc006-{len(selection)}", **selection), prefix=prefix)
     row = (schema_request.Activation & key).fetch1()
     assert (row["activation_id"], row["role"], row["supersedes"]) == (0, "canonical", None)
@@ -975,21 +801,22 @@ def test_a_null_supersedes_is_absent(landed_session, prefix, selection):
 # probe whose runs a canonical states.
 
 
-def _landed_with_runs(landed_session, subject: str, day: int, runs=_RUNS) -> dict:
-    return landed_session(subject, datetime.datetime(2027, 9, day, 9, 0), runs=runs)
+def _landed_with_runs(landed_session, subject: str, day: int, runs=_RUNS, montages=(_M0,)) -> dict:
+    return landed_session(subject, datetime.datetime(2027, 9, day, 9, 0), runs=runs, montages=montages)
 
 
 def _runs_job(key: dict, idempotency_key: str, *, runs=_RUNS, ids: dict | None = None,
-              serials=(_SERIAL,), **selection) -> JobRequest:
+              serials=(_SERIAL,), probes: list[dict] | None = None, **selection) -> JobRequest:
+    """Montage 0's request, asserting `runs`; its probes are `serials` at insertions 1, 2, ..., or `probes`."""
+    if probes is None:
+        probes = [{"serial": serial, "insertion_number": index} for index, serial in enumerate(serials, start=1)]
     return JobRequest(
         domain="neural",
         selection={"session_datetime": key["session_datetime"], "montage_id": 0, **selection},
         parameters={},
         idempotency_key=idempotency_key,
-        metadata=MetadataBundle(
-            montage_boundaries=[{"montage_id": 0, "start_s": 0.0, "end_s": 12.0}], runs=_asserted(runs, ids),
-            probes=[{"serial": serial, "insertion_number": index} for index, serial in enumerate(serials, start=1)],
-            experimenter="jw", subject=key["subject"], task_types=[]),
+        metadata=MetadataBundle(runs=_asserted(runs, ids), probes=probes, experimenter="jw",
+                                subject=key["subject"], task_types=[]),
     )
 
 
@@ -1104,14 +931,13 @@ def test_one_works_run_id_for_two_runs_is_refused(landed_session, prefix):
 
 
 @pytest.mark.parametrize("refusal", ["key_reuse", "supersede"])
-def test_a_request_refused_with_a_409_records_none_of_its_runs_or_montages(landed_session, prefix, refusal):
-    """A refused request leaves no `RunAssertion` or `Montage` behind (the
-    plan's Global Constraint; Plan B's final review, M1, and the leftovers'
-    review): both are recorded in the same transaction as its `Request` and
-    `Activation`, so a 409 from `submit*()` rolls them back with them. A
-    `Montage` is never overwritten, so one recorded from a refused request
-    would fix that montage's boundaries for good."""
-    from wl_preproc.contracts.protocol import MontageBoundary
+def test_a_request_refused_with_a_409_records_none_of_its_runs(landed_session, prefix, refusal):
+    """A refused request leaves no `RunAssertion` behind (the plan's Global
+    Constraint; Plan B's final review, M1, and the leftovers' review): it is
+    recorded in the same transaction as its `Request` and `Activation`, so a
+    409 from `submit*()` rolls it back with them. *It held for the request's
+    `Montage` rows too, until a request stopped sending them (design spec
+    `2026-11-24-montages-design.md` section 4.6).*"""
     from wl_preproc.responder.jobs import accept
     from wl_preproc.schema import core
     from wl_preproc.schema.request import KeyReuseError, SupersedeConflict
@@ -1125,13 +951,9 @@ def test_a_request_refused_with_a_409_records_none_of_its_runs_or_montages(lande
         refused = _runs_job(key, f"{subject}-k2", role="canonical", supersedes_activation_id=7,
                             probe_runs={_SERIAL: [1, 2]})
         raised = SupersedeConflict
-    another = [*refused.metadata.montage_boundaries, MontageBoundary(montage_id=1, start_s=12.0, end_s=99.0)]
-    refused = refused.model_copy(update={"metadata": refused.metadata.model_copy(
-        update={"montage_boundaries": another})})
     with pytest.raises(raised):
         accept(refused, prefix=prefix)
     assert sorted(int(n) for n in (core.RunAssertion & key).to_arrays("run_number")) == [1, 2]
-    assert sorted(int(n) for n in (core.Montage & key).to_arrays("montage_id")) == [0]
 
 
 @pytest.mark.parametrize("path", ["replacement", "canonical_dedupe", "derivative_dedupe"])
@@ -1163,7 +985,7 @@ def test_runs_not_yet_measured_are_not_yet_ingested(landed_session, prefix):
     """wl.works retries this one: the event stage has not read the session."""
     from wl_preproc.responder.jobs import accept
 
-    key = landed_session("runjob4", datetime.datetime(2027, 9, 4, 9, 0), runs=())
+    key = landed_session("runjob4", datetime.datetime(2027, 9, 4, 9, 0), runs=(), montages=[_M0])
     with pytest.raises(ValueError, match="has no measured run on this host yet"):
         accept(_runs_job(key, "runjob4-k1", probe_runs={_SERIAL: [1]}), prefix=prefix)
 
@@ -1274,13 +1096,13 @@ def _job_body(subject, when, key, *, runs=None, **selection) -> dict:
     return {"domain": "neural",
             "selection": {"session_datetime": when.isoformat(), "montage_id": 0, **selection},
             "parameters": {}, "idempotency_key": key,
-            "metadata": {"runs": runs if runs is not None else _asserted(), "montage_boundaries": _LC_BOUNDARIES,
+            "metadata": {"runs": runs if runs is not None else _asserted(),
                          "probes": [], "experimenter": "jw", "subject": subject, "task_types": []}}
 
 
 def test_a_marked_run_without_a_reason_is_a_422(landed_session, prefix):
     when = datetime.datetime(2027, 6, 1, 9, 0)
-    landed_session("jbbad01", when)
+    landed_session("jbbad01", when, montages=[_M0])
     runs = _asserted()
     runs[1] = {**runs[1], "marked_bad": True}
     status, body = _post_job(_job_body("jbbad01", when, "jbbad01-k1", runs=runs), prefix=prefix)
@@ -1294,7 +1116,7 @@ def test_a_replacement_of_a_refused_canonical_is_accepted(landed_session, prefix
     from wl_preproc.schema import request as schema_request
 
     when = datetime.datetime(2027, 6, 1, 10, 0)
-    session_key = landed_session("jbbad02", when)
+    session_key = landed_session("jbbad02", when, montages=[_M0])
     nwb_schema.activate(prefix=prefix)
     first = accept(_lifecycle_job("jbbad02", when, "jbbad02-k1"), prefix=prefix)
     nwb_schema.NwbFile.insert1({**first, "status": "refused", "built_at": datetime.datetime(2027, 6, 1, 11, 0),
@@ -1379,7 +1201,7 @@ def _stored_before_the_fields_were_added(key: str) -> None:
 
 def test_a_retry_of_a_request_stored_before_a_field_was_added_is_the_same_request(landed_session, prefix):
     when = datetime.datetime(2027, 6, 2, 9, 0)
-    landed_session("jbver01", when)
+    landed_session("jbver01", when, montages=[_M0])
     body = _job_body("jbver01", when, "jbver01-k1")
     body["metadata"]["subject_details"] = {"species": "Macaca mulatta"}
     first_status, first = _post_job(body, prefix=prefix)
@@ -1392,7 +1214,7 @@ def test_a_retry_of_a_request_stored_before_a_field_was_added_is_the_same_reques
 
 def test_a_retry_that_changes_a_field_is_still_key_reuse(landed_session, prefix):
     when = datetime.datetime(2027, 6, 2, 10, 0)
-    landed_session("jbver02", when)
+    landed_session("jbver02", when, montages=[_M0])
     body = _job_body("jbver02", when, "jbver02-k1")
     body["metadata"]["subject_details"] = {"species": "Macaca mulatta"}
     assert _post_job(body, prefix=prefix)[0] == 200
@@ -1407,3 +1229,387 @@ def test_a_retry_that_changes_a_field_is_still_key_reuse(landed_session, prefix)
     # `accept` raises the module's own KeyReuseError; `server.py`'s seam is what turns it into the 409.
     with pytest.raises(KeyReuseError, match="payload differs"):
         accept(JobRequest.model_validate(changed), prefix=prefix)
+
+
+# --- A request names a montage this host listed (design spec `2026-11-24-montages-design.md` sections 4.4, 4.6
+# and 5; plan decision D14 and Review Focus 3). -------------------------------------------------------------------
+
+_M1 = {"montage_id": 1, "start_s": 0.0, "end_s": 12.0}
+
+
+def _session_of(key: dict) -> str:
+    return f"{key['subject']}/{key['session_datetime'].isoformat()}"
+
+
+def _nothing_written(key: dict, idempotency_key: str) -> bool:
+    from wl_preproc.schema import core
+    from wl_preproc.schema import request as schema_request
+
+    return not (core.RunAssertion & key or schema_request.Activation & key or schema_request.SharedActivation & key
+                or schema_request.Request & {"idempotency_key": idempotency_key})
+
+
+def test_a_canonical_names_a_listed_montage(landed_session, prefix):
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+
+    key = _landed_with_runs(landed_session, "jblist01", 21, montages=())
+    seed_montage(key, {"montage_id": 1, "start_s": 0.0, "end_s": 12.0})
+    activation = accept(_runs_job(key, "jblist01-k1", serials=(), montage_id=1), prefix=prefix)
+    assert (activation["montage_id"], (schema_request.Activation & activation).fetch1("role")) == (1, "canonical")
+    assert _run_rows(schema_request.ActivationRun, activation) == [(1,), (2,)]
+
+
+def test_a_montage_not_listed_is_a_422_naming_the_status(landed_session, prefix):
+    """Review Focus 3: a request built from an older listing names a montage that is no longer there, and is told
+    why, never given a file over the wrong runs. With no derivation stored the session is `waiting` (D13)."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import core
+
+    ambiguous = _landed_with_runs(landed_session, "jblist02", 22, montages=())
+    core.MontageDerivation.insert1({**ambiguous, "positions_status": "ambiguous", "positions_seq": 2,
+                                    "derived_at": datetime.datetime(2027, 9, 22, 10, 0)})
+    waiting = _landed_with_runs(landed_session, "jblist03", 23, montages=())
+    # Listed at seq 1 as montages 1 and 2; seq 2 left one.
+    placed = _landed_with_runs(landed_session, "jblist04", 24, montages=(_M1,))
+    for key, montage_id, status in ((ambiguous, 1, "ambiguous"), (waiting, 1, "waiting"), (placed, 2, "placed")):
+        idempotency_key = f"{key['subject']}-k1"
+        with pytest.raises(ValueError) as refused:
+            accept(_runs_job(key, idempotency_key, serials=(), montage_id=montage_id), prefix=prefix)
+        assert str(refused.value) == (
+            f"no montage {montage_id} is listed for {_session_of(key)}: positions_status is {status}; send PUT "
+            "/positions, or rebuild the request from a fresh GET /sessions")
+        assert _nothing_written(key, idempotency_key)
+
+
+def test_probe_runs_must_be_sortable(landed_session, prefix):
+    """Section 4.4: a probe's runs are among the ones its montage lists as sortable for it."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+
+    key = _landed_with_runs(landed_session, "jbsort01", 25, montages=())
+    seed_montage(key, _M1, probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1]}])
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, "jbsort01-k1", serials=("S1",), montage_id=1, probe_runs={"S1": [1, 2]}),
+               prefix=prefix)
+    assert str(refused.value) == "probe S1's run(s) [2] are not among its sortable runs [1] in montage 1"
+    assert _nothing_written(key, "jbsort01-k1")
+    activation = accept(_runs_job(key, "jbsort01-k2", serials=("S1",), montage_id=1, probe_runs={"S1": [1]}),
+                        prefix=prefix)
+    assert _run_rows(schema_request.ActivationProbeRun, activation) == [("S1", 1)]
+
+
+def _positions(key: dict, *probes: tuple[str, int], prefix, seq: int = 1) -> None:
+    """`PUT /positions` at `seq` for `probes` ((serial, insertion_number)), each inserted before the session."""
+    put(key, [{"serial": serial, "insertion_number": number,
+               "inserted_at": key["session_datetime"] - datetime.timedelta(minutes=10)} for serial, number in probes],
+        seq=seq, prefix=prefix)
+
+
+def test_a_probe_must_name_its_position(landed_session, prefix):
+    """D14: with positions stored, each of `metadata.probes` is one of them, by serial and insertion number."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _landed_with_runs(landed_session, "jbpos01", 26, montages=())
+    _positions(key, ("S1", 1), prefix=prefix)
+    seed_montage(key, _M1, probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1, 2]}])
+    for serial, number in (("S2", 1), ("S1", 2)):
+        idempotency_key = f"jbpos01-{serial}-{number}"
+        with pytest.raises(ValueError) as refused:
+            accept(_runs_job(key, idempotency_key, montage_id=1,
+                             probes=[{"serial": serial, "insertion_number": number}], probe_runs={serial: []}),
+                   prefix=prefix)
+        assert f"probe {serial} at insertion_number {number}" in str(refused.value)
+        assert _nothing_written(key, idempotency_key)
+    accept(_runs_job(key, "jbpos01-k1", montage_id=1, probes=[{"serial": "S1", "insertion_number": 1}],
+                     probe_runs={"S1": [1, 2]}), prefix=prefix)
+
+
+def test_a_probe_with_no_position_in_the_montage_sorts_nothing(landed_session, prefix):
+    """D14: S2's position covers no run of montage 1, so the montage does not list it, and it sorts no run there."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+
+    key = _landed_with_runs(landed_session, "jbpos02", 27, montages=())
+    _positions(key, ("S1", 1), ("S2", 2), prefix=prefix)
+    seed_montage(key, _M1, probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1, 2]}])
+    probes = [{"serial": "S1", "insertion_number": 1}, {"serial": "S2", "insertion_number": 2}]
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, "jbpos02-k1", montage_id=1, probes=probes, probe_runs={"S1": [1], "S2": [1]}),
+               prefix=prefix)
+    assert str(refused.value) == ("probe S2 holds no position in montage 1, so it sorts no run there; the request "
+                                  "gives it run(s) [1]")
+    assert _nothing_written(key, "jbpos02-k1")
+    activation = accept(_runs_job(key, "jbpos02-k2", montage_id=1, probes=probes, probe_runs={"S1": [1], "S2": []}),
+                        prefix=prefix)
+    assert _run_rows(schema_request.ActivationProbeRun, activation) == [("S1", 1)]
+
+
+def test_a_derivative_over_a_run_not_sortable_for_its_probe_is_a_422(landed_session, prefix):
+    """D14: a derivative's runs are every named probe's, so a run one of them cannot be sorted on is refused,
+    never quietly narrowed for that probe."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+
+    key = _landed_with_runs(landed_session, "jbsort02", 28, montages=())
+    seed_montage(key, _M1, probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1]}])
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, "jbsort02-k1", serials=("S1",), montage_id=1, run_numbers=[1, 2]), prefix=prefix)
+    assert str(refused.value) == "probe S1's run(s) [2] are not among its sortable runs [1] in montage 1"
+    assert _nothing_written(key, "jbsort02-k1")
+    activation = accept(_runs_job(key, "jbsort02-k2", serials=("S1",), montage_id=1, run_numbers=[1]),
+                        prefix=prefix)
+    assert _run_rows(schema_request.ActivationProbeRun, activation) == [("S1", 1)]
+
+
+def test_a_derivation_rewritten_while_a_request_is_checked_is_a_422(landed_session, prefix, monkeypatch):
+    """The race the stage could win: it re-derives the session after `accept()` has checked the montage and before
+    the activation is written. The insert's transaction takes the derivation's lock and finds it changed, so the
+    request is refused whole rather than landing on a montage it was never checked against."""
+    from wl_preproc.montage import stored
+    from wl_preproc.responder import jobs
+
+    key = _landed_with_runs(landed_session, "jbrace01", 29, montages=())
+    seed_montage(key, _M1)
+    checked = jobs._check_probes
+
+    def checked_then_rederived(session_key, probes):
+        checked(session_key, probes)
+        stored.write(key, stored.StoredMontages(
+            status="placed", positions_seq=None, flags=(),
+            montages=({"montage_id": 1, "start_s": 0.0, "end_s": 6.0, "probes": ()},), groups=()))
+
+    monkeypatch.setattr(jobs, "_check_probes", checked_then_rederived)
+    with pytest.raises(ValueError) as refused:
+        jobs.accept(_runs_job(key, "jbrace01-k1", serials=(), montage_id=1), prefix=prefix)
+    assert str(refused.value) == (
+        f"the montages of {_session_of(key)} were derived again while this request was checked: positions_status "
+        "is placed; rebuild the request from a fresh GET /sessions")
+    assert _nothing_written(key, "jbrace01-k1")
+
+
+@pytest.mark.parametrize("status", ["waiting", "ambiguous"])
+def test_a_montage_under_a_derivation_that_lists_none_is_a_422(landed_session, prefix, status):
+    """D13: montages are listed only at `placed` and `not_needed`, so one stored under any other status is not a
+    listed montage, and a request naming it is refused with the status named."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _landed_with_runs(landed_session, {"waiting": "jbstw01", "ambiguous": "jbsta01"}[status], 3, montages=())
+    seed_montage(key, _M1, status=status)
+    idempotency_key = f"{key['subject']}-k1"
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, idempotency_key, serials=(), montage_id=1), prefix=prefix)
+    assert str(refused.value) == (
+        f"no montage 1 is listed for {_session_of(key)}: positions_status is {status}; send PUT /positions, or "
+        "rebuild the request from a fresh GET /sessions")
+    assert _nothing_written(key, idempotency_key)
+
+
+def _positions_changed(key: dict) -> str:
+    return (f"session {key['subject']} {key['session_datetime'].isoformat()}: its positions changed (seq 2) since "
+            "its montages were derived (seq 1); send the request again once GET /sessions lists seq 2")
+
+
+def test_positions_sent_since_the_montages_were_derived_are_a_422(landed_session, prefix):
+    """D17: a `PUT /positions` stores only, and the next pass derives and lists. A request arriving between them
+    names montages of the earlier seq; accepted, it would fix them under the new positions (D8). It is told so,
+    not that its probe names no position: seq 2 renumbered S1's insertion."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _landed_with_runs(landed_session, "jbseq01", 30, montages=())
+    _positions(key, ("S1", 1), prefix=prefix)
+    seed_montage(key, _M1, probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1, 2]}])
+    _positions(key, ("S1", 2), prefix=prefix, seq=2)
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, "jbseq01-k1", montage_id=1, probes=[{"serial": "S1", "insertion_number": 1}],
+                         probe_runs={"S1": [1, 2]}), prefix=prefix)
+    assert str(refused.value) == _positions_changed(key)
+    assert _nothing_written(key, "jbseq01-k1")
+
+
+def test_positions_sent_while_a_request_is_checked_are_a_422(landed_session, prefix, monkeypatch):
+    """The same refusal when the `PUT` lands after the checks and before the activation is written: the insert's
+    transaction reads the stored seq under a lock, never from the snapshot it began with."""
+    from wl_preproc.responder import jobs
+
+    key = _landed_with_runs(landed_session, "jbseq02", 30, montages=())
+    _positions(key, ("S1", 1), prefix=prefix)
+    seed_montage(key, _M1, probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1, 2]}])
+    checked = jobs._check_probes
+
+    def checked_then_moved(session_key, probes):
+        checked(session_key, probes)
+        _positions(key, ("S1", 1), ("S2", 2), prefix=prefix, seq=2)
+
+    monkeypatch.setattr(jobs, "_check_probes", checked_then_moved)
+    with pytest.raises(ValueError) as refused:
+        jobs.accept(_runs_job(key, "jbseq02-k1", montage_id=1, probes=[{"serial": "S1", "insertion_number": 1}],
+                              probe_runs={"S1": [1, 2]}), prefix=prefix)
+    assert str(refused.value) == _positions_changed(key)
+    assert _nothing_written(key, "jbseq02-k1")
+
+
+def test_positions_sent_to_a_session_derived_with_none_are_a_422_saying_so(landed_session, prefix):
+    """A session derived before any positions were stored has no seq to name: the 422 says so."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _landed_with_runs(landed_session, "jbseq03", 30, montages=())
+    seed_montage(key, _M1, status="not_needed")
+    _positions(key, ("S1", 1), prefix=prefix)
+    with pytest.raises(ValueError) as refused:
+        accept(_runs_job(key, "jbseq03-k1", serials=(), montage_id=1), prefix=prefix)
+    assert str(refused.value) == (
+        f"session {key['subject']} {key['session_datetime'].isoformat()}: its positions changed (seq 1) since its "
+        "montages were derived with no positions; send the request again once GET /sessions lists seq 1")
+    assert _nothing_written(key, "jbseq03-k1")
+
+
+# --- A shared group's request (design spec `2026-11-24-montages-design.md` section 4.6; plan decisions D11,
+# D12). Group 1 is S1 at insertion 1 over montages 1 [0, 5) and 2 [5, 24), sortable on runs 1 and 2; S1 sorts no
+# run 3 in montage 2. ---------------------------------------------------------------------------------------------
+
+
+def _shared_session(landed_session, subject: str, *, prefix) -> dict:
+    key = landed_session(subject, datetime.datetime(2027, 10, 1, 9, 0))
+    _positions(key, ("S1", 1), ("S2", 2), prefix=prefix)
+    seed_montage(key, {"montage_id": 1, "start_s": 0.0, "end_s": 5.0},
+                 probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [1]}])
+    seed_montage(key, {"montage_id": 2, "start_s": 5.0, "end_s": 24.0},
+                 probes=[{"serial": "S1", "insertion_number": 1, "sortable_runs": [2]},
+                         {"serial": "S2", "insertion_number": 2, "sortable_runs": [2, 3]}])
+    seed_group(key, {"group_id": 1, "serial": "S1", "insertion_number": 1, "montage_ids": [1, 2],
+                     "sortable_runs": [1, 2]})
+    return key
+
+
+def _shared_job(key: dict, idempotency_key: str, *, runs=_RUNS, probes=None, **selection) -> JobRequest:
+    """Group 1's request, asserting `runs`, with S1 at insertion 1 sorted on runs 1 and 2 unless `selection` or
+    `probes` say otherwise."""
+    return JobRequest(
+        domain="neural",
+        selection={"role": "shared", "group_id": 1, "session_datetime": key["session_datetime"],
+                   "probe_runs": {"S1": [1, 2]}, **selection},
+        parameters={},
+        idempotency_key=idempotency_key,
+        metadata=MetadataBundle(runs=_asserted(runs), experimenter="jw", subject=key["subject"], task_types=[],
+                                probes=probes if probes is not None else [{"serial": "S1", "insertion_number": 1}]),
+    )
+
+
+def test_a_shared_request_is_stored_and_waits(landed_session, prefix):
+    """Section 4.6: accepted and stored, its build waiting on sorting. Its one probe's report is written as a
+    canonical's is, and the NWB stage has nothing to build for it."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import core, ephys
+    from wl_preproc.schema import request as schema_request
+
+    key = _shared_session(landed_session, "jbshr01", prefix=prefix)
+    activation = accept(_shared_job(key, "jbshr01-k1"), prefix=prefix)
+    assert activation == {**key, "group_id": 1, "activation_id": 0}
+    assert (schema_request.SharedActivation & activation).fetch1("request_key") == "jbshr01-k1"
+    assert sorted(int(n) for n in (schema_request.SharedActivation.ProbeRun & activation).to_arrays("run_number")) \
+        == [1, 2]
+    assert not schema_request.Activation & key
+    assert [(int(r["insertion_number"]), r["probe_serial"]) for r in (ephys.InsertionReport & key).to_dicts()] == [
+        (1, "S1")]
+    assert sorted(int(n) for n in (core.RunAssertion & key).to_arrays("run_number")) == [1, 2, 3]
+
+
+def test_a_shared_request_answers_as_a_canonical(landed_session, prefix):
+    """Q4: the same key again is a retry, another key for the group returns its activation, and the first key
+    with another payload is key reuse. Over HTTP the answer is a canonical's 200."""
+    from wl_preproc.responder.jobs import accept
+    from wl_preproc.schema import request as schema_request
+    from wl_preproc.schema.request import KeyReuseError
+
+    key = _shared_session(landed_session, "jbshr02", prefix=prefix)
+    first = accept(_shared_job(key, "jbshr02-k1"), prefix=prefix)
+    assert accept(_shared_job(key, "jbshr02-k1"), prefix=prefix) == first
+    assert accept(_shared_job(key, "jbshr02-k2"), prefix=prefix) == first
+    assert len(schema_request.SharedActivation & key) == 1
+    assert schema_request.Request & {"idempotency_key": "jbshr02-k2"}
+    with pytest.raises(KeyReuseError, match="payload differs"):
+        accept(_shared_job(key, "jbshr02-k1", probe_runs={"S1": [1]}), prefix=prefix)
+    body = _shared_job(key, "jbshr02-k1").model_dump(mode="json")
+    assert _post_job(body, prefix=prefix) == (200, {"activation": {
+        "subject": "jbshr02", "session_datetime": key["session_datetime"].isoformat(), "group_id": 1,
+        "activation_id": 0}, "accepted": True})
+
+
+_TWO_PROBES = [{"serial": "S1", "insertion_number": 1}, {"serial": "S2", "insertion_number": 2}]
+
+
+@pytest.mark.parametrize("subject, change, expect", [
+    ("jbshg01", {"montage_id": 1},
+     "selection.montage_id is a canonical's or a derivative's: a shared request names its group in "
+     "selection.group_id"),
+    ("jbshg02", {"run_numbers": [1, 2]},
+     "selection.run_numbers is a derivative's: a shared request names its probe's runs in selection.probe_runs"),
+    ("jbshg03", {"supersedes_activation_id": 0},
+     "selection['supersedes_activation_id'] needs selection['role'] == 'canonical'"),
+    ("jbshg04", {"group_id": 9},
+     "no shared group 9 is listed for jbshg04/2027-10-01T09:00:00: positions_status is placed"),
+    ("jbshg05", {"probes": _TWO_PROBES},
+     "metadata.probes names 2 probes, and a shared request names its group's one: group 1 is probe S1 at "
+     "insertion_number 1"),
+    ("jbshg06", {"probes": _TWO_PROBES[1:], "probe_runs": {"S2": [2]}},
+     "metadata.probes names probe S2 at insertion_number 2, and group 1 is probe S1 at insertion_number 1"),
+    ("jbshg07", {"probe_runs": {"S2": [1, 2]}},
+     "selection.probe_runs names ['S2'], and group 1 is probe S1: a shared request states its one probe's runs"),
+    ("jbshg08", {"probe_runs": {"S1": [1, 2, 3]}},
+     "selection.probe_runs['S1'] names run(s) [3] not among group 1's sortable runs [1, 2]"),
+    ("jbshg09", {"runs": _RUNS[:1]},
+     "selection.probe_runs['S1'] names run(s) [2] asserted neither in metadata.runs nor before"),
+])
+def test_a_shared_request_names_only_its_group(landed_session, prefix, subject, change, expect):
+    """D11, D12: a shared request names its listed group, that group's one probe, and runs among the group's
+    sortable runs, each asserted now or before. Anything else is a 422 naming the field, and writes nothing."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _shared_session(landed_session, subject, prefix=prefix)
+    change = dict(change)
+    fields = {name: change.pop(name) for name in ("runs", "probes") if name in change}
+    with pytest.raises(ValueError, match=re.escape(expect)):
+        accept(_shared_job(key, f"{subject}-k1", **fields, **change), prefix=prefix)
+    assert _nothing_written(key, f"{subject}-k1")
+
+
+def test_a_shared_request_on_a_group_derived_again_while_checked_is_a_422(landed_session, prefix, monkeypatch):
+    """The race `_hold_derivation` closes for a canonical, for a shared request: the stage re-derives the session
+    after the group was checked and before the activation is written, and the request is refused whole."""
+    from wl_preproc.montage import stored
+    from wl_preproc.responder import jobs
+
+    key = _shared_session(landed_session, "jbshrace", prefix=prefix)
+    checked = jobs._check_probes
+
+    def checked_then_rederived(session_key, probes):
+        checked(session_key, probes)
+        stored.write(key, stored.StoredMontages(
+            status="placed", positions_seq=1, flags=(),
+            montages=({"montage_id": 1, "start_s": 0.0, "end_s": 24.0, "probes": ()},), groups=()))
+
+    monkeypatch.setattr(jobs, "_check_probes", checked_then_rederived)
+    with pytest.raises(ValueError) as refused:
+        jobs.accept(_shared_job(key, "jbshrace-k1"), prefix=prefix)
+    assert str(refused.value) == (
+        f"the montages of {_session_of(key)} were derived again while this request was checked: positions_status "
+        "is placed; rebuild the request from a fresh GET /sessions")
+    assert _nothing_written(key, "jbshrace-k1")
+
+
+@pytest.mark.parametrize("subject, probe_runs", [("jbshe01", {"S1": []}), ("jbshe02", None)])
+def test_a_shared_request_names_at_least_one_run(landed_session, prefix, subject, probe_runs):
+    """D11: a group has one shared activation, never superseded, so one with no run would hold the group's sort for
+    good with nothing to sort. A missing or empty list for its probe is a 422, and writes nothing."""
+    from wl_preproc.responder.jobs import accept
+
+    key = _shared_session(landed_session, subject, prefix=prefix)
+    job = _shared_job(key, f"{subject}-k1", probe_runs=probe_runs)
+    if probe_runs is None:
+        del job.selection["probe_runs"]
+    with pytest.raises(ValueError) as refused:
+        accept(job, prefix=prefix)
+    assert str(refused.value) == ("group 1: a shared request names at least one of its sortable runs for probe S1 in "
+                                  "selection.probe_runs")
+    assert _nothing_written(key, f"{subject}-k1")

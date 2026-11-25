@@ -29,9 +29,14 @@ _SYSTEM_ENUM = "enum(" + ",".join(f"'{s}'" for s in SYSTEMS) + ")"
 @schema
 class Montage(dj.Manual):
     definition = """
-    # A maximal interval with no probe movement; the grain of unit identity.
-    # Key: (subject, session_datetime, montage_id). Sourced from wl.works
-    # item_insertion and nothing else — no insertion record, no canonical.
+    # A maximal interval with no probe movement and no change of channel
+    # selection; the grain of unit identity. Derived here, by the daemon's
+    # montage stage (`montage/stage.py`), from wl.works' probe positions and
+    # the probe census; never sent (design spec 2026-11-24-montages-design.md
+    # section 4.3). Numbered 1, 2, ... by first run, and fixed once the
+    # session's first request is accepted. Its runs are not stored: they are
+    # the runs whose start lies in [start_s, end_s).
+    # Key: (subject, session_datetime, montage_id).
     -> pipeline.Session
     montage_id : tinyint
     ---
@@ -56,6 +61,123 @@ class Run(dj.Manual):
     run_stop_time  : double             # (s) its RUN_END, or its last event when it faulted
     closed         : tinyint(1)         # 1 when a RUN_END arrived
     """
+
+
+# What the montage stage derives (design spec 2026-11-24-montages-design.md
+# sections 4.1-4.4; plan decision D9), written by `montage/stored.py::write`
+# and read by `montage/stored.py::read_stored`. Declared after `Run`, which
+# two of them reference. Core cannot reference ephys, so every
+# `electrode_config_hash` below is a soft reference to `ephys.ElectrodeConfig`.
+
+
+@schema
+class MontageDerivation(dj.Manual):
+    definition = """
+    # What the montage stage last derived for a session: whether its montages
+    # could be placed (`waiting` for positions, t = 0, the census or a run;
+    # `ambiguous` while an edge cannot be placed), and from which positions
+    # seq, whatever the status (plan decision D13). Rewritten only when the
+    # result changes, and never re-derived once the session has an accepted
+    # request (plan decision D8); but its positions_seq follows a seq-only
+    # PUT /positions after that, so the request check sees the seq wl.works
+    # holds. Key: (subject, session_datetime).
+    -> pipeline.Session
+    ---
+    positions_status : enum('not_needed','waiting','placed','ambiguous')
+    positions_seq = null : int unsigned  # null when no positions were stored
+    derived_at : datetime(6)  # naive UTC, when these rows were written
+    """
+
+    class Flag(dj.Part):
+        definition = """
+        # One flag the derivation raised, in the order it raised them.
+        # Key: (subject, session_datetime, flag_number).
+        -> master
+        flag_number : smallint unsigned  # from 1
+        ---
+        code : varchar(32)
+        message : varchar(1024)
+        run_number = null : smallint
+        """
+
+
+@schema
+class MontageProbe(dj.Manual):
+    definition = """
+    # One probe in one montage: its position (wl.works' insertion number) and
+    # its one selection there. The hash is null for a serial the census never
+    # names (plan decision D10). Key: (subject, session_datetime, montage_id,
+    # probe_serial).
+    -> Montage
+    probe_serial : varchar(32)
+    ---
+    insertion_number : tinyint unsigned
+    electrode_config_hash = null : varchar(32)
+    probe_type = null : varchar(32)
+    """
+
+
+@schema
+class MontageSortableRun(dj.Manual):
+    definition = """
+    # A run the probe can be sorted on in the montage: one its position covers,
+    # less a run an edge falls inside and a run its selection changed inside
+    # (spec section 4.4). Key: (subject, session_datetime, montage_id,
+    # probe_serial, run_number).
+    -> MontageProbe
+    -> Run
+    """
+
+
+@schema
+class PlacedPosition(dj.Manual):
+    definition = """
+    # One of wl.works' positions, placed between runs: from its first covered
+    # run's start to its last covered run's end, both null when it covers no
+    # run. Key: (subject, session_datetime, insertion_number).
+    -> pipeline.Session
+    insertion_number : tinyint unsigned
+    ---
+    probe_serial : varchar(32)
+    start_s = null : double  # (s) session time
+    end_s = null : double  # (s) session time
+    """
+
+
+@schema
+class SharedGroup(dj.Manual):
+    definition = """
+    # A set of two or more montages in which some electrodes of one probe, at
+    # one position, were all selected; it sorts every electrode selected in
+    # all of them (spec section 4.4). The hash is the intersection minted by
+    # `ephys.intersect_electrode_configs`, null with `n_electrodes` for a
+    # probe this host reads no channel map for, meaning every channel.
+    # Key: (subject, session_datetime, group_id).
+    -> pipeline.Session
+    group_id : smallint unsigned  # from 1
+    ---
+    probe_serial : varchar(32)
+    insertion_number : tinyint unsigned
+    electrode_config_hash = null : varchar(32)
+    probe_type = null : varchar(32)
+    n_electrodes = null : int unsigned
+    """
+
+    class Member(dj.Part):
+        definition = """
+        # One of the group's montages. Key: (subject, session_datetime,
+        # group_id, montage_id).
+        -> master
+        -> Montage
+        """
+
+    class SortableRun(dj.Part):
+        definition = """
+        # A run the group can be sorted on: its members' sortable runs for its
+        # probe. Key: (subject, session_datetime, group_id, run_number).
+        -> master
+        -> Run
+        """
 
 
 @schema

@@ -780,17 +780,20 @@ def _clocked(table) -> tuple:
 
 
 def _link_stage() -> tuple[int, list[str]]:
-    """Join each session's wl.works reports to the probes it recorded
-    (`ephys.link_insertions`; design spec `2026-09-30-nwb-probes-design.md`
-    section 2.3). Returns `(insertions whose link changed, per-session
-    failures)`, the two quantities one stage of `run_once` contributes.
+    """Join each session's placed positions and wl.works reports to the
+    probes it recorded (`ephys.link_insertions`; design specs
+    `2026-09-30-nwb-probes-design.md` section 2.3 and
+    `2026-11-24-montages-design.md` section 4.7). Returns `(insertions whose
+    link changed, per-session failures)`, the two quantities one stage of
+    `run_once` contributes.
 
-    Every session with a report, on every pass, rather than a computed
-    table's once: a later request can correct a report at any time, and a
-    relink has to follow it. A session with no report has nothing this
-    stage made. Freed sessions are not skipped -- it reads only the database,
-    never scratch."""
-    sessions = {(key["subject"], key["session_datetime"]) for key in ephys.InsertionReport.proj().keys()}
+    Every session with a report or a placed position, on every pass, rather
+    than a computed table's once: a later request can correct a report at any
+    time, and a relink has to follow it. A session with neither has nothing
+    this stage made. Freed sessions are not skipped -- it reads only the
+    database, never scratch."""
+    sessions = {(key["subject"], key["session_datetime"])
+                for table in (ephys.InsertionReport, core.PlacedPosition) for key in table.proj().keys()}
     linked, errors = 0, []
     for subject, session_datetime in sorted(sessions):
         key = {"subject": subject, "session_datetime": session_datetime}
@@ -799,6 +802,18 @@ def _link_stage() -> tuple[int, list[str]]:
         except Exception as exc:  # one session must not stop the others
             errors.append(f"link_insertions {key}: {exc}")
     return linked, errors
+
+
+def _montage_stage() -> tuple[int, list[str]]:
+    """Derive each listable session's montages and shared groups and store
+    them when they change, until the session's first accepted request
+    (`montage/stage.py::run_stage`; design spec
+    `2026-11-24-montages-design.md` sections 4.1-4.4, plan decision D8).
+    Returns `(sessions written, per-session failures)`. It reads only the
+    database, as the link stage does, so freed sessions are not skipped."""
+    from wl_preproc.montage.stage import run_stage
+
+    return run_stage()
 
 
 def _populate_event_stage(freed: list[dict] | None = None) -> tuple[int, list[str]]:
@@ -1095,6 +1110,13 @@ def run_once(
             errors.extend(f"{table.__name__} {key}: {err}" for key, err in result["error_list"])
         except Exception as exc:  # a failing stage must not stop the others
             errors.append(f"{table.__name__}: {exc}")
+
+    # After the loop, whose census and `ClockReference` it reads, and before
+    # the link stage, the listing and the NWB stages, which read its montages
+    # (plan decision D8).
+    derived, montage_errors = _montage_stage()
+    populated += derived
+    errors.extend(montage_errors)
 
     # After the loop, whose `ephys.ProbeCensus` it reads, and before the NWB
     # stages, which read what it writes.

@@ -188,7 +188,7 @@ from urllib.parse import parse_qs
 
 from pydantic import ValidationError
 
-from wl_preproc.contracts.protocol import ActiveSetRequest, JobRequest
+from wl_preproc.contracts.protocol import ActiveSetRequest, JobRequest, PositionsRequest
 
 _HEALTH_PATH = "/health"
 _JOBS_PATH = "/jobs"
@@ -197,6 +197,9 @@ _JOBS_PATH = "/jobs"
 # path that takes a query string (`?since=<cursor>`).
 _NWB_PATH = "/nwb"
 _NWB_ACTIVE_PATH = "/nwb/active"
+# One session's probe positions, the whole set, every time (design spec
+# `2026-11-24-montages-design.md` section 4.1).
+_POSITIONS_PATH = "/positions"
 # Landed sessions (design spec
 # `2026-10-01-session-listing-and-run-requests-design.md` section 2): the
 # other path that takes `?since=<cursor>`.
@@ -293,6 +296,23 @@ class ConflictError(Exception):
     """
 
 
+class NotFoundError(Exception):
+    """Raised by a `positions_fn` for a session this host has not landed: a
+    `404` `{"error": str}`. Plain, as `ConflictError` is, so this module
+    imports no DataJoint."""
+
+
+class PositionsConflict(ConflictError):
+    """A positions refusal wl.works can read: a seq below the stored one, an
+    equal seq with another set, or a changed set after the session's first
+    accepted request. A `409` `{"error": str, "positions_seq": int}`, where
+    `positions_seq` is the seq this host holds."""
+
+    def __init__(self, message: str, positions_seq: int) -> None:
+        super().__init__(message)
+        self.positions_seq = positions_seq
+
+
 def _json_default(value: Any) -> str:
     """`json.dumps(..., default=_json_default)`'s fallback for the one type
     a `dict` returned by `accept_fn` can legitimately hold that raw `json`
@@ -367,6 +387,7 @@ def make_handler(
     nwb_list_fn: Callable[[int | None, int | None], dict] | None = None,
     nwb_active_fn: Callable[[ActiveSetRequest], dict] | None = None,
     sessions_list_fn: Callable[[int | None, int | None], dict] | None = None,
+    positions_fn: Callable[[PositionsRequest], dict] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a `BaseHTTPRequestHandler` subclass closing over `token` and the
     two callables. A fresh class per call -- not a module-level singleton --
@@ -431,6 +452,7 @@ def make_handler(
         _nwb_list_fn = staticmethod(nwb_list_fn) if nwb_list_fn is not None else None
         _nwb_active_fn = staticmethod(nwb_active_fn) if nwb_active_fn is not None else None
         _sessions_list_fn = staticmethod(sessions_list_fn) if sessions_list_fn is not None else None
+        _positions_fn = staticmethod(positions_fn) if positions_fn is not None else None
         # This handler's route table: the two fixed endpoints, plus the NWB
         # ones when their callables were given.
         _paths = {
@@ -438,6 +460,7 @@ def make_handler(
             **({_NWB_PATH: "GET"} if nwb_list_fn is not None else {}),
             **({_NWB_ACTIVE_PATH: "PUT"} if nwb_active_fn is not None else {}),
             **({_SESSIONS_PATH: "GET"} if sessions_list_fn is not None else {}),
+            **({_POSITIONS_PATH: "PUT"} if positions_fn is not None else {}),
         }
 
         # Review Important 5: BaseHTTPRequestHandler's version_string() joins
@@ -965,6 +988,9 @@ def make_handler(
                 return
             if self._route_or_none("PUT") is not None:
                 return
+            if self.path == _POSITIONS_PATH:
+                self._put_positions()
+                return
             try:
                 request = self._parse_body(ActiveSetRequest)
             except ValueError as exc:
@@ -979,6 +1005,33 @@ def make_handler(
                 self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
                 return
             self._send_json(202, result)
+
+        def _put_positions(self) -> None:
+            """`PUT /positions`: 200 `{positions_seq, changed}`; 404 for a
+            session not landed; 409 `{error, positions_seq}` for a refused
+            set; 422 for a malformed one, its pydantic error as the detail
+            (each refusal names the field and the `insertion_number`); 408
+            when the body never arrives."""
+            try:
+                request = self._parse_body(PositionsRequest)
+            except ValueError as exc:
+                self._send_json(422, _error_body(exc))
+                return
+            except TimeoutError:
+                self._send_json(408, {"error": "request timed out"})
+                return
+            try:
+                result = self._positions_fn(request)
+            except NotFoundError as exc:
+                self._send_json(404, {"error": str(exc)})
+                return
+            except PositionsConflict as exc:
+                self._send_json(409, {"error": str(exc), "positions_seq": exc.positions_seq})
+                return
+            except Exception as exc:  # noqa: BLE001 -- see module docstring's table
+                self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"})
+                return
+            self._send_json(200, result)
 
         do_DELETE = _foreign
         do_HEAD = _foreign

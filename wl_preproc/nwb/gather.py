@@ -800,11 +800,12 @@ def _electrodes(config_hash: str, probe_type: str) -> list[dict]:
              "y": float(row["y_coord"])} for row in rows]
 
 
-def _probe(serial: str, probe_type: str | None, report: dict | None, electrodes: list[dict],
-           session_key: dict) -> dict:
-    """One probe's entry: what the recording says, and what wl.works' report
-    of its insertion adds. The label is the latest assignment, else the aim,
-    else `unknown` (the requester's decision 1 of 2026-09-30)."""
+def _probe(serial: str, probe_type: str | None, insertion_number: int | None, report: dict | None,
+           electrodes: list[dict], session_key: dict) -> dict:
+    """One probe's entry: what the recording says, the insertion its
+    montage places it at, and what wl.works' report of that insertion adds.
+    The label is the latest assignment, else the aim, else `unknown` (the
+    requester's decision 1 of 2026-09-30)."""
     from wl_preproc.schema import ephys
 
     target = assignment = None
@@ -821,7 +822,7 @@ def _probe(serial: str, probe_type: str | None, report: dict | None, electrodes:
     return {
         "serial": serial,
         "probe_type": probe_type,
-        "insertion_number": None if report is None else int(report["insertion_number"]),
+        "insertion_number": insertion_number,
         "trajectory_id": None if report is None else report["trajectory_id"],
         "target": target,
         "assignment": assignment,
@@ -832,27 +833,45 @@ def _probe(serial: str, probe_type: str | None, report: dict | None, electrodes:
     }
 
 
-def _probes(key: dict, session_key: dict, run_rows: list[dict]) -> tuple[list[dict], list[str]]:
-    """Every probe the SpikeGLX segments under the file's runs recorded, joined to
-    wl.works' report of its insertion by serial, and the notes the file
-    carries about what could not be placed or joined (design spec
-    `2026-09-30-nwb-probes-design.md` sections 3 and 5).
+def _stored_montages(session_key: dict):
+    """The session's montages and shared groups as the montage stage stored
+    them (`montage/stored.py`), the one copy the build reads (design spec
+    `2026-11-24-montages-design.md` section 5). `Refused` without one:
+    `accept()` admits no request before the session is derived."""
+    from wl_preproc.montage.stored import read_stored
 
-    **Read from the tables the probes stage and `accept()` fill** --
-    `ProbeCensus`, `InsertionReport`, `AreaAssignment` -- rather than from
-    the linked `ProbeInsertion`/`SegmentConfig`: one path then covers a
-    joined probe and one that cannot be, and the linked tables hold the same
-    facts, joined for sorting.
+    stored = read_stored([session_key]).get((session_key["subject"], session_key["session_datetime"]))
+    if stored is None:
+        raise Refused("no stored montages: the montage stage has not derived this session")
+    return stored
 
-    `Refused` when one probe recorded two active-site maps under the file's
-    blocks: a bank change should have started a new montage (parent spec
-    section 8.3), so the montage is wrong, and a file across it would later
-    be sorted across it. **The segments are those the file's own blocks
-    overlap, not its whole montage's** (the final review's I1): a derivative
-    on one side of the change is recorded through one map and builds, which
-    is the remedy section 8.3 names for exactly this case."""
+
+def _probes(key: dict, session_key: dict, run_rows: list[dict], stored) -> tuple[list[dict], list[str]]:
+    """Every probe the SpikeGLX segments under the file's runs recorded, at
+    the insertion its montage places it at, joined to wl.works' report of
+    that insertion, and the notes the file carries about what could not be
+    placed or joined (design specs `2026-09-30-nwb-probes-design.md`
+    sections 3 and 5, and `2026-11-24-montages-design.md` sections 4.3 and
+    4.7).
+
+    **The insertion is the serial's `MontageProbe` row in the file's montage**
+    (`stored`, `read_stored`'s), one by construction, so a probe that moved
+    carries each montage's insertion, and its area, in that montage's files.
+    Its site map is that row's too: the selection its sortable runs in the
+    montage share. The census (`ProbeCensus`) says which probes the file's
+    own segments recorded, and `InsertionReport` and `AreaAssignment` add the
+    areas: one path then covers a joined probe and one that cannot be.
+
+    **A probe recording two site maps under the file's runs is built, no
+    longer refused** (section 4.3): the montage cuts at every change between
+    runs, so the change is inside a run, which the montage leaves out of the
+    probe's sortable runs. The note names that run: each file run whose
+    overlapping segments record two maps for the serial, the listing's
+    `bank_change_in_run`. The segments are those the file's own runs overlap,
+    so a derivative on one side of the change says nothing of it."""
     from wl_preproc.schema import core, ephys
 
+    montage_id = key["montage_id"]
     segments = {
         row["segment_id"]: row
         for row in (core.Segment & session_key & {"system": "spikeglx"}).to_dicts()
@@ -862,8 +881,12 @@ def _probes(key: dict, session_key: dict, run_rows: list[dict]) -> tuple[list[di
     parts = [{**part, "problem": ephys.probe_problem(part["problem"])}
              for part in (ephys.ProbeCensus.Probe & session_key).to_dicts(order_by=("segment_id", "stream"))
              if part["segment_id"] in segments]
-    reports = (ephys.InsertionReport & session_key).to_dicts(order_by="insertion_number")
+    reports = {(report["probe_serial"], int(report["insertion_number"])): report
+               for report in (ephys.InsertionReport & session_key).to_dicts()}
     recorded_anywhere = {serial for serial in (ephys.ProbeCensus.Probe & session_key).to_arrays("probe_serial") if serial}
+    (montage,) = [montage for montage in stored.montages if montage["montage_id"] == montage_id]
+    in_montage = {probe["serial"]: probe for probe in montage["probes"]}
+    positioned = {position["serial"] for position in stored.placed}
     probes, notes, by_serial = [], [], {}
     for part in parts:
         if part["probe_serial"]:
@@ -872,48 +895,90 @@ def _probes(key: dict, session_key: dict, run_rows: list[dict]) -> tuple[list[di
             notes.append(f"{segments[part['segment_id']]['segment_id']} {part['stream']}: {part['problem']}; the "
                          "probe it recorded is unknown")
     for serial, recorded in by_serial.items():
-        maps: dict[tuple, list[str]] = {}
-        for part in recorded:
-            if part["electrode_config_hash"] is not None:
-                maps.setdefault((part["electrode_config_hash"], part["probe_type"]), []).append(
-                    segments[part["segment_id"]]["segment_id"])
-        if len(maps) > 1:
-            raise Refused(
-                f"probe {serial} recorded two active-site maps under this file's runs of montage "
-                f"{key['montage_id']}, in "
-                + " and in ".join(", ".join(paths) for paths in maps.values())
-                + ": a bank change needs a new montage (parent spec section 8.3), and a file across it would be "
-                "sorted across it")
+        listed = in_montage.get(serial)
+        config_hash = None if listed is None else listed["electrode_config_hash"]
+        electrodes = [] if config_hash is None else _electrodes(config_hash, listed["probe_type"])
         problems = sorted({part["problem"] for part in recorded if part["problem"]})
-        electrodes = _electrodes(*next(iter(maps))) if maps else []
         if problems:
             notes.append(f"probe {serial}: {'; '.join(problems)}"
                          + ("" if electrodes else "; it has no electrodes in this file"))
-        mine = [report for report in reports if report["probe_serial"] == serial]
-        if len(mine) > 1:
-            notes.append(f"probe {serial} is reported for insertions "
-                         f"{' and '.join(str(report['insertion_number']) for report in mine)}, and which segments "
-                         "each covers is not known, so neither is joined and its area is unknown")
-        elif not mine:
-            notes.append(f"probe {serial} has no report from wl.works, so its insertion and area are unknown")
-        probes.append(_probe(serial, recorded[0]["part_number"], mine[0] if len(mine) == 1 else None, electrodes,
-                             session_key))
-    intan = bool(core.AcquisitionSystem & session_key & {"system": "rhs"})
-    unrecorded: dict[str, list[dict]] = {}
-    for report in reports:
-        if report["probe_serial"] not in recorded_anywhere:
-            unrecorded.setdefault(report["probe_serial"], []).append(report)
-    for serial, mine in unrecorded.items():
-        numbers = " and ".join(str(report["insertion_number"]) for report in mine)
-        if intan:
-            notes.append(f"probe {serial} (insertion {numbers}) is listed from wl.works' report alone: no SpikeGLX "
-                         "recording names it, and an Intan (RHS) header does not name its probe")
-            probes.append(_probe(serial, None, mine[0] if len(mine) == 1 else None, [], session_key))
+        changed = []
+        if listed is not None and len({part["electrode_config_hash"] for part in recorded
+                                       if part["electrode_config_hash"] is not None}) > 1:
+            changed = _changed_inside(serial, run_rows, segments, recorded)
+        unsortable = f"it has no sortable run in montage {montage_id}, so it has no electrodes in this file"
+        for run in changed:
+            notes.append(f"probe {serial} records two site maps under this file's runs, the change inside run {run}"
+                         + (f": the file gives it the site map its sortable runs in montage {montage_id} share, and "
+                            f"run {run} is not sorted for it" if listed["sortable_runs"] else f"; {unsortable}"))
+        if listed is not None and not listed["sortable_runs"] and not changed:
+            # Left out for another reason, such as an edge inside its one run: the file still says why.
+            notes.append(f"probe {serial} has no sortable run in montage {montage_id}, so it has no electrodes in "
+                         "this file")
+        report = None
+        if listed is None and serial not in positioned:
+            notes.append(f"probe {serial} is named by no position from wl.works, so its insertion and area are "
+                         "unknown")
+        elif listed is None:
+            notes.append(f"probe {serial} holds no position over montage {montage_id}'s runs, so its insertion and "
+                         "area are unknown")
         else:
-            notes.append(f"insertion {numbers} names probe {serial}, which no recording in this session names, so "
+            report = reports.get((serial, listed["insertion_number"]))
+            if report is None:
+                notes.append(f"probe {serial} (insertion {listed['insertion_number']}) has no report from wl.works, "
+                             "so its area is unknown")
+        probes.append(_probe(serial, recorded[0]["part_number"], None if listed is None else listed["insertion_number"],
+                             report, electrodes, session_key))
+    intan = bool(core.AcquisitionSystem & session_key & {"system": "rhs"})
+    for serial, listed in in_montage.items():
+        if serial in by_serial:
+            continue
+        number = listed["insertion_number"]
+        if serial in recorded_anywhere:
+            notes.append(f"probe {serial} (insertion {number}) is in montage {montage_id}, and no SpikeGLX file under "
+                         "this file's runs records it, so it has no electrodes in this file")
+            continue
+        if intan:
+            notes.append(f"probe {serial} (insertion {number}) is listed from wl.works' report alone: no SpikeGLX "
+                         "recording names it, and an Intan (RHS) header does not name its probe")
+            probes.append(_probe(serial, None, number, reports.get((serial, number)), [], session_key))
+        else:
+            notes.append(f"insertion {number} names probe {serial}, which no recording in this session names, so "
                          "the report is not joined")
     probes.sort(key=lambda probe: (probe["insertion_number"] is None, probe["insertion_number"] or 0, probe["serial"]))
     return probes, notes
+
+
+def _changed_inside(serial: str, run_rows: list[dict], segments: dict[str, dict], recorded: list[dict]) -> list[int]:
+    """The file's runs, in order, whose overlapping segments record two site
+    maps for `serial`: `listing/entry.py`'s `bank_change_in_run` rule."""
+    hashes: dict[str, set[str]] = {}
+    for part in recorded:
+        if part["electrode_config_hash"] is not None:
+            hashes.setdefault(part["segment_id"], set()).add(part["electrode_config_hash"])
+    changed = []
+    for run in run_rows:
+        found = set().union(*(found for segment_id, found in hashes.items()
+                              if segments[segment_id]["start_s"] < run["end_s"]
+                              and segments[segment_id]["end_s"] > run["start_s"]))
+        if len(found) > 1:
+            changed.append(run["run_number"])
+    return changed
+
+
+def _shared_groups_sentence(montage_id: int, stored) -> str:
+    """The canonical's sentence naming every shared group whose montages
+    include its own (design spec `2026-11-24-montages-design.md` section 4.7,
+    plan decision D16), or "" when none does."""
+    groups = [group for group in stored.groups if montage_id in group["montage_ids"]]
+    if not groups:
+        return ""
+    return (" Electrodes it shares with other montages are sorted in shared groups: "
+            + "; ".join(f"group {group['group_id']} (probe {group['serial']}, montages "
+                        f"{', '.join(str(m) for m in group['montage_ids'])}, "
+                        + ("every channel" if group["n_electrodes"] is None else f"{group['n_electrodes']} electrodes")
+                        + ")" for group in groups)
+            + ".")
 
 
 def gather(activation_key: dict) -> Gathered:
@@ -936,7 +1001,8 @@ def gather(activation_key: dict) -> Gathered:
     for row in run_rows:
         row["marked_bad"], row["bad_reason"] = marks.get(row["run_number"], (False, ""))
     extent = BlockSet.of(run_rows)
-    probes, probe_notes = _probes(key, session_key, run_rows)
+    stored_montages = _stored_montages(session_key)
+    probes, probe_notes = _probes(key, session_key, run_rows, stored_montages)
     sorted_runs: dict[str, list[int]] = {}
     for row in (request.ActivationProbeRun & key).to_dicts(order_by=("probe_serial", "run_number")):
         sorted_runs.setdefault(row["probe_serial"], []).append(row["run_number"])
@@ -967,6 +1033,8 @@ def gather(activation_key: dict) -> Gathered:
         description += " No calibration for the " + " and ".join(eye["missing_eyes"]) + " eye, so its gaze is absent."
     if no_eye_samples:
         description += " The eye recording has no sample in these runs, so the file has no eye data."
+    if activation["role"] == "canonical":
+        description += _shared_groups_sentence(key["montage_id"], stored_montages)
     requested_by = (request.Request & {"idempotency_key": activation["request_key"]}).fetch1("requested_by")
     run_out = _runs(run_rows, session_key)
     systems = sorted({system for row in run_out for system in row["coverage"]})

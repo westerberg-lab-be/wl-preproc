@@ -313,7 +313,7 @@ than something one side can do quietly.
   "domain": "neural",
   "selection": {
     "session_datetime": "2027-06-01T09:00:00+00:00",
-    "montage_id": 0,
+    "montage_id": 1,
     "probe_runs": {"19011110001": [1, 2]}
   },
   "parameters": {},
@@ -323,7 +323,6 @@ than something one side can do quietly.
       {"run_number": 1, "start_s": 0.002, "end_s": 1803.5, "works_run_id": "asr-311"},
       {"run_number": 2, "start_s": 1810.0, "end_s": 3604.25, "works_run_id": "asr-312"}
     ],
-    "montage_boundaries": [],
     "probes": [
       {
         "serial": "19011110001",
@@ -342,7 +341,8 @@ than something one side can do quietly.
 
 - **`domain`** is one of the five `name` values from the published `actions` list. The app
   never sends a command string — that distinction from SSH is the whole security argument.
-- **`selection`** requires `session_datetime` and `montage_id`. `session_datetime` arrives
+- **`selection`** requires `session_datetime` and `montage_id` (`group_id` instead of `montage_id` for a
+  `shared` request, below). `session_datetime` arrives
   as an ISO-8601 string (JSON has no datetime type); a `Z` suffix, a numeric offset, or no
   offset at all are all accepted, and the value is normalised to naive UTC on this side.
   **A sub-second component is accepted and truncated to whole seconds** — a session is
@@ -358,6 +358,10 @@ than something one side can do quietly.
   spellings — four whole-second (`+00:00`, `Z`, no offset, `11:00:00+02:00`) and six
   fractional (`.000`, `.123`, `.000123`, `.600`, `.999999`, and `.123` at `+02:00`) — every
   one `200` with `"session_datetime": "2027-08-04T09:00:00"`.
+  **`montage_id` names a montage this host listed** (design spec `2026-11-24-montages-design.md` §4.6): one
+  of the `montages` in that session's `GET /sessions` entry, whose `positions_status` is `placed` or
+  `not_needed`. The request never describes a montage; this host reads the one it stored and holds the
+  request to it. A montage that is not listed is a `422`; see *What the montages add to the refusals*.
   **A request names runs** (design spec
   `2026-10-01-session-listing-and-run-requests-design.md` §3):
   - `run_numbers`, when present and non-empty, makes the request a **derivative**
@@ -371,8 +375,9 @@ than something one side can do quietly.
     serial, the runs its sort covers, **stated in full** (the record is the run set each
     probe resolved to, not the exclusions), and only the file's runs. An empty list leaves
     that probe out of sorting. This is how a run bad on one probe is left out of that
-    probe's sort only. A derivative sends none: each probe it names covers all of its
-    runs.
+    probe's sort only. Each run is also among the runs the montage lists as `sortable_runs`
+    for that probe (see the refusals below). A derivative sends none: each probe it names covers all
+    of its runs, and those too must be among its sortable runs in the montage.
   - **`block_ids` is retired**, and so is `metadata.blocks`: a non-empty one is a `422`
     naming its replacement.
 
@@ -388,13 +393,36 @@ than something one side can do quietly.
     `role`, means the key is absent.
   - A canonical request with no `supersedes_activation_id`, for a montage that already has
     one, returns the montage's **current** canonical.
+
+  **Since the montages piece (2026-11-24), a third role: `"role": "shared"`.** A shared group is a set
+  of montages in which one probe held one electrode selection at one position
+  (`shared_groups` in `GET /sessions`). Its electrodes are sorted once, over the runs of all those
+  montages; this request says which runs.
+  - **Its key is `selection.group_id`**, a `group_id` the session's `shared_groups` lists, in place of
+    `montage_id`. Sending `montage_id` (non-null) or `run_numbers` with `"role": "shared"` is a `422`, and
+    so is `supersedes_activation_id`: a group has one shared activation and it is never superseded.
+  - **`selection.probe_runs` names its one probe**, `{"<the group's serial>": [runs]}`: at least one run,
+    each among the group's `sortable_runs` and asserted in `metadata.runs` or by an earlier request. A
+    missing or empty `probe_runs`, or an empty list for the probe, is a `422`: there is nothing to sort.
+  - **`metadata.probes` is exactly that probe's entry**: one entry, with the group's `serial` and
+    `insertion_number`.
+  - **Idempotency and the answers are a canonical's.** The same key with the same content is a `200` with
+    the same `activation`; another key for the same group returns the group's stored activation as it
+    is (the first request's runs stand); a key reused for another request is a `409`.
+  - **The `200` body is** `{"activation": {"subject": "…", "session_datetime": "2027-06-01T09:00:00",
+    "group_id": 1, "activation_id": 0}, "accepted": true}`. There is one shared activation per group, so
+    `activation_id` is `0`.
+  - **It is stored to wait for sorting.** Nothing builds a file for it yet, and `GET /nwb` lists
+    nothing for it. A canonical's NWB description says which shared groups its montage belongs to (see
+    `GET /nwb`).
 - **`metadata`** is the bundle this host needs from the ELN, and it is the reason this
   protocol works pull-only: everything wl-preproc needs arrives inbound with the request,
-  because this host cannot call wl.works to ask. `montage_boundaries` is wl.works' own
-  authored record; this host records it **if absent and never overwrites it**, since a
-  later request carrying corrected boundaries is wl.works correcting its own record, which
-  is its call to make explicitly rather than something to infer from whichever payload
-  arrived last.
+  because this host cannot call wl.works to ask. **`montage_boundaries` is retired**
+  (the field `metadata.montage_boundaries`, since 2026-11-24): this host derives a session's montages from the
+  positions sent to `PUT /positions` and lists them in `GET /sessions`, and a request names one in
+  `selection.montage_id`. An empty list is accepted and says nothing, as an empty
+  `metadata.blocks` is; a non-empty one is a `422` with the code `retired_field`, whatever it holds.
+  Nothing is recorded from it.
 - **`metadata.runs`** lists every run you hold for the session: `run_number`, `start_s` and
   `end_s` — your copy of what `GET /sessions` listed, measured from the recording — and
   `works_run_id`, your `animal_session_run` id. **Every run in `metadata.runs` is checked
@@ -428,15 +456,20 @@ than something one side can do quietly.
     `asserted_at` is ISO-8601, like `session_datetime`, but is **kept to the
     microsecond**, since two assignments may fall in one second. There is no atlas key,
     because your assignment row lists no atlas column.
-  - **The latest request wins** for an insertion, unlike `montage_boundaries` and a run's
+  - **The latest request wins** for an insertion, unlike a run's
     `works_run_id`, and as for `subject_details`: you are the authority on where a
     probe went. Assignments accumulate, as in your own table, and a request repeating one
     adds nothing. An insertion that a request does not mention is left as it was, so a
     request may name only its own montage's insertions.
   - This host joins each insertion to the probe the recording names, by `serial` (for
-    SpikeGLX, the `.meta`'s `imDatPrb_sn`). The NWB file notes a serial the recording
-    does not name, or one reported for two insertions in one session, rather than
-    guessing which segments each covers.
+    SpikeGLX, the `.meta`'s `imDatPrb_sn`). **A probe that moved has one insertion per position**,
+    each reported by its own request; a file takes the insertion its montage places the probe at, so
+    the same serial carries a different `insertion_number` and area in different montages' files.
+    The NWB file notes what it could not join (see *The notes a probe can carry* under `GET /nwb`)
+    rather than guessing which segments each covers.
+  - **With positions stored, each entry names one** (since 2026-11-24, plan decision D14): the same `serial`
+    at the same `insertion_number` as a position sent to `PUT /positions`, or the request is a `422`. With none
+    stored (a session with no ephys), entries are recorded as they come.
 - **`parameters`** is recorded verbatim as part of the stored request and is read by
   nothing today; the stage that eventually runs the job is what will interpret it. It is
   not inert, though: the whole request payload participates in the key-reuse comparison, so
@@ -484,7 +517,7 @@ than something one side can do quietly.
 **Response `200`:**
 
 ```json
-{"activation": {"subject": "pico", "session_datetime": "2027-06-01T09:00:00", "montage_id": 0, "activation_id": 0}, "accepted": true}
+{"activation": {"subject": "pico", "session_datetime": "2027-06-01T09:00:00", "montage_id": 1, "activation_id": 0}, "accepted": true}
 ```
 
 `activation` is the primary key of the `Activation` row this request resolved to.
@@ -495,6 +528,44 @@ for a derivative or a replacement canonical.
 **`accepted: true` means recorded, not finished.** The responder does not compute. It
 writes a Manual-tier request row and the daemon picks it up, exactly as the ingest watcher
 does.
+
+### What the montages add to the refusals
+
+All of these are a `422` (nothing is written), and each message names what was wrong. A request is
+checked against the stored derivation `GET /sessions` lists, never against a montage derived again, and the
+refusals come in this order.
+- **A montage or group that is not listed**: *no montage `N` is listed for `<subject>`/`<session_datetime>`:
+  positions_status is `<status>`; send PUT /positions, or rebuild the request from a fresh GET /sessions*
+  (*no shared group `N`* for a `shared` request). A montage or group is refused unless the session's
+  `positions_status` is `placed` or `not_needed`, so a `waiting` or `ambiguous` session refuses every
+  request, whatever montage id it names. Until a session's first accepted request its montage ids and
+  group ids may change when its positions do; once a request has named one, they are never renumbered.
+- **Positions changed since the montages were derived**: *session `<subject>` `<session_datetime>`: its
+  positions changed (seq `N`) since its montages were derived `(seq M)`* (*with no positions*, when it
+  was derived with none), *send the request again once GET /sessions lists seq `N`*. `PUT /positions` stores
+  a seq at once, and the daemon derives and lists it on its next pass; **a request built from a listing
+  older than the stored seq is refused, never applied.** Send it again once the session's
+  `positions_seq` is the seq you sent.
+- **A probe that names no stored position**: with positions stored, a `metadata.probes` entry that is not
+  one of them is a *metadata.probes names probe `S` at insertion_number `N`, and no stored position is that
+  probe at that insertion: the positions stored for `<subject>`/`<session_datetime>` are …; send PUT
+  /positions, or rebuild the request*.
+- **A run a probe cannot be sorted on**: *probe `S`'s run(s) `[…]` are not among its sortable runs `[…]` in
+  montage `M`*, or, for a probe the montage does not list, *probe `S` holds no position in montage `M`, so it
+  sorts no run there; the request gives it run(s) `[…]`*. A derivative's runs are each of its probes', so
+  it is checked as a canonical stating them is.
+- **A shared request that names no run**: *group `G`: a shared request names at least one of its sortable
+  runs for probe `S` in selection.probe_runs*, for a missing `probe_runs`, an empty one, or an empty list
+  for the probe. The other shared refusals say what differed: *metadata.probes names `N` probes, and a shared
+  request names its group's one*; *metadata.probes names probe `S` at insertion_number `N`, and group `G` is
+  probe `S2` at insertion_number `N2`*; *selection.probe_runs names `[…]`, and group `G` is probe `S`: a
+  shared request states its one probe's runs*; and *selection.probe_runs[`'S'`] names run(s) `[…]` not among
+  group `G`'s sortable runs `[…]`* (or *asserted neither in metadata.runs nor before*).
+- **A request that races a re-derivation**: *the montages of `<subject>`/`<session_datetime>` were derived again
+  while this request was checked: positions_status is `<status>`; rebuild the request from a fresh GET
+  /sessions*. A new set of positions reached the daemon between this host's checks and its write. Nothing was
+  accepted, and it is safe to resend. (A request refused here may have recorded the subject's details and
+  the insertion reports it carried, as the latest request wins for both and a resend replaces them.)
 
 ### Idempotency, and what the key is for
 
@@ -593,6 +664,31 @@ checksums of the subject's four datasets (`/general/subject/species`, `sex`, `da
 `description`), which `description.checksums` lists with the file's written-once data; every other
 checksum stays as built.
 
+### The notes a probe can carry, and the shared-groups sentence (since 2026-11-24)
+
+A file's `description.probes` and its `notes` follow its montage (`2026-11-24-montages-design.md` §4.3,
+§4.7). Each probe takes the insertion, and the site map, its montage lists for it: the montage's
+`electrode_config_hash` and `sortable_runs`, read from the stored rows and never derived again. A probe
+carries one of these notes where the file cannot place it or join it:
+- *probe `S` records two site maps under this file's runs, the change inside run `R`: the file gives it the
+  site map its sortable runs in montage `M` share, and run `R` is not sorted for it.* A bank change inside a
+  run is built, not refused: the montage cuts at every change between runs, and a run the change falls
+  inside is left out of the probe's sortable runs. When the probe has no sortable run in the montage, the
+  note ends *; it has no sortable run in montage `M`, so it has no electrodes in this file* instead.
+- *probe `S` has no sortable run in montage `M`, so it has no electrodes in this file.* The probe is recorded
+  but none of its runs in the montage can be sorted (an edge of its position fell inside its one run, say).
+- *probe `S` is named by no position from wl.works, so its insertion and area are unknown*, and *probe `S` holds
+  no position over montage `M`'s runs, so its insertion and area are unknown*.
+- *probe `S` (insertion `N`) has no report from wl.works, so its area is unknown.*
+- *insertion `N` names probe `S`, which no recording in this session names, so the report is not joined*; for
+  an Intan (RHS) session, which names no probe, *probe `S` (insertion `N`) is listed from wl.works' report
+  alone: no SpikeGLX recording names it, and an Intan (RHS) header does not name its probe*.
+
+A **canonical's** session description (the file's `description` text) also names the shared groups its montage belongs to: *Electrodes it
+shares with other montages are sorted in shared groups: group `G` (probe `S`, montages `A, B`, `K` electrodes)*,
+with *every channel* where the group's electrodes are not listed. The file itself holds only its own montage's
+runs; a shared group's sort, and its file, wait for sorting (see the `shared` role under `POST /jobs`).
+
 ## `PUT /nwb/active`
 
 *Added 2026-09-29, the same spec, section 5.* The **whole** set of activations wl.works wants
@@ -611,6 +707,88 @@ read under the same `Content-Length` rules as `POST /jobs`. The answer is `202` 
 `{"accepted": <n>, "unknown": [<keys this host has no activation for yet>]}`. Unknown keys
 are kept: a dataset may be marked active before its files exist, and a file in the set
 publishes straight to the fast share.
+
+## `PUT /positions`
+
+*Added 2026-11-24, `2026-11-24-montages-design.md` section 4.1.* The **whole** set of one session's
+probe positions, every time: where each probe was inserted and when, as wl.works records it. This host
+stores the set as sent and derives nothing in the request; **the montages follow on the daemon's next
+pass** (D17), and `GET /sessions` lists them, with the `positions_seq` they were made from. The answer says
+what this host holds, not what is listed.
+
+```json
+{"subject": "…", "session_datetime": "2027-06-01T09:00:00Z", "positions_seq": 4,
+ "positions": [{"serial": "19011110001", "insertion_number": 1,
+                "inserted_at": "2027-06-01T09:00:00Z", "ended_at": null, "end_kind": null,
+                "inserted_after_run": null, "ended_after_run": null}]}
+```
+
+The body is [`docs/schemas/positions_request.json`](../schemas/positions_request.json), read under the same
+`Content-Length` rules as `POST /jobs`. Request fields: `subject`, `session_datetime`, `positions_seq` and
+`positions`.
+- **`positions_seq`** (0 to 4294967295) is wl.works' own counter for the set: it orders the sets it sends.
+  The highest wins (see *The seq*, below). `subject` is 1 to 64 characters. `session_datetime` and each
+  time below are ISO-8601, with or without an offset; one without is taken as UTC, and every time is stored
+  as naive UTC to the microsecond.
+- **Each position** carries `serial` (1 to 32 characters), `insertion_number`, `inserted_at`, `ended_at`,
+  `end_kind`, `inserted_after_run` and `ended_after_run`. `insertion_number` is wl.works' identity for the
+  position, 1 to 255, never renumbered; gaps are fine. A probe that moves is two positions of one serial,
+  each with its own number. No author is carried. `ended_at` and `end_kind` (`withdrawn` or `moved`) go
+  together; null for a probe still in at the end of the session. A `moved` end cuts the session into a montage
+  on each side of the move, and so does the start of a serial's second or later position; a `withdrawn`
+  end and a serial's first insertion cut nothing by themselves. A change of a probe's electrode selection
+  between runs cuts it too, with no position involved.
+- **The answer is `200`** `{"positions_seq": <the seq this host now holds>, "changed": <bool>}`. `changed`
+  is false when the set was already held.
+
+**How a time is placed among the runs.** A time is placed once the session's t = 0 wall time is stored
+(`t0_datetime`), its probe census is read and it has measured runs; until then `positions_status` is `waiting`.
+- **Precision (D5).** A time that is a whole minute (seconds and microseconds zero) stands for that
+  minute: the window `[time, time + 60 s)`. A time with seconds stands for the wall-clock second it falls in,
+  `[second, second + 1 s)`, a sub-second part truncated (not rounded) and t = 0 not floored. The window is
+  half-open, so one that ends exactly where a run starts does not touch it.
+- **The widening.** Where t = 0 came from the manifest (`t0_source` `manifest`, accurate to the minute), the
+  window widens by 60 s each side; from `barcode`, `rig_clock` or `nidq_meta` it does not.
+- **The gap.** The window touches the gaps between runs (before run 1, between runs, after the last).
+  One touched gap is the placement. A window wholly inside one run (and no gap named) is placed after that run,
+  and the run is left out of that probe's sortable runs (flag `position_edge_inside_run`). More than one gap is
+  ambiguous.
+- **`inserted_after_run` and `ended_after_run`** say which gap, when the time alone does not: **the gap after
+  that run number, and `0` for the gap before run 1** (the gap before the first run has no run to follow, so 0
+  names it). The name is trusted only if the time touches that gap; a name the time does not touch, or a run
+  that is not a measured run of the session, is flagged `position_edge_ambiguous` and no montage is listed
+  until the name or the time is corrected. A named gap is how a person chooses among the gaps an ambiguous time
+  touches.
+- A session with an edge that cannot be placed lists `positions_status` `ambiguous`, no montages, and the
+  flags that say which edge and why.
+
+**The seq.**
+- **Until the session's first accepted job request**, the highest `positions_seq` wins. A higher seq replaces
+  the whole set. The same seq with the same set is a `200` with `changed` false; the same seq with another
+  set, or a lower seq, is a `409`.
+- **After it, the set is fixed** (the request's activation covers montages derived from it). A changed set is a
+  `409`. A **higher seq with the same set** records the seq alone (`changed` false); the stored
+  derivation's `positions_seq` moves on the same call, and a `GET /sessions` cursor reader sees the new
+  seq after the next listing pass, so wl.works' gate that compares its own seq with the listed one
+  never sticks. An empty set sent for a session whose request was accepted with no positions on file
+  records its seq the same way, but answers `changed` **true**: no set was stored before, so this is the first.
+  **A non-empty set for a session that was accepted with no positions** is a
+  `409` carrying `positions_seq` `0`: nothing is stored, so there is no seq to carry.
+
+**Refusals.** `422` for a body that fails the schema, each message naming the field and the position's
+`insertion_number` (wl.works shows them): an `ended_at` without an `end_kind`, an `end_kind` or `ended_after_run`
+without an `ended_at`, an `ended_at` before `inserted_at` (*ended_at is before inserted_at for insertion_number
+`N`*), an `insertion_number` given twice (*insertion_number `N` is given twice in positions*), and two positions
+of one serial that overlap (*positions of serial `S` overlap: insertion_number `A` and insertion_number
+`B`*; an end equal to the next start touches and is not an overlap, and an open end runs on). `404` for a session
+this host has not landed, `{"error": "no session of subject '<subject>' at <session_datetime> has landed
+here"}`. `409`, `{"error": "<why>", "positions_seq": <the seq this host holds>}`:
+- *positions_seq `N` is below the `M` this host holds*;
+- *positions_seq `N` is the one this host holds, with another set of positions*;
+- *the positions are fixed by the request `'<idempotency key>'`; positions_seq `N` changes them*, and *… adds them*
+  (with `positions_seq` 0), after the session's first accepted request.
+
+The `404` and `422` carry no `positions_seq`. A `408` means the body never arrived and nothing was stored.
 
 ## `GET /sessions`
 
@@ -703,6 +881,33 @@ Authorization: Bearer <token>
     the value it was built with (see below). Both are null until it is stored. It is what places a
     time of day between runs: `session_datetime` may be up to 60 s from it, and a run's `start_s` counts
     from it;
+  - **The montages** (since 2026-11-24, `2026-11-24-montages-design.md` §4.5): what this host derived from
+    the positions sent to `PUT /positions` and the recording, stored by the daemon and listed as stored:
+    - `positions_status`: `not_needed` (no ephys was recorded: one montage over every run, no probes, and no
+      positions to wait for), `waiting` (positions not sent yet, or `t0_datetime`, the probe census or the
+      runs not stored yet), `placed` (every position's edges are in a gap between runs) or `ambiguous` (an edge
+      could not be placed, or two placements contradict; the flags say which, and no montage is listed). It is
+      `waiting` until the daemon has passed the session.
+    - `positions_seq`: the seq of the positions the stored derivation was made from, null until the daemon has
+      passed the session (and while no positions were sent). **Compare it with the seq you sent**: a request
+      built before it lists your seq is refused. After the session's first accepted request it follows a
+      seq-only `PUT /positions` after the next listing pass (the stored derivation moves on the PUT itself).
+    - `montages`, null unless `positions_status` is `placed` or `not_needed`: each a `montage_id` (this host's,
+      from 1), `start_s` and `end_s` (the window `[start_s, end_s)` in session seconds; the last ends at its
+      last run's end, or 1 ms after a zero-length last run's start), `run_numbers` (the runs whose start lies in
+      the window), and its `probes`, each a `serial`, `insertion_number` (wl.works', from the position), the
+      site map it records there as `electrode_config_hash` (null for a probe the census does not name, such as an
+      Intan probe; also null, with `sortable_runs` `[]`, for a probe that has no sortable run in that montage, which
+      is not the no-channel-map case) and `sortable_runs` (the montage's runs its position covers, less a run an edge of that
+      position falls inside and a run in which its selection changes). **A montage splits where a probe moves
+      or its selection changes.**
+    - `shared_groups`, null as `montages` is, `[]` when nothing is shared: each a `group_id` (this host's, from
+      1), `serial`, `insertion_number`, `montage_ids` (the montages the group spans), `n_electrodes`,
+      `electrodes` (SpikeGLX electrode numbers, the ones selected in every one of its montages; both null for a
+      probe with no channel map read, whose group shares every channel) and `sortable_runs` (the runs of
+      all those montages the probe can be sorted on). Groups may overlap: for a probe on map A, then B, then A
+      at one position, A-and-B is shared over montages 1 to 3 and all of A over montages 1 and 3. A
+      `shared` request names one (see `POST /jobs`).
   - `flags`, each a `code`, a `message`, and the `run_number`, `block_number` or `segment_id` (a
     SpikeGLX file) it is about:
     `waiting_for_run_markers` (no measured run yet), `repeated_run_number` and
@@ -716,7 +921,15 @@ Authorization: Bearer <token>
     `ends_before_start`: a run, block or file whose end comes before its start, **left out of the
     entry** and named here with both its times (a block with its run's number, when it lies in one).
     It is the one flag that means something was withheld. Equal start and end is listed.
-    **None of them blocks anything here.**
+    The montages add three, each from a session's stored derivation and with a message that names the probe and
+    its insertion: `position_edge_ambiguous` (an edge that touches more than one gap, names a gap its time does
+    not touch, names a run that is not measured, or ends before it starts once placed; `positions_status`
+    is `ambiguous` and no montage is listed until it is corrected), `position_edge_inside_run` (an edge falls
+    inside a run: it is placed after that run, and the run is left out of that probe's sortable runs;
+    `run_number` says which) and `probe_without_position` (a probe the recording names that no position
+    names: its runs are sortable in no montage, and its area is unknown). A session in `ambiguous` lists all
+    three kinds it has at once, so everything to correct is in one listing. **None of them blocks anything
+    here**; a montage that is not listed is what stops a request, with its own `422`.
 
 ### `t0_datetime` is fixed when it is stored: re-timing a session
 
@@ -754,12 +967,14 @@ Every code this host can return, on any endpoint.
 | `202` | `PUT /nwb/active` | `{"accepted": …, "unknown": […]}` | The active set is recorded; the daemon's next pass moves files. | — |
 | `400` | all | `{"error": "bad request"}` | Malformed request line, or an unparseable version such as `HTTP/9.9.9`. See the framing note below. | No — fix the client |
 | `401` | all | `{"error": "unauthorized"}` | Missing, wrong-scheme, or wrong token; or a verb no endpoint answers. | No — fix the credential |
-| `404` | all | `{"error": "not found"}` | Path is not one of `/health`, `/jobs`, `/nwb`, `/nwb/active`, `/sessions`; or a query string on any path but `/nwb` and `/sessions`. | No |
+| `404` | all | `{"error": "not found"}` | Path is not one of `/health`, `/jobs`, `/nwb`, `/nwb/active`, `/positions`, `/sessions`; or a query string on any path but `/nwb` and `/sessions`. | No |
+| `404` | `PUT /positions` | `{"error": "no session of subject '<subject>' at <session_datetime> has landed here"}` | The session has not been ingested here: its own message, not the `not found` above. | Not until the transfer lands; then resend |
 | `405` | all | `{"error": "method not allowed"}` | Known path, wrong verb — `GET /jobs`, `POST /health`, `GET /nwb/active`, authenticated `PUT /health`. | No |
-| `408` | `POST /jobs`, `PUT /nwb/active` | `{"error": "request timed out"}` | The declared body never fully arrived. | **Yes** |
-| `409` | `POST /jobs` | `{"error": "<what differed>"}` | Idempotency key reused for materially different content; a replacement naming a canonical that is not the montage's current one; or a run named under a `works_run_id` other than the one recorded, or a `works_run_id` recorded for another run. | **No — needs a human** |
+| `408` | `POST /jobs`, `PUT /nwb/active`, `PUT /positions` | `{"error": "request timed out"}` | The declared body never fully arrived. | **Yes** |
+| `409` | `POST /jobs` | `{"error": "<what differed>"}` | Idempotency key reused for materially different content (a `shared` request's too); a replacement naming a canonical that is not the montage's current one; or a run named under a `works_run_id` other than the one recorded, or a `works_run_id` recorded for another run. | **No — needs a human** |
+| `409` | `PUT /positions` | `{"error": "<why>", "positions_seq": <the seq this host holds>}` | A `positions_seq` below the stored one; the stored seq with another set; or, after the session's first accepted request, a changed set (the message names that request's idempotency key). | No — send a higher seq, or the stored set |
 | `414` | all | `{"error": "request line too long"}` | Over-long request line. | No |
-| `422` | `POST /jobs`, `PUT /nwb/active`, `GET /nwb` and `GET /sessions` (a `since` that is not one non-negative integer, a `limit` that is not one positive integer, any other key, or a key sent twice) | `{"error": "…"}` or `{"error": "invalid request body", "detail": […]}` | The request is malformed, or asks for something this host cannot do — **including naming a session it has not ingested yet**. | No — fix and resend; for a not-yet-ingested session, resend once the transfer lands |
+| `422` | `POST /jobs`, `PUT /nwb/active`, `PUT /positions`, `GET /nwb` and `GET /sessions` (a `since` that is not one non-negative integer, a `limit` that is not one positive integer, any other key, or a key sent twice) | `{"error": "…"}` or `{"error": "invalid request body", "detail": […]}` | The request is malformed, or asks for something this host cannot do — **including, for `POST /jobs`, naming a session it has not ingested yet** (`PUT /positions` answers that with a `404`), a montage or group it has not listed, or positions that changed since its montages were derived. | No — fix and resend; for a not-yet-ingested session, or a montage or seq not listed yet, resend once the transfer lands or `GET /sessions` lists it |
 | `431` | all | `{"error": "request header fields too large"}` | Oversized header. | No |
 | `500` | all | `{"error": "<ExceptionType>: <message>"}` | This host's own fault, infrastructure included. | **Yes** |
 | `505` | all | `{"error": "http version not supported"}` | `HTTP/2.0` or later. See the framing note below. | No |
@@ -786,16 +1001,19 @@ arrive as ordinary responses with a status line, as does every other code above.
   `montage_id`; a `session_datetime` that is not parseable ISO-8601 or is before year 1000;
   an oversized `subject`; **a session this host has not ingested yet** (see below), or
   whose runs it has not measured yet; a `montage_id` that will not fit its column; a
-  `montage_id` with no boundary on record and none supplied in the request either; **a
+  `montage_id` or `group_id` this host has not listed; a non-empty `metadata.montage_boundaries` (retired);
+  positions that changed since the montages were derived; **a
   run that does not match the measured one** — not measured, its times more than 2 ms
   off, a measured run in the window left unasserted, or a derivative's run outside the
   window — whose message ends *rebuild the request from a fresh GET /sessions*; a
   `probe_runs` that does not state every probe's runs, or names a run the file does not
   hold; `run_numbers` on a canonical, or `probe_runs` on a derivative; the retired
-  `block_ids` or a non-empty `metadata.blocks`; a `role` other than `canonical` or
-  `derivative`; `supersedes_activation_id` without `"role": "canonical"`, or not a
-  non-negative integer; or `"role": "derivative"` without `run_numbers`. The message
-  names what was wrong.
+  `block_ids` or a non-empty `metadata.blocks`; a `role` other than `canonical`,
+  `derivative`, or `shared`; `supersedes_activation_id` without `"role": "canonical"`, or not a
+  non-negative integer; `"role": "derivative"` without `run_numbers`; or any refusal under *What
+  the montages add to the refusals*. The message names what was wrong.
+- **A session not ingested yet is a `422` for `POST /jobs`, and a `404` for `PUT /positions`**: a positions set
+  carries no job to refuse, and its `404` carries its own message (see the status table).
 
 **A session this host has not ingested yet is a `422`, and it is the ordinary case.** You
 know a session exists from the ELN the moment it is created; this host knows it exists only
@@ -821,10 +1039,12 @@ is the correct client behaviour; resending immediately, in a tight retry loop, i
 that is exactly why this is not a `500`.
 
 **A rejected request leaves nothing behind.** Every check runs against candidate rows
-before anything is written, so a request refused over a bad boundary does not plant that
-boundary, and the corrected request that follows succeeds. That holds for the not-yet-
+before anything is written, so a request refused over a run that disagrees with the measured one does not plant that
+assertion, and the corrected request that follows succeeds. That holds for the not-yet-
 ingested case too: the check runs before the first write, so nothing is left half-created
-for the real ingest to collide with when the transfer does land.
+for the real ingest to collide with when the transfer does land. The one exception is the request that races a
+re-derivation, which is refused after the subject's details and insertion reports were recorded (see *What the
+montages add to the refusals*).
 
 ### `Content-Length` rules
 
@@ -869,6 +1089,10 @@ inside the database write, say — is a `500`, not a `408`, so `408` never claim
 arrived late when in fact it arrived completely and something else was slow.
 
 ### `409` is not retryable, and that is the point
+
+`PUT /positions` has its own `409`s, with a `positions_seq` in the body (see that section): a seq below the
+stored one, the stored seq with another set, and a changed set after the session's first accepted request.
+They are cured by sending a higher seq, or the stored set, and not by resending. What follows is `POST /jobs`.
 
 `409 Conflict` has three causes on this host, and resending cures none of them: **an
 idempotency key reused for materially different content**; a replacement naming a canonical
@@ -1154,6 +1378,7 @@ directory so a drifted export fails the build:
   [`docs/schemas/nwb_description.json`](../schemas/nwb_description.json), `GET /nwb`
 - [`docs/schemas/active_set_request.json`](../schemas/active_set_request.json), `PUT /nwb/active`
 - [`docs/schemas/session_listing.json`](../schemas/session_listing.json), `GET /sessions`
+- [`docs/schemas/positions_request.json`](../schemas/positions_request.json), `PUT /positions`
 
 These are what wl.works' contract tests should validate against, and they are why this
 protocol needed no OpenAPI-generating web framework on the box that holds every session's

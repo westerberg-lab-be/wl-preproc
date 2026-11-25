@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from tests.schema.test_nwb_probes import _canonical
+from tests.schema.test_nwb_probes import _canonical, _position_each_probe
 from tests.schema.test_spikeglx_restart import _session as _restart_session
 from tests.synth.test_peripherals import MIX_BLOCKS, MIX_MONTAGES, MIX_RIG
 
@@ -38,6 +38,7 @@ def recorded(daemon_module, prefix, tmp_path_factory):
         tmp_path_factory, None, runs=True, subject="rfnwb1", session_id="2025-07-01_01", blocks=MIX_BLOCKS,
         montages=MIX_MONTAGES, rig_record=MIX_RIG)
     daemon_module.run_once(prefix=prefix)
+    _position_each_probe(daemon_module, prefix, key)
     return recipe, key, _canonical(daemon_module, prefix, key, "rfnwb1-k1", [])
 
 

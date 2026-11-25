@@ -15,7 +15,7 @@ import datetime
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 SCHEMA_VERSION = 1
@@ -145,6 +145,9 @@ _SessionSeconds = Annotated[float, Field(allow_inf_nan=False)]
 class MontageBoundary(BaseModel):
     """One maximal interval with no probe movement and no bank change, as
     wl.works asserts it -- design spec section 8.3's "recording montage".
+    Retired from requests with `MetadataBundle.montage_boundaries` (design
+    spec `2026-11-24-montages-design.md` section 4.6): this host derives a
+    session's montages. Kept so the field keeps its shape in the schema.
 
     Typed rather than `dict[str, Any]` because this payload is a frozen
     interface with a second implementer: section 11.2 records that wl.works'
@@ -302,7 +305,12 @@ class MetadataBundle(BaseModel):
     # than that the field is unknown; an empty list, which every request sent
     # while the field was required, says nothing and is accepted.
     blocks: list[dict[str, Any]] = Field(default=[], json_schema_extra={"maxItems": 0, "deprecated": True})
-    montage_boundaries: list[MontageBoundary]
+    # Retired as `blocks` is (design spec `2026-11-24-montages-design.md`
+    # section 4.6): this host derives a session's montages from `PUT
+    # /positions` and lists them in `GET /sessions`, and a request names one
+    # in `selection.montage_id`. An empty list says nothing and is accepted.
+    montage_boundaries: list[MontageBoundary] = Field(default=[], json_schema_extra={"maxItems": 0,
+                                                                                    "deprecated": True})
     probes: list[ProbeEntry]
     experimenter: Annotated[str, Field(max_length=64)]
     subject: str
@@ -324,6 +332,18 @@ class MetadataBundle(BaseModel):
                 "retired_field", "metadata.blocks is retired: a request asserts its runs in metadata.runs, each "
                 "with its works_run_id, as GET /sessions lists them")
         return blocks
+
+    @field_validator("montage_boundaries", mode="before")
+    @classmethod
+    def _montage_boundaries_are_retired(cls, boundaries: Any) -> Any:
+        # Before the items are read: a sender still sending boundaries is told
+        # the field is retired, whatever its boundaries hold. A
+        # `PydanticCustomError`, for the reason `_blocks_are_retired` gives.
+        if isinstance(boundaries, list) and boundaries:
+            raise PydanticCustomError(
+                "retired_field", "metadata.montage_boundaries is retired: this host derives a session's montages "
+                "from PUT /positions and lists them in GET /sessions; a request names one in selection.montage_id")
+        return boundaries
 
 
 class JobRequest(BaseModel):
@@ -370,6 +390,143 @@ class ActiveSetResponse(BaseModel):
 
     accepted: int
     unknown: list[ActivationKey]
+
+
+def as_naive_utc(value: datetime.datetime) -> datetime.datetime:
+    """`value` as a naive UTC time: an aware one is converted to UTC and made
+    naive, a naive one (UTC by this host's convention) is returned unchanged.
+    It does not truncate; `ingest/landing.to_naive_utc` truncates to the second
+    and imports DataJoint, which a contract module may not."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+
+class ProbePosition(BaseModel):
+    """One insertion of one probe, in wall time, as wl.works records it.
+
+    `insertion_number` is wl.works' identity for the position (1-255, never
+    renumbered; gaps are fine). `*_after_run` names the gap between runs a
+    person chose when the time alone is ambiguous: the gap after that run, `0`
+    for the gap before the first run. No author is carried (O3).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    serial: Annotated[str, Field(min_length=1, max_length=32)]
+    insertion_number: Annotated[int, Field(ge=1, le=255)]
+    inserted_at: datetime.datetime
+    ended_at: datetime.datetime | None = None
+    end_kind: Literal["withdrawn", "moved"] | None = None
+    inserted_after_run: Annotated[int, Field(ge=0, le=32767)] | None = None
+    ended_after_run: Annotated[int, Field(ge=0, le=32767)] | None = None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _a_refusal_names_the_insertion(cls, data: Any, handler: Any) -> ProbePosition:
+        """wl.works quotes our refusals to a person, so each names the field
+        and the position's `insertion_number`. A field's own bound message
+        does not carry it; this re-raises one that does, taking the number from
+        the input. When the input's number is missing or invalid, the bound
+        message stands as pydantic wrote it."""
+        try:
+            return handler(data)
+        except ValidationError as error:
+            number = data.get("insertion_number") if isinstance(data, dict) else None
+            if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 255:
+                raise
+            parts = []
+            for item in error.errors():
+                if item["type"].startswith("position_"):
+                    parts.append(item["msg"])  # already names the insertion
+                else:
+                    field = ".".join(str(part) for part in item["loc"]) or "position"
+                    parts.append(f"{field}: {item['msg']} (insertion_number {number})")
+            raise PydanticCustomError(
+                "position_field_invalid", "{detail}", {"detail": "; ".join(parts)}
+            ) from None
+
+    @model_validator(mode="after")
+    def _an_end_comes_whole_and_in_order(self) -> ProbePosition:
+        # `PydanticCustomError`, not `ValueError`, for the reason
+        # `MetadataBundle._blocks_are_retired` gives.
+        n = self.insertion_number
+        if self.ended_at is None:
+            for name in ("end_kind", "ended_after_run"):
+                if getattr(self, name) is not None:
+                    raise PydanticCustomError(
+                        "position_end_incomplete",
+                        "{name} is given without ended_at for insertion_number {n}",
+                        {"name": name, "n": n},
+                    )
+            return self
+        if self.end_kind is None:
+            raise PydanticCustomError(
+                "position_end_incomplete",
+                "ended_at is given without end_kind for insertion_number {n}",
+                {"n": n},
+            )
+        if as_naive_utc(self.ended_at) < as_naive_utc(self.inserted_at):
+            raise PydanticCustomError(
+                "position_ends_before_it_starts",
+                "ended_at is before inserted_at for insertion_number {n}",
+                {"n": n},
+            )
+        return self
+
+
+class PositionsRequest(BaseModel):
+    """`PUT /positions`: the WHOLE set of one session's probe positions, every
+    time. The highest `positions_seq` wins until the session's first accepted
+    job request; sending the same set twice changes nothing. No author is
+    carried (O3): a person's name leaves wl.works only in a job request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    subject: Annotated[str, Field(min_length=1, max_length=64)]
+    session_datetime: datetime.datetime
+    positions_seq: Annotated[int, Field(ge=0, le=4294967295)]
+    positions: list[ProbePosition]
+
+    @model_validator(mode="after")
+    def _numbers_once_and_one_serial_at_a_time(self) -> PositionsRequest:
+        seen: set[int] = set()
+        for position in self.positions:
+            if position.insertion_number in seen:
+                raise PydanticCustomError(
+                    "position_number_twice",
+                    "insertion_number {n} is given twice in positions",
+                    {"n": position.insertion_number},
+                )
+            seen.add(position.insertion_number)
+        by_serial: dict[str, list[ProbePosition]] = {}
+        for position in self.positions:
+            by_serial.setdefault(position.serial, []).append(position)
+        for serial, group in by_serial.items():
+            ordered = sorted(group, key=lambda p: as_naive_utc(p.inserted_at))
+            for earlier, later in zip(ordered, ordered[1:]):
+                # Touching (an end equal to the next start) is not overlap;
+                # an open end runs on without limit.
+                if earlier.ended_at is None or as_naive_utc(earlier.ended_at) > as_naive_utc(later.inserted_at):
+                    raise PydanticCustomError(
+                        "positions_overlap",
+                        "positions of serial {serial} overlap: insertion_number {a} and insertion_number {b}",
+                        {
+                            "serial": serial,
+                            "a": earlier.insertion_number,
+                            "b": later.insertion_number,
+                        },
+                    )
+        return self
+
+
+class PositionsResponse(BaseModel):
+    """`200`: the seq this host now holds, and whether the set changed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    positions_seq: int
+    changed: bool
 
 
 class Placement(BaseModel):
@@ -425,6 +582,9 @@ ListedFlagCode = Literal[
     "block_outside_runs",
     "rig_record_problem",
     "ends_before_start",
+    "position_edge_ambiguous",
+    "position_edge_inside_run",
+    "probe_without_position",
 ]
 
 
@@ -621,6 +781,49 @@ class RejectedFile(BaseModel):
     reason: str
 
 
+class ListedMontageProbe(BaseModel):
+    """One probe in one montage: its position's `insertion_number` (wl.works'),
+    the site map it records there (null for a probe this host reads no channel
+    map for), and the montage's runs sortable for it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    serial: str
+    insertion_number: int
+    electrode_config_hash: str | None
+    sortable_runs: list[int]
+
+
+class ListedMontage(BaseModel):
+    """A span of the session over which every probe holds one position and
+    one selection (design spec `2026-11-24-montages-design.md` section 4.5).
+    `run_numbers` are the runs whose start lies in `[start_s, end_s)`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    montage_id: int
+    start_s: float
+    end_s: float
+    run_numbers: list[int]
+    probes: list[ListedMontageProbe]
+
+
+class ListedSharedGroup(BaseModel):
+    """The montages in which one probe held one electrode selection at one
+    position. `electrodes` and `n_electrodes` are null for a probe this host
+    reads no channel map for."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    group_id: int
+    serial: str
+    insertion_number: int
+    montage_ids: list[int]
+    n_electrodes: int | None
+    electrodes: list[int] | None
+    sortable_runs: list[int]
+
+
 class SessionEntry(BaseModel):
     """One landed session, as it stands now. A naive `session_datetime` is
     UTC, as every one this host issues is. `tier` is the timing tier, null
@@ -657,6 +860,13 @@ class SessionEntry(BaseModel):
     # requester's choice of 2026-11-24).
     t0_datetime: datetime.datetime | None = None
     t0_source: Literal["barcode", "rig_clock", "nidq_meta", "manifest"] | None = None
+    # The montages and shared groups the stored derivation made from the
+    # positions at `positions_seq`: null unless `positions_status` is `placed`
+    # or `not_needed` (design spec `2026-11-24-montages-design.md` section 4.5).
+    montages: list[ListedMontage] | None = None
+    shared_groups: list[ListedSharedGroup] | None = None
+    positions_status: Literal["not_needed", "waiting", "placed", "ambiguous"] = "waiting"
+    positions_seq: int | None = None
 
 
 class SessionListing(BaseModel):

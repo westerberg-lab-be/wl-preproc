@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "ProbePosition": {
+      "additionalProperties": false,
+      "description": "One insertion of one probe, in wall time, as wl.works records it.\n\n`insertion_number` is wl.works' identity for the position (1-255, never\nrenumbered; gaps are fine). `*_after_run` names the gap between runs a\nperson chose when the time alone is ambiguous: the gap after that run, `0`\nfor the gap before the first run. No author is carried (O3).",
+      "properties": {
+        "end_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "withdrawn",
+                "moved"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End Kind"
+        },
+        "ended_after_run": {
+          "anyOf": [
+            {
+              "maximum": 32767,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended After Run"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At"
+        },
+        "inserted_after_run": {
+          "anyOf": [
+            {
+              "maximum": 32767,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inserted After Run"
+        },
+        "inserted_at": {
+          "format": "date-time",
+          "title": "Inserted At",
+          "type": "string"
+        },
+        "insertion_number": {
+          "maximum": 255,
+          "minimum": 1,
+          "title": "Insertion Number",
+          "type": "integer"
+        },
+        "serial": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Serial",
+          "type": "string"
+        }
+      },
+      "required": [
+        "serial",
+        "insertion_number",
+        "inserted_at"
+      ],
+      "title": "ProbePosition",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "`PUT /positions`: the WHOLE set of one session's probe positions, every\ntime. The highest `positions_seq` wins until the session's first accepted\njob request; sending the same set twice changes nothing. No author is\ncarried (O3): a person's name leaves wl.works only in a job request.",
+  "properties": {
+    "positions": {
+      "items": {
+        "$ref": "#/$defs/ProbePosition"
+      },
+      "title": "Positions",
+      "type": "array"
+    },
+    "positions_seq": {
+      "maximum": 4294967295,
+      "minimum": 0,
+      "title": "Positions Seq",
+      "type": "integer"
+    },
+    "session_datetime": {
+      "format": "date-time",
+      "title": "Session Datetime",
+      "type": "string"
+    },
+    "subject": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Subject",
+      "type": "string"
+    }
+  },
+  "required": [
+    "subject",
+    "session_datetime",
+    "positions_seq",
+    "positions"
+  ],
+  "title": "PositionsRequest",
+  "type": "object"
+}

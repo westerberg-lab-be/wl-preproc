@@ -437,3 +437,91 @@ def test_a_person_pausing_during_a_rig_pause_counts_once_each():
     entry = build_entry(_facts(rig_session={"session_kind": "training"},
                                control_kinds={"pause": 2, "resume": 1}, system_pauses=1))
     assert (entry["training_records"]["pauses"], entry["training_records"]["system_pauses"]) == (1, 1)
+
+
+# -- Montages and shared groups (design spec `2026-11-24-montages-design.md` section 4.5; plan D10, D13). ---------
+
+def _stored(status="placed", seq=3, flags=(), **changes):
+    from wl_preproc.montage.stored import StoredMontages
+
+    config = "a" * 32
+    montages = (
+        {"montage_id": 1, "start_s": 1.0, "end_s": 11.0,
+         "probes": ({"serial": "19011110001", "insertion_number": 1, "electrode_config_hash": config,
+                     "probe_type": "NP1000", "sortable_runs": (1,)},)},
+        {"montage_id": 2, "start_s": 11.0, "end_s": 21.0,
+         "probes": ({"serial": "19011110001", "insertion_number": 1, "electrode_config_hash": config,
+                     "probe_type": "NP1000", "sortable_runs": (2,)},)},
+    )
+    groups = ({"group_id": 1, "serial": "19011110001", "insertion_number": 1, "electrode_config_hash": config,
+               "probe_type": "NP1000", "n_electrodes": 3, "montage_ids": (1, 2), "sortable_runs": (1, 2)},)
+    fields = {"status": status, "positions_seq": seq, "flags": tuple(flags), "montages": montages, "groups": groups}
+    return StoredMontages(**{**fields, **changes})
+
+
+def test_placed_montages_and_groups_are_listed():
+    from wl_preproc.listing.entry import build_entry
+
+    entry = build_entry(_facts(montages=_stored()))
+    assert (entry["positions_status"], entry["positions_seq"]) == ("placed", 3)
+    assert entry["montages"] == [
+        {"montage_id": 1, "start_s": 1.0, "end_s": 11.0, "run_numbers": [1],
+         "probes": [{"serial": "19011110001", "insertion_number": 1, "electrode_config_hash": "a" * 32,
+                     "sortable_runs": [1]}]},
+        {"montage_id": 2, "start_s": 11.0, "end_s": 21.0, "run_numbers": [2],
+         "probes": [{"serial": "19011110001", "insertion_number": 1, "electrode_config_hash": "a" * 32,
+                     "sortable_runs": [2]}]},
+    ]
+    assert entry["shared_groups"] == [
+        {"group_id": 1, "serial": "19011110001", "insertion_number": 1, "montage_ids": [1, 2], "n_electrodes": 3,
+         "electrodes": [0, 1, 2], "sortable_runs": [1, 2]}]
+
+
+def test_waiting_and_ambiguous_list_no_montages():
+    """D13: the seq is listed whatever the status; montages and groups only at placed or not_needed. The stored
+    flags follow the entry's own, in order."""
+    from wl_preproc.listing.entry import build_entry
+
+    stored_flags = ({"code": "probe_without_position", "message": "no position for 1", "run_number": None,
+                     "block_number": None, "segment_id": None},
+                    {"code": "position_edge_ambiguous", "message": "edge", "run_number": 2,
+                     "block_number": None, "segment_id": None})
+    for status in ("waiting", "ambiguous"):
+        entry = build_entry(_facts(runs=[], records={}, strobed_runs=[],
+                                   montages=_stored(status=status, seq=7, flags=stored_flags)))
+        assert (entry["positions_status"], entry["positions_seq"]) == (status, 7)
+        assert entry["montages"] is None and entry["shared_groups"] is None
+        assert [flag["code"] for flag in entry["flags"]] == [
+            "waiting_for_run_markers", "probe_without_position", "position_edge_ambiguous"]
+        assert entry["flags"][2]["run_number"] == 2
+
+
+def test_a_session_not_yet_derived_is_waiting():
+    from wl_preproc.listing.entry import build_entry
+
+    entry = build_entry(_facts(montages=None))
+    assert (entry["positions_status"], entry["positions_seq"], entry["montages"], entry["shared_groups"]) == (
+        "waiting", None, None, None)
+
+
+def test_a_group_without_a_channel_map_lists_null_electrodes():
+    """D10: an Intan probe's channel map is read by no one here."""
+    from wl_preproc.listing.entry import build_entry
+
+    group = {"group_id": 1, "serial": "I1", "insertion_number": 2, "electrode_config_hash": None,
+             "probe_type": None, "n_electrodes": None, "montage_ids": (1, 2), "sortable_runs": (1, 2)}
+    entry = build_entry(_facts(montages=_stored(groups=(group,))))
+    assert entry["shared_groups"] == [
+        {"group_id": 1, "serial": "I1", "insertion_number": 2, "montage_ids": [1, 2], "n_electrodes": None,
+         "electrodes": None, "sortable_runs": [1, 2]}]
+
+
+def test_a_montages_runs_leave_out_what_ends_before_it_starts():
+    from wl_preproc.listing.entry import build_entry
+
+    runs = [{"run_number": 1, "task_type": 0, "run_start_time": 1.0, "run_stop_time": 10.0, "closed": 1},
+            {"run_number": 2, "task_type": 0, "run_start_time": 12.0, "run_stop_time": 5.0, "closed": 1}]
+    entry = build_entry(_facts(runs=runs, montages=_stored(status="placed")))
+    first = next(m for m in entry["montages"] if m["montage_id"] == 1)
+    second = next(m for m in entry["montages"] if m["montage_id"] == 2)
+    assert (first["run_numbers"], second["run_numbers"]) == ([1], [])

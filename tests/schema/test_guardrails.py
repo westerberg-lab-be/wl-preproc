@@ -240,9 +240,27 @@ def test_the_delete_previews_parent_graph_matches_the_real_foreign_keys(all_tabl
     where it does run, against DataJoint's own dependency graph rather than
     against a restatement of the declaration.
     """
-    from wl_preproc.cli.deleting import _assert_known_tables_are_real
+    from wl_preproc.cli.deleting import _assert_known_tables_are_real, _cascade_closure, _tables
+    from wl_preproc.schema import core, coverage, request
 
     _assert_known_tables_are_real()
+
+    # The parent check sees only the tables in the map, so a new table that
+    # descends from `Montage` and is not in it went unreported: the montage
+    # stage's tables did (the montages review's M2). Discovered here from
+    # DataJoint's graph instead: every table of the three schemas the map
+    # covers that descends from `Montage` is in it, and the preview from
+    # `Montage` names exactly those.
+    # The same for `SharedGroup`, whose activation (`request.SharedActivation`) does not descend from `Montage`.
+    covered = {f"`{module.schema.database}`" for module in (core, coverage, request)}
+    names = {table.full_table_name: name for name, table in _tables().items()}
+    for stage, table in (("Montage", core.Montage), ("SharedGroup", core.SharedGroup)):
+        descendants = [d for d in table.descendants()
+                       if d.split(".")[0] in covered and d != table.full_table_name]
+        assert not [d for d in descendants if d not in names], (
+            f"tables descending from {stage} missing from the delete preview's map: "
+            f"{[d for d in descendants if d not in names]}")
+        assert set(_cascade_closure(stage)) == {stage, *(names[d] for d in descendants)}
 
 
 @pytest.fixture(scope="module")

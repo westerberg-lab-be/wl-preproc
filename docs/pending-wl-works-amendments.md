@@ -1,9 +1,89 @@
 # Amendments to wl-works
 
-**Thirteen are outstanding: two opened 2026-08-22, one 2026-09-28, one 2026-09-29, two 2026-09-30, one 2026-10-01, one 2026-10-05, one 2026-10-14, one 2026-10-18, one 2026-11-07, one 2026-11-20, one 2026-11-24.** The earlier two
+**Fourteen are outstanding: two opened 2026-08-22, one 2026-09-28, one 2026-09-29, two 2026-09-30, one 2026-10-01, one 2026-10-05, one 2026-10-14, one 2026-10-18, one 2026-11-07, one 2026-11-20, two 2026-11-24.** The earlier two
 batches are closed; their records are kept below, because
 [`specs/2026-08-12-wl-preproc-design.md`](superpowers/specs/2026-08-12-wl-preproc-design.md)
 §14 items 10–11 point at it and a reference that dead-ends teaches nothing.
+
+---
+
+# OPEN — the montages piece: positions in, montages out, and a role for the electrodes montages share
+
+**Added by the montages piece (2026-11-24).** Opened with
+[`specs/2026-11-24-montages-design.md`](superpowers/specs/2026-11-24-montages-design.md) (wl.works' review of it,
+2026-11-24, is folded in: `positions_seq` orders the positions and is echoed in the listing, no author is carried,
+a refusal names the field and the position, and the gap before run 1 is `0`). This host now derives a session's
+montages from wl.works' probe positions and its own census, lists them, and takes requests against them.
+**Shipped at that merge**, not before. Three schema files change and wl.works pins them once:
+**`docs/schemas/job_request.json`, `docs/schemas/session_listing.json` and the new
+`docs/schemas/positions_request.json` must be taken at or after it.** `nwb_description.json` does not change.
+The prose is in `docs/ops/lab-host-protocol.md` (`PUT /positions`, `GET /sessions`, `POST /jobs`).
+
+**`PUT /positions`, new: `docs/schemas/positions_request.json`** (Tasks 1 and 5)
+- **The body** is the whole set of a session's positions every time: `subject`, `session_datetime`,
+  `positions_seq` and `positions`, each with `serial`, `insertion_number` (1 to 255, wl.works', never renumbered),
+  `inserted_at`, `ended_at`, `end_kind` (`withdrawn` or `moved`), `inserted_after_run` and `ended_after_run`.
+  The answer is `200` `{"positions_seq", "changed"}`.
+- **Placement is wl.works' `place()`, kept exactly** (D3): a time is a whole minute (`[t, t + 60 s)`) or a
+  second, the window is half-open and widens by 60 s each side when t = 0 came from the manifest, and it is
+  placed in the gap it touches. **Two additions to it:** **`0` names the gap before run 1** in `inserted_after_run`
+  and `ended_after_run` (D4; otherwise a run number names the gap after that run), and **the seq is recorded
+  after a request fires** (D2): once a session's first request is accepted a changed set is a `409`, a higher seq
+  with the same set records the seq alone, and the listed `positions_seq` follows it at once, so a gate that
+  compares the seq it sent with the listed one does not stick.
+- **The statuses:** `422` for a body that fails, each message naming the field and the `insertion_number`; `404`
+  for a session this host has not landed (its own message, `no session of subject '<subject>' at <session_datetime>
+  has landed here`); `409` with a `positions_seq` for a seq below the stored one, the stored seq with another
+  set, or a changed set after the first accepted request. A non-empty set for a session whose request was accepted
+  with no positions is a `409` carrying `positions_seq` 0.
+- **The montages follow on the daemon's next pass**, not in the answer: send nothing against them until
+  `GET /sessions` lists your seq.
+
+**`GET /sessions`: `docs/schemas/session_listing.json`** (Task 7)
+- **`positions_status`** (`not_needed`, `waiting`, `placed` or `ambiguous`; `waiting` by default) and
+  **`positions_seq`** (the seq the stored derivation was made from, or null).
+- **`montages`** (null unless `placed` or `not_needed`): `montage_id`, `start_s`, `end_s`, `run_numbers` and
+  `probes` (`serial`, `insertion_number`, `electrode_config_hash`, `sortable_runs`).
+- **`shared_groups`** (null likewise; `[]` when nothing is shared): `group_id`, `serial`, `insertion_number`,
+  `montage_ids`, `n_electrodes`, `electrodes` and `sortable_runs`.
+- **Three flags**, `position_edge_ambiguous`, `position_edge_inside_run` and `probe_without_position`. None blocks
+  anything by itself; an `ambiguous` session lists no montage until it is corrected.
+- Every listed session is listed once more, since each entry gains these fields.
+
+**`POST /jobs`: `docs/schemas/job_request.json`** (Tasks 8 and 9)
+- **`metadata.montage_boundaries` is retired.** The field stays in the schema as `deprecated` with `maxItems` 0 and
+  no longer required: an empty list is accepted, a non-empty one is a `422` (`retired_field`). A request names a
+  montage this host listed in `selection.montage_id`; **a canonical names a listed montage**, and its runs are
+  the montage's window. Montage ids now start at 1, and are this host's, not wl.works'.
+- **`role: shared`, new:** `selection.group_id` (a listed group's) in place of `montage_id`, with
+  `selection.probe_runs` for its one probe (at least one run, each among the group's `sortable_runs`) and
+  `metadata.probes` exactly that probe. Answers and idempotency are a canonical's; the `200` body is
+  `{"activation": {"subject", "session_datetime", "group_id", "activation_id": 0}, "accepted": true}`. Stored to
+  wait for sorting; `GET /nwb` lists nothing for it. `montage_id`, `run_numbers` and `supersedes_activation_id`
+  with it are a `422`.
+- **With positions stored, each `metadata.probes` entry names one** (same `serial`, same `insertion_number`), and
+  each probe's runs are among its `sortable_runs` in the montage (D14), a derivative's too.
+- **New refusals, each a `422` that is safe to send again:**
+  - a montage or group not listed, or listed at a `positions_status` other than `placed` or `not_needed`: *no
+    montage N is listed for …: positions_status is S; send PUT /positions, or rebuild the request from a fresh GET
+    /sessions*;
+  - **a request built from an older listing is refused, never applied**: the session's stored positions seq differs
+    from the seq its montages were derived from (*its positions changed (seq N) since its montages were derived
+    …; send the request again once GET /sessions lists seq N*);
+  - a shared request with no `probe_runs` for its group's probe, or an empty list (*group G: a shared request
+    names at least one of its sortable runs for probe S in selection.probe_runs*);
+  - a request that races a re-derivation (*the montages of … were derived again while this request was checked*).
+
+**`GET /nwb`: no schema change.** A file's probes take the insertion their montage places them at, and its notes
+say what it could not place (a probe with two site maps, one with no sortable run in the montage); a canonical's
+description names the shared groups its montage belongs to.
+
+**When it ships**
+- **A session lists `waiting` until the daemon has passed it**, and a session with ephys needs its positions sent
+  before any request against it can be accepted. **Development databases are rebuilt**, never migrated: new core
+  and request tables.
+- **To tell wl.works at the merge:** the three schema files and its pin; `PUT /positions`; the retired field; the
+  `shared` role; the refusals above; and that a seq it sent is listed only after the daemon's next pass.
 
 ---
 

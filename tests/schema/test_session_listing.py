@@ -346,3 +346,34 @@ def test_the_rigs_pauses_are_counted_from_stored_rows_apart_from_a_persons(liste
     entry = session_entry(listed["rigpause"][1])
     assert (entry["training_records"]["pauses"], entry["training_records"]["system_pauses"]) == (2, 1)
     assert session_entry(listed["runs"][1])["training_records"]["system_pauses"] == 0
+
+
+def test_the_listing_carries_the_derived_montages(dj_conn, prefix, tmp_path_factory):
+    """Through one pass: the montage the stage stored, listed with the seq it was derived from."""
+    from tests.identities import new_animal, new_serial
+    from tests.positions import before_t0, land, put
+    from wl_preproc import daemon
+    from wl_preproc.listing.entry import session_entry
+    from wl_preproc.schema import core
+
+    daemon.activate_all(prefix=prefix)
+    session = new_animal().session()
+    serial = new_serial()
+    key = land(tmp_path_factory, systems=("syncbox", "spikeglx"), subject=session.subject,
+               session_id=session.session_id, session_datetime=session.session_datetime, probe_serial=serial)
+    daemon.run_once(prefix=prefix)
+    waiting = session_entry(key)
+    assert (waiting["positions_status"], waiting["positions_seq"], waiting["montages"]) == ("waiting", None, None)
+
+    put(key, [{"serial": serial, "insertion_number": 1, "inserted_at": before_t0(key)}], seq=1, prefix=prefix)
+    report = daemon.run_once(prefix=prefix)
+    assert not [error for error in report["errors"] if key["subject"] in error]
+
+    entry = session_entry(key)
+    assert (entry["positions_status"], entry["positions_seq"]) == ("placed", 1)
+    (montage,) = entry["montages"]
+    assert [probe["insertion_number"] for probe in montage["probes"]] == [1]
+    assert [probe["serial"] for probe in montage["probes"]] == [serial]
+    assert montage["run_numbers"] == [run["run_number"] for run in entry["runs"]]
+    assert entry["positions_seq"] == (core.MontageDerivation & key).fetch1("positions_seq")
+    assert entry["shared_groups"] == []  # one montage shares nothing
