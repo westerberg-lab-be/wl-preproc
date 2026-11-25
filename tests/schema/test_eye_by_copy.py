@@ -879,6 +879,7 @@ def nwb_files(landed, prefix, tmp_path_factory):
     from wl_preproc.schema import core
     from wl_preproc.schema import nwb as nwb_schema
 
+    from tests.positions import seed_montage
     from tests.schema.test_nwb_build import _montage, _request
 
     keys = {}
@@ -887,6 +888,10 @@ def nwb_files(landed, prefix, tmp_path_factory):
         runs = [{"run_number": row["run_number"], "start_s": row["run_start_time"], "end_s": row["run_stop_time"],
                  "works_run_id": f"wr-{row['run_number']}"}
                 for row in (core.Run & session_key).to_dicts(order_by="run_number")]
+        # The daemon derived this session `waiting` (it records ephys); the montage its request names is stored
+        # as the montage stage would list it, after the session's last daemon pass.
+        held = (core.MontageDerivation & session_key).fetch1("positions_status")
+        seed_montage(session_key, _montage(runs), status="not_needed" if held == "not_needed" else "placed")
         keys[name] = accept(_request(session_key, f"{session_key['subject']}-{name}-canonical", _montage(runs), runs),
                             prefix=prefix)
     report = daemon.run_once(prefix=prefix, nwb_root=tmp_path_factory.mktemp("copy-nwb"))
