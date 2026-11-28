@@ -59,6 +59,7 @@ from wl_preproc.events.rigfields import (
     TEXT,
     TEXTS,
     WHOLE,
+    XY,
     Fields,
     Kind,
 )
@@ -109,6 +110,20 @@ class Place:
     polar: float | None = None
 
 
+CONSOLE_KEYS = ("size_deg", "window_deg", "light_xy")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class AsDrawn:
+    """What a look was drawn at, as the rig's console build records it: its
+    size and an object's window, in degrees, and its drawn chromaticity (CIE
+    xy), each None where the record says none or does not say."""
+
+    size_deg: float | None = None
+    window_deg: float | None = None
+    light_xy: tuple[float, float] | None = None
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class Stimulus:
     """One entry of a trial line's `stimuli` (XC-399): a `Show` that put a
@@ -135,6 +150,13 @@ class Stimulus:
     # Each eye's own position, by eye, read as a cyclopean one is (the rig
     # record fields' final review, M4).
     eye_at: tuple[tuple[str, Place], ...] = ()
+    # Console settings build: as drawn, on the entry and parallel to its
+    # objects (`objects_as_drawn`, and `eye_objects_as_drawn` by eye);
+    # `carries` names the CONSOLE_KEYS the entry or any of its objects has.
+    as_drawn: AsDrawn = AsDrawn()
+    objects_as_drawn: tuple[AsDrawn, ...] = ()
+    eye_objects_as_drawn: tuple[tuple[str, tuple[AsDrawn, ...]], ...] = ()
+    carries: frozenset[str] = frozenset()
 
 
 def _place(entry: dict, fields: Fields, field: str) -> Place:
@@ -146,9 +168,21 @@ def _place(entry: dict, fields: Fields, field: str) -> Place:
                     for name, key in (("x", "x"), ("y", "y"), ("eccentricity", "eccentricity"), ("polar", angle))})
 
 
-def _places(entry: dict, fields: Fields, field: str) -> tuple[Place, ...] | None:
+def _as_drawn(entry: dict, fields: Fields, field: str) -> AsDrawn:
+    return AsDrawn(size_deg=fields.read(entry, "size_deg", NUMBER, field=f"{field}.size_deg"),
+                   window_deg=fields.read(entry, "window_deg", NUMBER, field=f"{field}.window_deg"),
+                   light_xy=fields.read(entry, "light_xy", XY, field=f"{field}.light_xy"))
+
+
+def _places(entry: dict, fields: Fields, field: str) -> tuple[tuple[Place, ...], tuple[AsDrawn, ...], set[str]] | None:
+    """An entry's objects: where each was, what each was drawn at, and the
+    console keys any carries; None when it names no objects."""
     objects = fields.read(entry, "objects", OBJECTS, field=f"{field}.objects")
-    return None if objects is None else tuple(_place(item, fields, f"{field}.objects[]") for item in objects)
+    if objects is None:
+        return None
+    carried = {key for item in objects for key in CONSOLE_KEYS if key in item}
+    return (tuple(_place(item, fields, f"{field}.objects[]") for item in objects),
+            tuple(_as_drawn(item, fields, f"{field}.objects[]") for item in objects), carried)
 
 
 def _stimuli(row: dict, fields: Fields) -> tuple[Stimulus, ...] | None:
@@ -158,13 +192,19 @@ def _stimuli(row: dict, fields: Fields) -> tuple[Stimulus, ...] | None:
     out = []
     for entry in entries:
         eyes = {eye: fields.read(entry, eye, MAPPING, field=f"stimuli[].{eye}") for eye in ("left", "right")}
-        eye_objects, eye_at = [], []
+        eye_objects, eye_at, eye_drawn = [], [], []
+        carried = {key for key in CONSOLE_KEYS if key in entry}
         for eye, value in eyes.items():
             if value is not None:
                 eye_at.append((eye, _place(value, fields, f"stimuli[].{eye}")))
             objects = None if value is None else _places(value, fields, f"stimuli[].{eye}")
             if objects is not None:
-                eye_objects.append((eye, objects))
+                eye_objects.append((eye, objects[0]))
+                eye_drawn.append((eye, objects[1]))
+                carried |= objects[2]
+        placed = _places(entry, fields, "stimuli[]")
+        if placed is not None:
+            carried |= placed[2]
         out.append(Stimulus(
             name=fields.read(entry, "name", TEXT, field="stimuli[].name"),
             kind=fields.read(entry, "kind", TEXT, field="stimuli[].kind"),
@@ -174,8 +214,11 @@ def _stimuli(row: dict, fields: Fields) -> tuple[Stimulus, ...] | None:
             drawn=fields.read(entry, "drawn", BOOLEAN, field="stimuli[].drawn"),
             unresolved=fields.read(entry, "unresolved", TEXT, field="stimuli[].unresolved"),
             at=_place(entry, fields, "stimuli[]"), target=fields.read(entry, "target", WHOLE, field="stimuli[].target"),
-            objects=_places(entry, fields, "stimuli[]"), left=eyes["left"], right=eyes["right"],
-            eye_objects=tuple(eye_objects), eye_at=tuple(eye_at)))
+            objects=None if placed is None else placed[0], left=eyes["left"], right=eyes["right"],
+            eye_objects=tuple(eye_objects), eye_at=tuple(eye_at),
+            as_drawn=_as_drawn(entry, fields, "stimuli[]"),
+            objects_as_drawn=() if placed is None else placed[1], eye_objects_as_drawn=tuple(eye_drawn),
+            carries=frozenset(carried)))
     return tuple(out)
 
 # What a line may carry beyond its six, and how each is read.
@@ -189,6 +232,9 @@ OPTIONAL: dict[str, Kind] = {
     # realized, by set name; null on every other line (the pop-out search's
     # XC-491, accepted 2026-11-14 and named `color_realized` at our ask).
     "color_realized": MAPPING,
+    # The training switch as the trial was drawn: on, frozen or full
+    # (wl-xcon's console settings build).
+    "shaping": TEXT,
 }
 
 
@@ -217,6 +263,7 @@ class RigTrial:
     planned: Planned | None = None
     fluid_ml: float | None = None
     color_realized: dict | None = None
+    shaping: str | None = None
     stimuli: tuple[Stimulus, ...] | None = None
     carries: frozenset[str] = frozenset()
 

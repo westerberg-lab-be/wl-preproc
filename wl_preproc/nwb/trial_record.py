@@ -39,10 +39,14 @@ COLUMNS: dict[str, str] = {
     "overridden": "The values its condition set that a person's live edit replaced, comma-joined ('' if none).",
     "drawn": ("Each setting drawn for it rather than set by its condition, and where the value came from: a "
               "range of the task, block or condition, the id of the live change that put it in force, pool (the "
-              "task's pool of pairings) or staircase (its block's staircase), as JSON text ('{}' if nothing was "
+              "task's pool of pairings), staircase (its block's staircase), a person's form (the id of its form "
+              "change), or full (the task's full version, while the training switch is at full), as JSON text "
+              "('{}' if nothing was "
               "drawn for it, '' if its line does not say)."),
     "live": "The settings a person held at a value for it, comma-joined ('' if none).",
     "eased": "The settings whose live change kept it out of moving up, comma-joined ('' if none).",
+    "shaping": ("The training switch as the trial was drawn, as the rig's record says: on, frozen or full ('' if "
+                "not recorded, as before wl-xcon's console settings build)."),
     "fluid_ml": "The fluid it commanded, ml (NaN if not recorded).",
     "color_realized": ("Each color set it drew at a luminance its run had not yet realized, by set name, as the rig "
                        "drew it there on the run's calibration (xy, desaturation, each color's light at full as CIE "

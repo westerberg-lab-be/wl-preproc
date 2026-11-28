@@ -69,6 +69,15 @@ def _objects(value):
     return None, False
 
 
+def _xy(value):
+    if value is None:
+        return None, True
+    if (isinstance(value, list) and len(value) == 2
+            and all(item is not None and _number(item)[1] for item in value)):
+        return (float(value[0]), float(value[1])), True
+    return None, False
+
+
 def _source(value: object) -> bool:
     return isinstance(value, str) or _integer(value)
 
@@ -88,6 +97,7 @@ TEXT = Kind(_text, "text or null")
 TEXTS = Kind(_texts, "a list of text")
 OBJECTS = Kind(_objects, "a list of objects or null")
 MAPPING = Kind(_mapping, "an object or null")
+XY = Kind(_xy, "a pair of finite numbers or null")
 DRAWN = Kind(_drawn, "an object naming each drawn setting's source")
 ANY = Kind(lambda value: (value, True), "a value")
 

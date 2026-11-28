@@ -237,3 +237,64 @@ def test_a_line_says_each_color_set_it_drew_at_a_new_luminance(tmp_path):
     assert [trial.color_realized for trial in record.trials] == [None, {"isohue": [entry]}, None]
     assert all("color_realized" in trial.carries for trial in record.trials)
     assert record.problems == ("1 trial line: `color_realized` is not an object or null, so it is read as none",)
+
+
+def test_a_line_since_the_console_build_says_its_switch_and_a_full_source(tmp_path):
+    from wl_preproc.events.rigtrials import read_rig_trials
+
+    rows = [_line_c3(1, 0, shaping="frozen", drawn={"contrast": "full", "search_size": 9}), _line_c3(2, 1)]
+    first, second = read_rig_trials(_record(tmp_path, rows), "pico").trials
+    assert first.shaping == "frozen" and first.drawn == {"contrast": "full", "search_size": 9}
+    assert "shaping" in first.carries
+    assert second.shaping is None and "shaping" not in second.carries
+
+
+_CONSOLE = {"name": "fix", "kind": "show", "frame": 1, "off": None, "changed": [], "drawn": True,
+            "unresolved": None, "eccentricity": 0.0, "direction": None, "x": 0.0, "y": 0.0}
+
+
+def test_each_stimulus_and_object_says_its_size_window_and_light(tmp_path):
+    from wl_preproc.events.rigtrials import CONSOLE_KEYS, AsDrawn, read_rig_trials
+
+    fix = {**_CONSOLE, "size_deg": 0.3, "light_xy": [0.3, 0.6]}
+    array = {**_CONSOLE, "name": "search", "size_deg": None, "light_xy": None,
+             "objects": [{"x": 1.0, "size_deg": 2.4, "window_deg": 3.6, "light_xy": [0.3, 0.6]},
+                         {"x": 2.0, "size_deg": 2.4, "window_deg": None, "light_xy": None}]}
+    eyes = {**_CONSOLE, "name": "dot", "left": {"x": 1.0, "objects": [{"x": 2.0, "size_deg": 1.0}]},
+            "right": {"x": -1.0}}
+    row = json.loads(_line_c3(1, 0))
+    rows = [json.dumps({**row, "stimuli": [fix, array, eyes]})]
+    record = read_rig_trials(_record(tmp_path, rows), "pico")
+    f, a, e = record.trials[0].stimuli
+    assert f.as_drawn == AsDrawn(0.3, None, (0.3, 0.6)) and f.carries == {"size_deg", "light_xy"}
+    assert a.as_drawn == AsDrawn()
+    assert a.objects_as_drawn == (AsDrawn(2.4, 3.6, (0.3, 0.6)), AsDrawn(2.4, None, None))
+    assert a.carries == set(CONSOLE_KEYS)
+    assert e.eye_objects_as_drawn == (("left", (AsDrawn(1.0),)),)
+    assert record.problems == ()
+
+
+def test_a_stimulus_before_the_console_build_carries_none_of_its_keys(tmp_path):
+    from wl_preproc.events.rigtrials import AsDrawn, read_rig_trials
+
+    entry = {**_CONSOLE, "name": "search",
+             "objects": [{"x": 1.0, "eccentricity": 8.0}, {"x": 2.0, "eccentricity": 8.0}]}
+    rows = [json.dumps({**json.loads(_line_c3(1, 0)), "stimuli": [entry]})]
+    (stimulus,) = read_rig_trials(_record(tmp_path, rows), "pico").trials[0].stimuli
+    assert stimulus.carries == frozenset()
+    assert stimulus.as_drawn == AsDrawn() and stimulus.objects_as_drawn == (AsDrawn(), AsDrawn())
+
+
+def test_a_size_or_light_it_cannot_read_is_none_and_said_by_its_path(tmp_path):
+    from wl_preproc.events.rigtrials import AsDrawn, read_rig_trials
+
+    entry = {**_CONSOLE, "light_xy": [0.3], "size_deg": "big", "objects": [{"x": 1.0, "light_xy": [1, 2, 3]}]}
+    rows = [json.dumps({**json.loads(_line_c3(1, 0)), "stimuli": [entry]})]
+    record = read_rig_trials(_record(tmp_path, rows), "pico")
+    (stimulus,) = record.trials[0].stimuli
+    assert stimulus.as_drawn == AsDrawn() and stimulus.objects_as_drawn == (AsDrawn(),)
+    assert record.problems == (
+        "1 trial line: `stimuli[].light_xy` is not a pair of finite numbers or null, so it is read as none",
+        "1 trial line: `stimuli[].objects[].light_xy` is not a pair of finite numbers or null, so it is read as none",
+        "1 trial line: `stimuli[].size_deg` is not a finite number or null, so it is read as none",
+    )
