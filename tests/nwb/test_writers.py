@@ -813,3 +813,18 @@ def test_the_stimulus_tables_write_the_console_columns_only_when_their_rows_carr
     _path, io, nwb = _write(tmp_path / "none", lambda nwb: add_rig_tables(nwb, {"stimuli": [entry]}))
     with io:
         assert "light_xy" not in nwb.processing["rig_record"]["stimuli"].colnames
+
+
+def test_only_the_console_columns_are_optional_in_the_stimulus_tables(tmp_path):
+    from wl_preproc.nwb.rig_record import add_rig_tables
+
+    entry = {"trial_id": 1, "entry": 0, "stimulus": "fix", "kind": "show", "frame": 1, "off": -1, "changed": "",
+             "drawn": 1, "unresolved": "", "x_deg": 0.0, "y_deg": 0.0, "eccentricity_deg": 0.0,
+             "polar_deg": float("nan"), "target": -1, "n_objects": 0, "left": "", "right": ""}
+    _path, io, nwb = _write(tmp_path, lambda nwb: add_rig_tables(nwb, {"stimuli": [entry]}))
+    with io:
+        assert tuple(nwb.processing["rig_record"]["stimuli"].colnames) == tuple(entry)
+    broken = {key: value for key, value in entry.items() if key != "frame"}
+    (tmp_path / "bad").mkdir()
+    with pytest.raises(KeyError):
+        _write(tmp_path / "bad", lambda nwb: add_rig_tables(nwb, {"stimuli": [broken]}))

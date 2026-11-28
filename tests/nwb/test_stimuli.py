@@ -115,10 +115,20 @@ def test_a_file_no_entry_carries_them_in_has_todays_rows():
 
 
 def test_a_per_eye_arrays_objects_carry_their_sizes_in_their_rows():
+    """Two objects in each eye, every value different: each row holds its own
+    object's size, window and light, by (eye, object)."""
     from wl_preproc.events.rigtrials import AsDrawn
     from wl_preproc.nwb.stimuli import stimulus_rows
 
-    per_eye = _stimulus("dot", at=Place(), eye_objects=(("left", (Place(2.0, 0.0, 2.0, 0.0),)),),
-                        eye_objects_as_drawn=(("left", (AsDrawn(1.0),)),), carries=frozenset({"size_deg"}))
+    left = (Place(2.0, 0.0, 2.0, 0.0), Place(3.0, 0.0, 3.0, 0.0))
+    right = (Place(-2.0, 0.0, 2.0, 180.0), Place(-3.0, 0.0, 3.0, 180.0))
+    per_eye = _stimulus("dot", at=Place(), eye_objects=(("left", left), ("right", right)),
+                        eye_objects_as_drawn=(
+                            ("left", (AsDrawn(1.0, 1.5, (0.1, 0.2)), AsDrawn(1.1, 1.6, (0.11, 0.21)))),
+                            ("right", (AsDrawn(2.0, 2.5, (0.3, 0.4)), AsDrawn(2.1, 2.6, (0.31, 0.41))))),
+                        carries=frozenset({"size_deg", "window_deg", "light_xy"}))
     _entries, objects, _notes = stimulus_rows([{"trial_id": 1}], {1: _rig(1, (per_eye,))})
-    assert (objects[0]["eye"], objects[0]["size_deg"]) == ("left", 1.0)
+    assert {(row["eye"], row["object"]): (row["x_deg"], row["size_deg"], row["window_deg"], row["light_xy"])
+            for row in objects} == {
+        ("left", 0): (2.0, 1.0, 1.5, [0.1, 0.2]), ("left", 1): (3.0, 1.1, 1.6, [0.11, 0.21]),
+        ("right", 0): (-2.0, 2.0, 2.5, [0.3, 0.4]), ("right", 1): (-3.0, 2.1, 2.6, [0.31, 0.41])}

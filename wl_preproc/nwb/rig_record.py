@@ -34,6 +34,7 @@ import math
 from pynwb import NWBFile
 from pynwb.core import DynamicTable
 
+from wl_preproc.events.rigtrials import CONSOLE_KEYS
 from wl_preproc.nwb.columns import column
 
 
@@ -54,6 +55,10 @@ _POSITION = (
     ("polar_deg", "Its polar angle, degrees counter-clockwise from rightward in [0, 360) (NaN at eccentricity 0, "
                   "or if none)."),
 )
+# The only columns a row may lack: the console build's, which a record written
+# before it does not carry. Every other column is required, so a row missing it
+# raises KeyError.
+OPTIONAL_COLUMNS = frozenset(CONSOLE_KEYS)
 # Each table `add_rig_tables` may add, with its description and its columns'.
 TABLES: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
     "stimuli": (
@@ -162,7 +167,7 @@ def add_rig_tables(nwb: NWBFile, tables: dict[str, list[dict]]) -> None:
             # whose records predate the console build has none of its keys.
             _module(nwb, TABLES_DESCRIPTION).add(DynamicTable(name=name, description=description, columns=[
                 column(field, text, [row[field] for row in rows]) for field, text in columns
-                if field in rows[0]]))
+                if field not in OPTIONAL_COLUMNS or field in rows[0]]))
 
 
 def add_rig_record(nwb: NWBFile, record: dict) -> None:
