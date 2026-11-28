@@ -32,16 +32,18 @@ object's radius). This piece reads every new shape, so the database and NWB file
 3. **Stimuli and objects** (each `stimuli[]` and `objects[]` entry): `size_deg`, `window_deg` (objects only) and
    `light_xy`, published as columns of the NWB `stimuli` and `stimulus_objects` tables, null where wl-xcon writes
    null and in records before the build.
-4. **The light, computed** (a new small pure module): for a look with `light_xy` = (x, y), wl-xcon's formula,
-   verbatim: `u = (x/y, 1, (1 − x − y)/y)`; `L = fraction × luminance`; `XYZ = u × L / (macaque_row · u)`, in
-   cd/m². `fraction` and `luminance` are the look's `ColorSetLight` values from the trial's params; `macaque_row` is
-   the realization entry of the look's colour set at that luminance (`color_realized` or the run's `color_sets`).
-   Published as `light_xyz_cd_m2` beside `light_xy`; null where any input is missing.
+4. **The light is not computed in this piece** (the requester's choice, 2026-11-28, after the plan found the
+   spec's premise false). A trial line gives each look's `light_xy` but not which `ColorSetLight` drew it, and the
+   form is often declared in the task, not the trial's params, so `fraction × luminance` cannot always be found; a
+   rule that guesses could borrow another look's luminance unnoticed. This piece publishes `light_xy` only. **wl-xcon
+   is asked** to write, beside each look's `light_xy`, its light's macaque luminance (cd/m², `fraction × luminance`)
+   and its colour set's name, so a later small piece computes `XYZ = u × L / (macaque_row · u)` exactly, with
+   `u = (x/y, 1, (1 − x − y)/y)` (wl-xcon's formula, verbatim).
 5. **Runs** (`events/rigruns.py`): a block end's `ended` may be `"shaping"`, and `varied[name].by` may be
    `"scaled"` (with `from` and `factor`). Both are already read as text; their descriptions name them. `color_sets`'
    `design` and `macaque_row` stay inside the published JSON text.
-6. **Descriptions corrected**: the two colour texts say the light is computed from `light_xy` (column
-   `light_xyz_cd_m2`), not from xyz × fraction; the params' `object_window` is a multiple and `window_deg` is the
+6. **Descriptions corrected**: the two colour texts say that `xyz × fraction` is a look's light only at saturation
+   1, and that a look's drawn chromaticity is its `light_xy`; the params' `object_window` is a multiple and `window_deg` is the
    degrees; every place listing a block end's `ended` values (`events/rigruns.py`, `nwb/run_record.py:63`,
    `nwb/rig_record.py`'s `unopened_blocks`) gains `shaping`.
 
@@ -49,18 +51,18 @@ object's radius). This piece reads every new shape, so the database and NWB file
 
 - Absent keys read as before, unreadable ones as none, reported once per field (`events/rigfields.py`), so records
   written before the build still load.
-- Floats through the light formula are compared to a tolerance in tests.
 - Our synthetic xcon writer (`synth/peripherals.py`) writes the new keys, since wl-xcon has no checked-in fixture.
 - Published descriptions change, so `contracts/nwb_description.py`'s version and wl.works' notice follow the
   existing pattern.
 
 ## Approaches
 
-One sensible way: the shapes are fixed by an ask the requester accepted, and each lands in the reader that already
-owns its file. Computing the light on wl.works' side instead was rejected: the formula needs the calibration's
-`macaque_row`, which only this host reads.
+One sensible way to read the shapes: they are fixed by an ask the requester accepted, and each lands in the reader
+that already owns its file. For the light, three were weighed on 2026-11-28: compute it only where the params name
+one light (rejected: a rare case borrows another look's luminance silently), leave it to analysts (rejected: the
+calibration's `macaque_row` is read here), and ask wl-xcon for the two missing values and compute it later (chosen).
 
 ## Left to the builder
 
-Column names beyond those above, the module name for the light formula, and how a look's luminance is matched to its
-realization entry (by its `luminance_cd_m2`, as wl-xcon realizes them).
+Column names beyond those above. A withdrawal's `staged_by` and every other actor are published by kind only, never
+by name (the plan's finding).
