@@ -1,9 +1,21 @@
 # Where this build actually is
 
-**Last updated 2026-11-24**, describing `main` at `b75cc85`: the merge of `feat/wl-works-requests`, the piece facing
-wl.works (`handoffs/2026-11-24-wl-works-requests.md`). CI read off `b75cc85` is green on both interpreters, 3484
-passed on each with 39 skipped and 1 xfailed (`gh run view 45448653376`).
-- **The piece facing wl.works:**
+**Last updated 2026-11-28**, describing `main` at `afc3419`: the merge of `feat/montages`, montages recognized here
+and the electrodes they share (`handoffs/2026-11-24-montages.md`). CI read off `afc3419` is green on both
+interpreters, 3620 passed on each with 39 skipped and 1 xfailed (`gh run view 45665080319`).
+- **Montages recognized here (the requester's choices of 2026-11-24):**
+  - wl.works sends each probe's positions with `PUT /positions`, the whole set ordered by its `positions_seq`. Each
+    move is placed between runs exactly as wl.works' `place()` does it.
+  - A montage is one position and one channel selection per probe. Electrodes kept at one position across montages
+    form shared groups, which may overlap and are sorted across them always (the sorting itself waits on Phase 2b).
+  - `GET /sessions` lists `montages`, `shared_groups`, `positions_status` and `positions_seq`. A request names a
+    listed montage (`montage_boundaries` is retired), and a new `shared` request names a listed group.
+  - Each SpikeGLX file joins every insertion whose position covers it, so a moved probe is no longer area `unknown`.
+  - The full suite with every reference set passed 3656 on each interpreter at `2641c33`.
+  - wl.works is told the merge commit and pins three schema files.
+- **Next:** wl-xcon's console-settings reader (XC-513, with XC-529's withdrawn rows), the pop-out revision reader
+  (XC-543), and part 2's bridges. Automatic reclamation stays queued.
+- **The piece facing wl.works (`b75cc85`, CI green, run 45448653376, 3484 on each):**
   - A request can mark a run bad with a reason, and give the animal's nickname (stored, and stated in the NWB
     subject). Listed runs carry the task's hash.
   - `GET /sessions` and `GET /nwb` page with `?since=&limit=`.
@@ -12,9 +24,6 @@ passed on each with 39 skipped and 1 xfailed (`gh run view 45448653376`).
   - The rig's own pauses are counted apart from a person's.
   - The full suite with every reference set passed 3520 on each interpreter at `afdaac7`.
   - wl.works is told the merge commit and re-vendors three schema files.
-- **Next:** montages recognized here, with the electrodes they share sorted across them (the requester's choice,
-  2026-11-24; spec `superpowers/specs/2026-11-24-montages-design.md`, building on `feat/montages`). Then wl-xcon's
-  console-settings reader (XC-513), the pop-out revision reader (XC-543), and part 2's bridges.
 - **The eye placed by its analog copy (spec amendments 77-86; `8fd6f26`, CI green, run 45028287108, 3405 on each):**
   - Under the NI, an OpenIrisDPI file whose copy is on one of the NI's analog inputs is placed over its whole
     recording by that copy (`time_source` `analog`), so a session whose eye file holds no barcode can be tier N.

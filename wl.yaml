@@ -133,15 +133,19 @@ status:
     (b75cc85; docs/handoffs/2026-11-24-wl-works-requests.md): runs marked
     bad with a reason, the animal's nickname, the task's hash on listed
     runs, paged listings, t = 0's wall time, runs that end before they
-    start left out and flagged, and the rig counted as an actor. Next,
-    montages recognized here and the electrodes they share (spec
-    docs/superpowers/specs/2026-11-24-montages-design.md, building); then
-    our reader of
+    start left out and flagged, and the rig counted as an actor. Montages
+    are recognized here (afc3419; docs/handoffs/2026-11-24-montages.md):
+    wl.works sends each probe's positions, this host derives each montage
+    (a probe's position and its channel selection) and the electrodes two
+    or more montages share at one position, lists both, and a request
+    names them; a moved probe's files join the insertion that held. Sorting
+    the shared electrodes waits on Phase 2b. Next, our reader of
     wl-xcon's console settings (XC-513, accepted 2026-11-18); then its
     pop-out revision (XC-543); then part 2, the bridges; then lab time,
     part 4, once wl-xcon writes its words and clock files.
     Fine-tuning U'n'Eye waits for hand-labelled lab data.
-    Done: the piece facing wl.works (b75cc85). Before it, the eye placed
+    Done: montages recognized here (afc3419). Before it, the piece facing
+    wl.works (b75cc85). Before it, the eye placed
     by its analog copy (8fd6f26). Before it, part
     3b-3, a partial sync box (291bbea). Before it, wl-sync's
     notes 7 and 8 (c31dd89). Before it, part 3b-2,
@@ -320,8 +324,9 @@ status:
   # Was `c31dd89` until part 3b-3's merge `291bbea` on 2026-11-21.
   # Was `291bbea` until the analog copy's merge `8fd6f26` on 2026-11-22.
   # Was `8fd6f26` until the wl.works-facing piece's merge `b75cc85` on 2026-11-24.
+  # Was `b75cc85` until the montages merge `afc3419` on 2026-11-25.
   # Quoted: an all-digit SHA is otherwise read by YAML as an integer.
-  describes: "b75cc85"
+  describes: "afc3419"
 
 runs_on: [serv]
 # The pipeline is deployed to the preprocessing server, but it is written and
