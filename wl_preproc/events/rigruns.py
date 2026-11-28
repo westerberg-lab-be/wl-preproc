@@ -56,13 +56,15 @@ CONFIG_NAME = "config.json"
 @dataclasses.dataclass(frozen=True, slots=True)
 class BlockEnd:
     """How one block the run opened ended (wl-xcon's engine build C2b): its
-    type, `ended` (`rule`, `time`, `fall_back`, `next`, `back`, `run_time`,
-    `run`), who moved it by kind, the run's last trial before it ended (an
+    type, `ended` (rule, time, fall_back, next, back, run_time, run or shaping (the
+    training switch closed the stage the full task's start ends, or ended the
+    full task's block as training was switched back on)), who moved it by kind, the run's last trial before it ended (an
     index in the run, from 0), its number in the stream (None for a block that
     ran no trial), its place in the run's sequence, and, for a training
     progression's top stage, the trial after which its rule was first met; and
-    since C3 what varied in it, its planned sequence and its counts, as
-    written."""
+    since C3 what varied in it (each entry's `by` is condition, draw, person or
+    scaled: a size scaled by eccentricity, with its from, the form change and
+    its factor), its planned sequence and its counts, as written."""
 
     block: str | None
     ended: str | None

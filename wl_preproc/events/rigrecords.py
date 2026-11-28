@@ -24,14 +24,17 @@ not a 16-bit code. `events/rigtiming.py` joins the rows to the recording by it.
 
 **The change log by kind** (design spec `2026-11-07-rig-record-fields-design.md`
 section 7): since wl-xcon's engine build C3 a change row names its `kind`
-(`set`, `hand_back`, `range`, `revert`, `clear`, `drum`, `training`, and since
-its pop-out search `suggested` and `declined`; a row written before C3 has
+(`set`, `hand_back`, `range`, `revert`, `clear`, `drum`, `training`, since
+its pop-out search `suggested` and `declined`, and since its console settings
+`form`, `shaping` and `withdrawn`; a row written before C3 has
 none, and is a `set`), the act it belongs to (`change`, a
 revert's rows sharing one), the first trial it applies to, which way it went,
 the kind's own fields, and its instant (`at`). Its instant times a row that
 strobed nothing through the rig's clock fit, as a control's does; the rest is
 read from the stored line when the file is built (`change_fields`), so no
-column is added. `acts` counts a person's acts on a setting."""
+column is added. `acts` counts a person's acts on a setting, since 2026-11-28
+a form too. A withdrawn row changes nothing: a person took back a change before
+it applied. Its `staged_by`, who had sent it, is read by kind only (`staged_by_kind`); the name and account never leave the stored line."""
 
 from __future__ import annotations
 
@@ -42,7 +45,7 @@ import math
 from pathlib import Path
 
 from wl_preproc.contracts.paths import XCON_DIRNAME
-from wl_preproc.events.rigfields import NUMBER, TEXT, WHOLE, Fields
+from wl_preproc.events.rigfields import MAPPING, NUMBER, TEXT, WHOLE, Fields
 
 CHANGES_NAME = "parameter_changes.jsonl"
 CONTROLS_NAME = "controls.jsonl"
@@ -150,6 +153,20 @@ def _actor(row: dict) -> dict:
     return {f"by_{field}": _text(by.get(field)) for field in ("kind", "name", "account", "issuer", "token_id")}
 
 
+def _no_names(value):
+    """`value` with every mapping that carries a `name` or an `account`, at any depth (in mappings and lists),
+    replaced by `{"kind": its kind}`: an actor is published by kind only, whichever field holds it, known to this
+    reader or not (the final review's I2)."""
+    if isinstance(value, dict):
+        if "name" in value or "account" in value:
+            kind = value.get("kind")
+            return {"kind": kind if isinstance(kind, str) else None}
+        return {key: _no_names(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_no_names(item) for item in value]
+    return value
+
+
 def _rows(path: Path, problems: list[str], field: str, what: str) -> list[tuple[int, str, dict]]:
     """Each line of `path` that is a JSON object naming its `field`, with its
     number and its text; each other line is a problem, `what` saying what it
@@ -190,27 +207,31 @@ def read_rig_records(session_dir: Path) -> RigRecords:
         controls.append(Control(
             line=line, kind=row["kind"], at=_number(row.get("at")), at_local=_text(row.get("at_local")),
             trial_index=_count(row.get("trial_index")), run_index=_integer(row.get("run")), event_code=code,
-            coded=coded, detail=_json({key: value for key, value in row.items() if key not in _CONTROL_FIELDS}),
+            coded=coded, detail=_json({key: _no_names(value) for key, value in row.items() if key not in _CONTROL_FIELDS}),
             **_actor(row), row=text))
     return RigRecords(changes=tuple(changes), controls=tuple(controls), problems=tuple(problems))
 
 
 # The kinds that change a setting, as a person's act; a clear and the two
 # switches are not (the requester's decision of 2026-11-07).
-SETTING_KINDS = ("set", "hand_back", "range", "revert")
+SETTING_KINDS = ("set", "hand_back", "range", "revert", "form")
 # Every kind wl-xcon's change log holds (`wl_xcon/record.py::KINDS`, read at
 # engine-c3 `7ea7913`), and the pop-out search's two (agreed with wl-xcon on
 # 2026-11-07, its `docs/pending-wl-preproc-amendments.md` at `35a3d18`; their
 # shape its `record.py::KINDS` at `389a0e7`): the rig's suggestion of a move,
 # named `block`, was and now the stages, by nobody, and a person's declining
-# it, neither strobed nor a person's act on a setting. One outside them is
-# published as written and counted nowhere.
-KINDS = (*SETTING_KINDS, "clear", "drum", "training", "suggested", "declined")
+# it, neither strobed nor a person's act on a setting; and the console
+# settings' three (wl-xcon `293a66e1`): `form`, a person's draw or scaling, its
+# `now` the form; `shaping`, the training switch (on, frozen or full); and
+# `withdrawn`, a change a person took back before it applied. One outside them
+# is published as written and counted nowhere.
+KINDS = ("set", "hand_back", "range", "revert", "clear", "drum", "training", "suggested", "declined", "form",
+         "shaping", "withdrawn")
 # What every change row carries (`wl_xcon/record.py`'s change row, read at
 # engine-c3 `7ea7913`); the rest of a row is its kind's own fields, a clear's
 # and a switch's being its control row's.
 _CHANGE_FIELDS = frozenset({"change", "kind", "name", "was", "now", "by", "at", "at_local", "trial_number", "run",
-                            "meaning", "offered", "odds", "event_code", "sequence"})
+                            "meaning", "offered", "odds", "event_code", "sequence", "staged_by"})
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -221,7 +242,10 @@ class ChangeFields:
     range's draw (`from`) and `block`, a revert's `moment` (0 the run's
     start), whether its act strobed nothing, and `detail`, the row's own
     fields beyond those every change row carries as JSON text, a clear's and
-    a switch's control fields among them (`{}` if none)."""
+    a switch's control fields among them (`{}` if none). `staged_by_kind` is the
+    kind of the actor who staged a withdrawn change, never its name or account
+    (`staged_by` is left out of `detail`, and any other mapping that carries a
+    `name` or an `account` is reduced there to its `kind`)."""
 
     kind: str
     change: int | None
@@ -234,6 +258,7 @@ class ChangeFields:
     moment: int | None
     strobed_nothing: bool
     detail: str = "{}"
+    staged_by_kind: str | None = None
 
 
 def change_fields(rows: list[str]) -> tuple[list[ChangeFields], list[str]]:
@@ -250,6 +275,7 @@ def change_fields(rows: list[str]) -> tuple[list[ChangeFields], list[str]]:
         kind = "set" if "kind" not in row else fields.read(row, "kind", TEXT) or ""
         if kind and kind not in KINDS:
             unknown[kind] += 1
+        staged_by = fields.read(row, "staged_by", MAPPING)
         out.append(ChangeFields(
             kind=kind, change=fields.read(row, "change", WHOLE), trial_number=fields.read(row, "trial_number", WHOLE),
             went=fields.read(meaning, "went", TEXT, field="meaning.went"),
@@ -257,7 +283,8 @@ def change_fields(rows: list[str]) -> tuple[list[ChangeFields], list[str]]:
             from_draw=fields.read(row, "from", TEXT), block=fields.read(row, "block", TEXT),
             moment=fields.read(row, "moment", WHOLE),
             strobed_nothing="event_code" in row and row["event_code"] is None,
-            detail=_json({key: value for key, value in row.items() if key not in _CHANGE_FIELDS})))
+            detail=_json({key: _no_names(value) for key, value in row.items() if key not in _CHANGE_FIELDS}),
+            staged_by_kind=fields.read(staged_by or {}, "kind", TEXT, field="staged_by.kind")))
     return out, [*fields.problems(), *(
         f"{n} change {'row' if n == 1 else 'rows'}: `kind` is {kind!r}, which no build of wl-xcon this reader knows "
         "writes, so it is published as written and not counted as a person's act" for kind, n in sorted(unknown.items()))]

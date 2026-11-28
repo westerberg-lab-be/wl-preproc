@@ -299,3 +299,86 @@ def test_a_change_that_widens_the_pool_keeps_the_suggestion_it_answers():
     assert json.loads(fields[0].detail) == {"suggestion": 4}
     assert json.loads(fields[1].detail)["remakes"] == 5
     assert problems == [] and acts(fields) == 1
+
+
+def test_the_console_settings_kinds_are_known():
+    """wl-xcon's `form`, `shaping` and `withdrawn` (its `record.KINDS` at `293a66e1`): a form is a person's act, a
+    shaping row is not, a withdrawal changes nothing, and its stager is published by kind only (D2)."""
+    from wl_preproc.events.rigrecords import acts, change_fields
+
+    common = {"at": 1773478801.0, "at_local": "2026-03-14T10:00:01+01:00", "run": 0, "by": MEMBER}
+    staged_by = {"kind": "member", "name": "Ada Staged", "account": "ada@lab"}
+    rows = [{**common, "change": 9, "kind": "form", "name": "search_size", "was": None,
+             "now": {"class": "Scaled", "fields": {"factor": 0.3}}, "shape": "scaled", "event_code": 4130,
+             "sequence": 1},
+            {**common, "change": 10, "kind": "shaping", "name": "shaping", "was": "on", "now": "full",
+             "event_code": None},
+            *({**common, "change": 12, "kind": "withdrawn", "name": name, "was": 0.5, "now": 0.5, "event_code": None,
+               "cid": "c-9f3a2b7e41", "withdrawn": {"kind": "set", "now": 0.8}, "staged_by": staged_by}
+              for name in ("a", "b"))]
+    fields, problems = change_fields([json.dumps(row) for row in rows])
+    assert [field.kind for field in fields] == ["form", "shaping", "withdrawn", "withdrawn"]
+    assert problems == []
+    assert acts(fields) == 1
+    assert fields[0].detail == '{"shape": "scaled"}'
+    assert fields[2].detail == json.dumps({"cid": "c-9f3a2b7e41", "withdrawn": {"kind": "set", "now": 0.8}},
+                                          sort_keys=True)
+    assert all("Ada" not in field.detail and "ada@lab" not in field.detail for field in fields)
+    assert [field.staged_by_kind for field in fields] == [None, None, "member", "member"]
+    assert [field.strobed_nothing for field in fields] == [False, True, True, True]
+
+
+def test_a_revert_of_the_switch_is_a_shaping_row_with_its_moment():
+    from wl_preproc.events.rigrecords import acts, change_fields
+
+    fields, problems = change_fields([json.dumps({"change": 11, "kind": "shaping", "name": "shaping", "moment": 0,
+                                                  "was": "full", "now": "on", "event_code": None})])
+    assert (fields[0].kind, fields[0].moment, acts(fields), problems) == ("shaping", 0, 0, [])
+
+
+def test_a_staged_by_it_cannot_read_is_none_and_said_once():
+    from wl_preproc.events.rigrecords import change_fields
+
+    rows = [{"name": "a", "kind": "withdrawn", "staged_by": "Ada"}, {"name": "b", "kind": "withdrawn",
+                                                                      "staged_by": "Ada"}]
+    fields, problems = change_fields([json.dumps(row) for row in rows])
+    assert [field.staged_by_kind for field in fields] == [None, None]
+    assert problems == ["2 change rows: `staged_by` is not an object or null, so it is read as none"]
+    assert all("Ada" not in field.detail for field in fields)
+
+
+def test_a_form_is_counted_as_an_act_wherever_the_count_is_described():
+    from wl_preproc.contracts.nwb_description import TrainingRecords
+    from wl_preproc.contracts.protocol import ListedTrainingRecords
+
+    assert "a form" in TrainingRecords.__doc__ and "a form" in ListedTrainingRecords.__doc__
+
+
+_STAGED = {"kind": "member", "name": "Ada Staged", "account": "ada@lab"}
+
+
+def test_an_unknown_kinds_actor_field_is_published_by_kind_only_in_a_change():
+    """The no-names rule does not wait for each actor-bearing field to be named: any mapping value carrying a
+    `name` or an `account`, in any kind's detail and at any depth, is reduced to `{"kind": ...}` (the final
+    review's I2)."""
+    from wl_preproc.events.rigrecords import change_fields
+
+    rows = [{"name": "a", "kind": "mystery", "by2": _STAGED, "keep": {"x": 1}},
+            {"name": "b", "kind": "form", "nested": {"deeper": [{"who": {"name": "Ada Staged"}}, _STAGED]}},
+            {"name": "c", "kind": "mystery", "by2": {"account": "ada@lab"}}]
+    fields, _ = change_fields([json.dumps(row) for row in rows])
+    assert json.loads(fields[0].detail) == {"by2": {"kind": "member"}, "keep": {"x": 1}}
+    assert json.loads(fields[1].detail) == {"nested": {"deeper": [{"who": {"kind": None}}, {"kind": "member"}]}}
+    assert json.loads(fields[2].detail) == {"by2": {"kind": None}}
+    assert all("Ada" not in field.detail and "ada@lab" not in field.detail for field in fields)
+
+
+def test_an_unknown_kinds_actor_field_is_published_by_kind_only_in_a_control(tmp_path):
+    from wl_preproc.events.rigrecords import read_rig_records
+
+    line = _control("mystery", by2=_STAGED, where={"who": [_STAGED]}, ml=0.1)
+    (control,) = read_rig_records(_record(tmp_path, controls=[line])).controls
+    assert json.loads(control.detail) == {"by2": {"kind": "member"}, "where": {"who": [{"kind": "member"}]},
+                                          "ml": 0.1}
+    assert "Ada" not in control.detail and "ada@lab" not in control.detail
+    assert "Ada Staged" in control.row  # the database keeps the line whole, as for every actor

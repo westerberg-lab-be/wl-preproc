@@ -167,7 +167,9 @@ class RunBlock(_Frozen):
     closed: bool | None
     trials: int
     # How it ended, from its run's end row in wl-xcon's record: rule, time,
-    # fall_back, next, back, run_time or run; null where not recorded (design
+    # fall_back, next, back, run_time, run or shaping (the training switch
+    # closed the stage the full task's start ends, or ended the full task's block as training was
+    # switched back on); null where not recorded (design
     # spec `2026-11-07-rig-record-fields-design.md` section 8).
     ended: str | None = None
 
@@ -229,7 +231,7 @@ class TrainingRecords(_Frozen):
     `2026-10-18-training-records-and-backup-clock-design.md` section 0,
     decision 6). Since 2026-11-07 `parameter_changes` counts a person's acts
     on a setting, one per act among a set, a hand-back, a range edit and a
-    revert, not the change log's rows (design spec
+    revert, since 2026-11-28 a form too, not the change log's rows (design spec
     `2026-11-07-rig-record-fields-design.md` section 7)."""
 
     parameter_changes: int

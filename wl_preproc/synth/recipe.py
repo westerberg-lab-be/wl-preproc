@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 from wl_sync.log import LOSS_SHAPES, Loss
 
 from wl_preproc.contracts.events import TaskTypeCode
@@ -313,6 +314,20 @@ class RigRecordSpec(BaseModel):
     # (design spec `2026-11-07-rig-record-fields-design.md` section 10). Off
     # by default, so every existing profile is byte-identical.
     fields: bool = False
+    # Add wl-xcon's console settings shapes to C3's (design spec
+    # `2026-11-28-console-settings-reader-design.md`, decision D5): each trial
+    # line's training switch and each look's size, window and drawn
+    # chromaticity, each run's color sets, a block the switch ended and a
+    # size scaled. Off by default, so every record without it is byte-identical.
+    console: bool = False
+
+    @model_validator(mode="after")
+    def _console_needs_fields(self):
+        if self.console and not self.fields:
+            raise PydanticCustomError(
+                "console_needs_fields",
+                "console adds wl-xcon's console settings shapes to C3's, so it needs fields")
+        return self
 
 
 class EyeCopy(BaseModel):

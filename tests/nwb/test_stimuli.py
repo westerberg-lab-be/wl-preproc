@@ -75,3 +75,60 @@ def test_a_per_eye_arrays_objects_are_counted_and_each_eyes_place_checked():
     assert entries[0]["n_objects"] == len(objects) == 3
     assert notes == ["1 stimulus entry give an eccentricity or polar angle that is not its x and y's, past 1e-09 "
                      "degrees; published as written (trial 4 entry 0)"]
+
+
+def test_the_size_window_and_light_are_columns_where_some_entry_carries_them():
+    """A session some entry carries the console's keys in gains the columns
+    on every row; an array's own entry has none of its own."""
+    from wl_preproc.events.rigtrials import AsDrawn
+    from wl_preproc.nwb.stimuli import stimulus_rows
+
+    fix = _stimulus("fix", as_drawn=AsDrawn(0.3, None, (0.3, 0.6)), carries=frozenset({"size_deg", "light_xy"}))
+    array = _stimulus("search", at=Place(0.0, 0.0, 0.0, None), target=0,
+                      objects=(Place(8.0, 0.0, 8.0, 0.0), Place(-8.0, 0.0, 8.0, 180.0)),
+                      objects_as_drawn=(AsDrawn(2.4, 3.6, (0.3, 0.6)), AsDrawn(2.4)))
+    matched = {1: _rig(1, (fix, array)), 2: _rig(2, ())}
+    entries, objects, _notes = stimulus_rows([{"trial_id": 1}, {"trial_id": 2}, {"trial_id": 3}], matched)
+    assert [row["trial_id"] for row in entries] == [1, 1]
+    assert entries[0]["size_deg"] == 0.3 and entries[0]["light_xy"] == [0.3, 0.6]
+    assert math.isnan(entries[1]["size_deg"]) and len(entries[1]["light_xy"]) == 2
+    assert all(math.isnan(value) for value in entries[1]["light_xy"])
+    assert [row["window_deg"] for row in objects][0] == 3.6 and math.isnan(objects[1]["window_deg"])
+    assert [row["size_deg"] for row in objects] == [2.4, 2.4]
+    assert objects[0]["light_xy"] == [0.3, 0.6]
+    assert all(math.isnan(value) for value in objects[1]["light_xy"]) and len(objects[1]["light_xy"]) == 2
+
+
+def test_a_file_no_entry_carries_them_in_has_todays_rows():
+    """A record written before the console build: no row gains a key."""
+    from wl_preproc.nwb.stimuli import stimulus_rows
+
+    array = _stimulus("search", at=Place(0.0, 0.0, 0.0, None), objects=(Place(8.0, 0.0, 8.0, 0.0),))
+    per_eye = _stimulus("dot", eye_objects=(("left", (Place(2.0, 0.0, 2.0, 0.0),)),))
+    entries, objects, _notes = stimulus_rows([{"trial_id": 1}], {1: _rig(1, (_stimulus("fix"), array, per_eye))})
+    assert {key for row in entries for key in row} == {
+        "trial_id", "entry", "stimulus", "kind", "frame", "off", "changed", "drawn", "unresolved", "x_deg", "y_deg",
+        "eccentricity_deg", "polar_deg", "target", "n_objects", "left", "right"}
+    assert {key for row in objects for key in row} == {
+        "trial_id", "entry", "eye", "object", "x_deg", "y_deg", "eccentricity_deg", "polar_deg"}
+    assert len(objects) == 2
+
+
+def test_a_per_eye_arrays_objects_carry_their_sizes_in_their_rows():
+    """Two objects in each eye, every value different: each row holds its own
+    object's size, window and light, by (eye, object)."""
+    from wl_preproc.events.rigtrials import AsDrawn
+    from wl_preproc.nwb.stimuli import stimulus_rows
+
+    left = (Place(2.0, 0.0, 2.0, 0.0), Place(3.0, 0.0, 3.0, 0.0))
+    right = (Place(-2.0, 0.0, 2.0, 180.0), Place(-3.0, 0.0, 3.0, 180.0))
+    per_eye = _stimulus("dot", at=Place(), eye_objects=(("left", left), ("right", right)),
+                        eye_objects_as_drawn=(
+                            ("left", (AsDrawn(1.0, 1.5, (0.1, 0.2)), AsDrawn(1.1, 1.6, (0.11, 0.21)))),
+                            ("right", (AsDrawn(2.0, 2.5, (0.3, 0.4)), AsDrawn(2.1, 2.6, (0.31, 0.41))))),
+                        carries=frozenset({"size_deg", "window_deg", "light_xy"}))
+    _entries, objects, _notes = stimulus_rows([{"trial_id": 1}], {1: _rig(1, (per_eye,))})
+    assert {(row["eye"], row["object"]): (row["x_deg"], row["size_deg"], row["window_deg"], row["light_xy"])
+            for row in objects} == {
+        ("left", 0): (2.0, 1.0, 1.5, [0.1, 0.2]), ("left", 1): (3.0, 1.1, 1.6, [0.11, 0.21]),
+        ("right", 0): (-2.0, 2.0, 2.5, [0.3, 0.4]), ("right", 1): (-3.0, 2.1, 2.6, [0.31, 0.41])}

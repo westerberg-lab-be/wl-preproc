@@ -264,3 +264,17 @@ def test_when_neither_fit_holds_the_reason_given_is_the_sessions_own():
     assert timing.clock is None and timing.changes[3] is None
     assert timing.problems == ("parameter_changes.jsonl: 1 row strobed nothing, and the rig's clock could not be "
                                "fitted to the recording (none of its instants matched a code), so it is not timed",)
+
+
+def test_a_form_is_timed_by_its_code_and_a_shaping_or_withdrawn_row_by_the_rigs_clock():
+    """Timing joins a row by its `event_code`, never by kind: a form strobed 4130, a shaping or withdrawn row
+    strobed nothing."""
+    from wl_preproc.events.rigtiming import time_records
+
+    instants = [(_rig(0.0), 0.0), (_rig(100.0), 100.0)]
+    changes = [_c3_change(1, at=_rig(50.0)), _c3_change(2, code=None, at=_rig(40.0)),
+               _c3_change(3, code=None, at=_rig(60.0))]
+    timing = time_records(_records(changes=changes), {4130: [50.0]}, instants)
+    assert timing.changes[0] == 50.0
+    assert timing.changes[1] == pytest.approx(40.0, abs=1e-6) and timing.changes[2] == pytest.approx(60.0, abs=1e-6)
+    assert timing.problems == ()

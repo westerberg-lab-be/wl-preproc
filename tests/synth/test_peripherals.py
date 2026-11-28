@@ -474,3 +474,83 @@ def test_a_rig_record_with_fields_writes_section_10s_mix():
         "block": "block-3", "scope": "block"}
     assert [field.strobed_nothing for field in fields] == [False, True, False, False, False, False, True, True]
     assert problems == [] and acts(fields) == 4
+
+
+# The console settings build (design spec `2026-11-28-console-settings-reader-design.md`,
+# decision D5): the same mix with wl-xcon's console shapes added -- a form, two
+# training-switch changes and two withdrawals of one act in the change log. The
+# withdrawals name and account their stager, which nothing publishes.
+_STAGER = {"kind": "member", "name": "Ada Staged", "account": "ada@lab"}
+CONSOLE_RIG = {
+    **MIX_RIG, "console": True,
+    "changes": [
+        *MIX_RIG["changes"],
+        {"trial": 2, "kind": "form", "name": "search_size", "was": None, "now": {"class": "Scaled", "fields": {"factor": 0.3}},
+         "by": _MEMBER, "detail": {"shape": "scaled"}},
+        {"trial": 5, "kind": "shaping", "name": "shaping", "was": "on", "now": "full", "event_code": None,
+         "by": _MEMBER},
+        {"trial": 6, "kind": "shaping", "name": "shaping", "was": "full", "now": "on", "event_code": None,
+         "by": _MEMBER, "detail": {"moment": 0}},
+        {"trial": 6, "kind": "withdrawn", "name": "contrast", "was": 0.5, "now": 0.5, "change": 12, "event_code": None,
+         "by": _MEMBER, "detail": {"cid": "c-9f3a2b7e41", "withdrawn": {"kind": "set", "now": 0.8},
+                                   "staged_by": _STAGER}},
+        {"trial": 6, "kind": "withdrawn", "name": "fix_hold_s", "was": 0.3, "now": 0.3, "change": 12,
+         "event_code": None, "by": _MEMBER,
+         "detail": {"cid": "c-9f3a2b7e41", "withdrawn": {"kind": "set", "now": 0.4}, "staged_by": _STAGER}},
+    ],
+}
+
+
+def _write_mix(rig: dict, directory):
+    from pathlib import Path
+
+    from wl_preproc.synth.peripherals import write_rig_runs, write_rig_trials
+    from wl_preproc.synth.recipe import SessionRecipe
+
+    recipe = SessionRecipe.model_validate({**CI_RECIPE.model_dump(), "runs": True, "blocks": MIX_BLOCKS,
+                                           "montages": MIX_MONTAGES, "rig_record": rig})
+    truth = build_timeline(recipe)
+    xcon = Path(directory) / "xcon"
+    xcon.mkdir()
+    write_rig_trials(xcon / "trials.jsonl", recipe, truth)
+    write_rig_runs(xcon, recipe, truth)
+    return xcon
+
+
+def test_console_needs_fields():
+    from pydantic import ValidationError
+
+    from wl_preproc.synth.recipe import RigRecordSpec
+
+    with pytest.raises(ValidationError) as caught:
+        RigRecordSpec(console=True)
+    assert [error["type"] for error in caught.value.errors()] == ["console_needs_fields"]
+
+
+def test_a_record_without_console_writes_none_of_its_keys(tmp_path):
+    xcon = _write_mix(MIX_RIG, tmp_path)
+    for name in ("trials.jsonl", "runs.jsonl"):
+        text = (xcon / name).read_text(encoding="utf-8")
+        for key in ("shaping", "size_deg", "light_xy", "window_deg", "color_sets"):
+            assert key not in text, (name, key)
+
+
+def test_a_console_record_reads_back_whole(tmp_path):
+    from wl_preproc.events.rigrecords import change_fields, read_rig_records
+    from wl_preproc.events.rigruns import read_rig_runs
+    from wl_preproc.events.rigtrials import AsDrawn, read_rig_trials
+
+    _write_mix(CONSOLE_RIG, tmp_path)
+    subject = CI_RECIPE.subject
+    trials = read_rig_trials(tmp_path, subject)
+    runs = read_rig_runs(tmp_path, subject)
+    records = read_rig_records(tmp_path)
+    assert (trials.problems, runs.problems, records.problems) == ((), (), ())
+    assert [trial.shaping for trial in trials.trials if trial.run == 2] == ["full", "full"]
+    assert {trial.shaping for trial in trials.trials if trial.run != 2} == {"on"}
+    fix = next(stimulus for stimulus in trials.trials[0].stimuli if stimulus.name == "fix")
+    assert fix.as_drawn == AsDrawn(0.3, None, (0.3, 0.6))
+    assert runs.runs[0].color_sets["isohue"]["realized"][0]["macaque_row"] == [0.1, 0.8, 0.1]
+    fields, problems = change_fields([change.row for change in records.changes])
+    assert problems == []
+    assert [field.kind for field in fields][-5:] == ["form", "shaping", "shaping", "withdrawn", "withdrawn"]

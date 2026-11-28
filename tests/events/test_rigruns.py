@@ -284,3 +284,17 @@ def test_a_run_says_where_each_stage_was_left_and_its_color_sets(tmp_path):
     assert all({"left", "color_sets"} <= run.carries for run in record.runs)
     assert record.problems == ("1 run row: `color_sets` is not an object or null, so it is read as none",
                                "1 run row: `left` is not an object or null, so it is read as none")
+
+
+def test_a_block_ended_by_the_training_switch_is_read_as_written(tmp_path):
+    from wl_preproc.events.rigruns import read_rig_runs
+
+    varied = {"search_size": [{"by": "scaled", "from": 9, "factor": 0.3}]}
+    end = json.dumps({**json.loads(_end(0, "done", "completed")),
+                      "block_ends": [{"block": "easy", "ended": "shaping", "by": None, "after_trial": 3,
+                                      "block_in_session": 1, "position": 0, "passed_at": None,
+                                      "varied": varied}]})
+    record = read_rig_runs(_record(tmp_path, [_start(0, "visual_search"), end]), "pico")
+    (run,) = record.runs
+    assert run.block_ends[0].ended == "shaping" and run.block_ends[0].varied == varied
+    assert record.problems == ()

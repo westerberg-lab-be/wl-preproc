@@ -34,6 +34,7 @@ import math
 from pynwb import NWBFile
 from pynwb.core import DynamicTable
 
+from wl_preproc.events.rigtrials import CONSOLE_KEYS
 from wl_preproc.nwb.columns import column
 
 
@@ -54,6 +55,10 @@ _POSITION = (
     ("polar_deg", "Its polar angle, degrees counter-clockwise from rightward in [0, 360) (NaN at eccentricity 0, "
                   "or if none)."),
 )
+# The only columns a row may lack: the console build's, which a record written
+# before it does not carry. Every other column is required, so a row missing it
+# raises KeyError.
+OPTIONAL_COLUMNS = frozenset(CONSOLE_KEYS)
 # Each table `add_rig_tables` may add, with its description and its columns'.
 TABLES: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
     "stimuli": (
@@ -75,20 +80,34 @@ TABLES: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
          ("n_objects", "An array's objects, in stimulus_objects, both eyes' for a per-eye array (0 for one "
                        "stimulus)."),
          ("left", "A per-eye stimulus's left-eye position, after the vergence offset, as JSON text ('' if none)."),
-         ("right", "A per-eye stimulus's right-eye position, likewise ('' if none)."))),
+         ("right", "A per-eye stimulus's right-eye position, likewise ('' if none)."),
+         ("size_deg", "Its look's size as drawn at its place, degrees: a size scaled by eccentricity is its factor "
+                      "times that place's true eccentricity, so a size setting may give the factor and this the "
+                      "degrees (NaN for an array, whose objects carry theirs, for a look with no single size, or if none)."),
+         ("light_xy", "The CIE 1931 [x, y] of the light it was drawn in, where a color set's light drew it, after its "
+                      "saturation and any move into the panel's gamut, as the rig wrote it: its drawn chromaticity at "
+                      "any saturation ([NaN, NaN] for an array's own entry, for a look in no color set's light, or if "
+                      "none)."))),
     "stimulus_objects": (
         "Each object of an array the stimuli table names, by its trial and entry.",
         (("trial_id", "The trial."),
          ("entry", "The array's entry in the stimuli table."),
          ("eye", "'' for an array drawn once, left or right for a per-eye array's ring about that eye's position."),
          ("object", "Its index among the array's objects, from 0."),
-         *_POSITION)),
+         *_POSITION,
+         ("size_deg", "The object's size as drawn at its place, degrees (NaN if none)."),
+         ("window_deg", "Its object window's radius, degrees: a trial's object_window setting may be a multiple of the "
+                        "object's radius, so this, not that setting, is the degrees (NaN where its array has no object "
+                        "window, or if none)."),
+         ("light_xy", "The CIE 1931 [x, y] of the light it was drawn in, where a color set's light drew it, after its "
+                      "saturation and any move into the panel's gamut, as the rig wrote it: its drawn chromaticity at "
+                      "any saturation ([NaN, NaN] for a look in no color set's light, or if none)."))),
     "unopened_blocks": (
         "Each block a run's end row says ended without running a trial, so the stream never opened it: a plan's "
         "block can be over before it draws one.",
         (("run_number", "The run."),
          ("block", "Its block type."),
-         ("ended", "How it ended: rule, time, fall_back, next, back, run_time or run."),
+         ("ended", "How it ended: rule, time, fall_back, next, back, run_time, run or shaping (the training switch closed the stage the full task's start ends, or ended the full task's block as training was switched back on)."),
          ("ended_by", "Who moved the run on or back, by kind only ('' for nobody)."),
          ("after_trial", "The trial_id of the run's last trial before it ended (-1 if none)."),
          ("position", "Its place in the run's sequence of blocks, from 0 (-1 if not recorded)."))),
@@ -138,12 +157,16 @@ def _module(nwb: NWBFile, description: str = DESCRIPTION):
 
 def add_rig_tables(nwb: NWBFile, tables: dict[str, list[dict]]) -> None:
     """Each table of `TABLES` that has a row, in the session's `rig_record`
-    module, added first (`build.py`), or in one made for them alone."""
+    module, added first (`build.py`), or in one made for them alone. Each
+    column is written only when the rows carry its key."""
     for name, (description, columns) in TABLES.items():
         rows = tables.get(name) or []
         if rows:
+            # A column is written only where the rows carry its key: a session
+            # whose records predate the console build has none of its keys.
             _module(nwb, TABLES_DESCRIPTION).add(DynamicTable(name=name, description=description, columns=[
-                column(field, text, [row[field] for row in rows]) for field, text in columns]))
+                column(field, text, [row[field] for row in rows]) for field, text in columns
+                if field not in OPTIONAL_COLUMNS or field in rows[0]]))
 
 
 def add_rig_record(nwb: NWBFile, record: dict) -> None:
@@ -195,7 +218,8 @@ def _add_changes(module, changes: list[dict]) -> None:
         "kind and the act it belongs to, timed by the code it strobed or, for one that strobed nothing, by the rig's "
         "clock fitted to the recording. A pop-out search's suggested and declined rows change nothing: the rig "
         "suggested a move between stages, or a person held instead; a move itself is a next_block or back_block "
-        "row of the controls table."),
+        "row of the controls table. A withdrawn row changes nothing: a person took back a change before it applied, "
+        "so it had no row of its own; staged_by_kind says who had sent it."),
         columns=[
             column("session_time", "When, in session seconds: its code's time, or, for one that strobed "
                                    "nothing, the rig's clock fitted to the recording, as time_source says (NaN if "
@@ -204,7 +228,7 @@ def _add_changes(module, changes: list[dict]) -> None:
             column("run_number", "The run it was applied in (-1: none, or a run the recording did not measure).",
                    [-1 if change["run_number"] is None else change["run_number"] for change in changes]),
             column("setting", "The setting it changed; block for a suggestion or a decline, whose was and now are "
-                              "stages.", [change["name"] for change in changes]),
+                              "stages; shaping for the training switch's rows (their setting is named shaping).", [change["name"] for change in changes]),
             column("was", "Its old value, as JSON text ('' if the row has none).",
                    [change["was"] or "" for change in changes]),
             column("now", "Its new value, as JSON text ('' if the row has none).",
@@ -215,11 +239,16 @@ def _add_changes(module, changes: list[dict]) -> None:
                               "rig's own suggestion).",
                    [change["by_kind"] or "" for change in changes]),
             column("kind", "set (a person's value), hand_back, range (a draw's numbers: was and now are draws), "
-                           "revert, clear, drum, training, suggested (the rig suggested a move: its detail says which, "
+                           "revert, clear, drum, training, form (a person's draw or scaling: its now is the form), "
+                           "shaping (the training switch: on, frozen or full), withdrawn (a person took back a "
+                           "change before it applied), suggested (the rig suggested a move: its detail says which, "
                            "in which block, and the bar it met) or declined (a person held instead: its detail names "
                            "the suggestion); a row written before wl-xcon's engine build C3 is a "
                            "set, one whose kind could not be read is '', and a kind outside these is as written, "
                            "each of the last two said in the notes.", [field.kind for field in fields]),
+            column("staged_by_kind", "Who had sent a withdrawn change, by kind only: box, member or system ('' for "
+                                     "any other row, and if not recorded).",
+                   [field.staged_by_kind or "" for field in fields]),
             column("change", "The act it belongs to, an id a revert's rows share (-1 if not recorded).",
                    [-1 if field.change is None else field.change for field in fields]),
             column("trial_id", "The first trial it applies to (-1 if not recorded).",
@@ -242,7 +271,9 @@ def _add_changes(module, changes: list[dict]) -> None:
                              "hand-back's to, a range's from and block, a revert's moment, a clear's or a "
                              "switch's control fields, a suggestion's move, block, bar, at_hardest and the "
                              "suggestion it remakes (remakes), a decline's suggestion, and the suggestion a change "
-                             "that widens the pool answers ('{}' if none).", [field.detail for field in fields]),
+                             "that widens the pool answers, a form's shape, and a withdrawal's cid and withdrawn (what was "
+                             "taken back); any actor in it, wherever it sits, is its kind only, never its name or account "
+                             "('{}' if none).", [field.detail for field in fields]),
         ]))
 
 
@@ -264,7 +295,8 @@ def _add_controls(module, controls: list[dict]) -> None:
                                   "in or, between trials, the one about to run; not a trial number (-1 if not "
                                   "recorded).",
                    [-1 if control["trial_index"] is None else control["trial_index"] for control in controls]),
-            column("detail", "The control's own fields, as JSON text.", [control["detail"] for control in controls]),
+            column("detail", "The control's own fields, as JSON text; any actor in it is its kind only, never its "
+                             "name or account.", [control["detail"] for control in controls]),
             column("by_kind", "Who sent it, by kind only: box, member or system (the rig itself) ('' for nobody).",
                    [control["by_kind"] or "" for control in controls]),
         ]))
