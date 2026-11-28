@@ -35,8 +35,10 @@ RUN_COLUMNS: dict[str, tuple[str, str]] = {
                                  "chromaticities, apex, source, and luminance in the cone luminance held names, not "
                                  "CIE Y) and drew it on the run's calibration at each luminance its starting values "
                                  "use (xy, desaturation, each color's light at full as CIE 1931 XYZ in cd/m2, and "
-                                 "drive levels); a look's light is its color's xyz times its fraction, from the "
-                                 "trial's params. As JSON text ('' if none)."),
+                                 "drive levels); a look's light is its color's xyz times its fraction only at saturation 1; at any "
+                                 "saturation its drawn chromaticity is its light_xy, in the stimuli tables. Each "
+                                 "realization's macaque_row is its calibration's macaque luminance row, and a set's design is "
+                                 "how it was generated (null for one written by hand). As JSON text ('' if none)."),
     "end_reason": ("end_reason", "Why a completed run ended: plan_done, plan_time, stalled or cannot_draw ('' for "
                                  "a run that ended any other way, or if not recorded)."),
     "stop_kind": ("stop_kind", "How the run stopped, as the rig's record says: completed, operator, limit, fault "
@@ -60,14 +62,15 @@ RUN_COLUMNS: dict[str, tuple[str, str]] = {
 }
 MARK_FIELDS = ("marked_bad", "bad_reason")
 BLOCK_COLUMNS: dict[str, str] = {
-    "ended": "How the block ended: rule, time, fall_back, next, back, run_time or run ('' if not recorded).",
+    "ended": "How the block ended: rule, time, fall_back, next, back, run_time, run or shaping (the training switch closed the stage the full task's start ends, or reopened it) ('' if not recorded).",
     "ended_by": "Who moved the run on or back, by kind only: box, member or system (the rig itself) ('' for nobody, or if not recorded).",
     "after_trial": "The trial_id of the run's last trial before it ended (-1 if none, or not recorded).",
     "position": "Its place in the run's sequence of blocks, from 0: a training progression's stage (-1 if not "
                 "recorded).",
     "passed_at": "For a training progression's top stage, the trial_id after which its rule was first met (-1 if "
                  "not, or not recorded).",
-    "varied": "Each setting that varied in it and how, as JSON text ('' if not recorded).",
+    "varied": "Each setting that varied in it and how, as JSON text: each entry's by is condition, draw, person or "
+              "scaled (a size scaled by eccentricity: its from, the form change, and its factor) ('' if not recorded).",
     "planned": "A designed block's planned sequence, as JSON text ('' if none).",
     "counts": "Each condition's trials in it, overridden and eased, as JSON text ('' if not recorded).",
 }

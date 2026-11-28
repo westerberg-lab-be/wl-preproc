@@ -50,8 +50,10 @@ COLUMNS: dict[str, str] = {
     "fluid_ml": "The fluid it commanded, ml (NaN if not recorded).",
     "color_realized": ("Each color set it drew at a luminance its run had not yet realized, by set name, as the rig "
                        "drew it there on the run's calibration (xy, desaturation, each color's light at full as CIE "
-                       "1931 XYZ in cd/m2, and drive levels); a look's light is its color's xyz times its fraction, "
-                       "from its params. As JSON text ('' where its run had realized every luminance it drew, as its "
+                       "1931 XYZ in cd/m2, and drive levels); a look's light is its color's xyz times its fraction only at "
+                       "saturation 1; at any saturation its drawn chromaticity is its light_xy, in the stimuli tables. "
+                       "Each realization's macaque_row is its calibration's macaque luminance row, and a set's design "
+                       "is how it was generated (null for one written by hand). As JSON text ('' where its run had realized every luminance it drew, as its "
                        "run's color_sets or an earlier trial's color_realized give them, or if not recorded)."),
 }
 PLANNED_COLUMNS: dict[str, str] = {

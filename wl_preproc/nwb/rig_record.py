@@ -108,7 +108,7 @@ TABLES: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
         "block can be over before it draws one.",
         (("run_number", "The run."),
          ("block", "Its block type."),
-         ("ended", "How it ended: rule, time, fall_back, next, back, run_time or run."),
+         ("ended", "How it ended: rule, time, fall_back, next, back, run_time, run or shaping (the training switch closed the stage the full task's start ends, or reopened it)."),
          ("ended_by", "Who moved the run on or back, by kind only ('' for nobody)."),
          ("after_trial", "The trial_id of the run's last trial before it ended (-1 if none)."),
          ("position", "Its place in the run's sequence of blocks, from 0 (-1 if not recorded)."))),

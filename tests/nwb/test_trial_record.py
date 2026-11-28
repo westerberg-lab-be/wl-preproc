@@ -104,6 +104,7 @@ def test_a_new_luminances_color_realization_is_published_as_json():
     columns, _notes = record_columns(_trials(1, 2, 3), matched, {})
     assert columns["color_realized"] == ["", '{"isohue": [{"luminance_cd_m2": 12.0}]}', ""]
     assert "times its fraction" in COLUMNS["color_realized"] and "an earlier trial's" in COLUMNS["color_realized"]
+    assert all(word in COLUMNS["color_realized"] for word in ("only at saturation 1", "light_xy", "macaque_row"))
 
 
 def test_the_training_switch_is_a_column_where_lines_carry_it():

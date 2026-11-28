@@ -3,6 +3,12 @@ calibration (design spec `2026-11-07-rig-record-fields-design.md` section 5)."""
 
 from __future__ import annotations
 
+import inspect
+import json
+import re
+
+import pytest
+
 from wl_preproc.events.rigruns import BlockEnd, ConditionCount, RigRun, RigRuns, Shortfall
 
 
@@ -150,7 +156,13 @@ def test_the_runs_table_says_where_each_stage_was_left_and_the_runs_color_sets()
     # needs (the review of 2026-11-14, M1, M2 and M6).
     column, text = RUN_COLUMNS["left"]
     assert column == "stages_left" and "'{}'" in text and "not the stage it starts in" in text
-    assert "times its fraction" in RUN_COLUMNS["color_sets"][1] and "held" in RUN_COLUMNS["color_sets"][1]
+    text = RUN_COLUMNS["color_sets"][1]
+    assert "times its fraction" in text and "held" in text
+    assert all(word in text for word in ("only at saturation 1", "light_xy", "macaque_row", "design"))
+    both = {"isohue": {"name": "isohue", "macaque_row": 3, "design": "generated"}}
+    run_record(runs, blocks, RigRuns(runs=(_run(1, 0, color_sets=both),), problems=()), {})
+    published = json.loads(runs[0]["record"]["color_sets"])
+    assert published["isohue"]["macaque_row"] == 3 and published["isohue"]["design"] == "generated"
 
 
 def test_the_runs_table_has_the_marks():
@@ -170,3 +182,33 @@ def test_the_marks_are_written_for_every_run_even_with_no_rig_record():
     run_record(runs, [], None, {})
     assert runs[0]["record"] == {"marked_bad": True, "bad_reason": "eye lost"}
     assert runs[1]["record"] == {"marked_bad": False, "bad_reason": ""}
+
+
+_ENDED_WORDS = ("rule", "time", "fall_back", "next", "back", "run_time", "run", "shaping")
+
+
+def _ended_texts():
+    from wl_preproc.contracts.nwb_description import RunBlock
+    from wl_preproc.nwb.rig_record import TABLES
+    from wl_preproc.nwb.run_record import BLOCK_COLUMNS
+
+    return {"BlockEnd": BlockEnd.__doc__, "BLOCK_COLUMNS": BLOCK_COLUMNS["ended"],
+            "unopened_blocks": dict(TABLES["unopened_blocks"][1])["ended"], "RunBlock": inspect.getsource(RunBlock)}
+
+
+@pytest.mark.parametrize("where", ["BlockEnd", "BLOCK_COLUMNS", "unopened_blocks", "RunBlock"])
+def test_every_list_of_a_blocks_end_names_shaping(where):
+    text = _ended_texts()[where]
+    assert [word for word in _ENDED_WORDS if not re.search(rf"\b{word}\b", text)] == []
+
+
+def test_a_block_ended_by_the_switch_and_a_scaled_size_are_published_as_written():
+    from wl_preproc.nwb.run_record import BLOCK_COLUMNS, run_record
+
+    varied = {"search_size": [{"by": "scaled", "from": 9, "factor": 0.3}]}
+    runs, blocks = _file(1)
+    rig = _run(block_ends=(BlockEnd("easy", "shaping", None, 0, 11, 0, None, varied=varied),))
+    run_record(runs, blocks, RigRuns(runs=(rig,), problems=()), {(0, 0): 101})
+    assert blocks[0]["ended"] == "shaping"
+    assert blocks[0]["record"]["varied"] == json.dumps(varied, sort_keys=True)
+    assert "scaled" in BLOCK_COLUMNS["varied"] and "factor" in BLOCK_COLUMNS["varied"]
