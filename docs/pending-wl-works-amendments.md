@@ -1,9 +1,48 @@
 # Amendments to wl-works
 
-**Fourteen are outstanding: two opened 2026-08-22, one 2026-09-28, one 2026-09-29, two 2026-09-30, one 2026-10-01, one 2026-10-05, one 2026-10-14, one 2026-10-18, one 2026-11-07, one 2026-11-20, two 2026-11-24.** The earlier two
+**Fifteen are outstanding: two opened 2026-08-22, one 2026-09-28, one 2026-09-29, two 2026-09-30, one 2026-10-01, one 2026-10-05, one 2026-10-14, one 2026-10-18, one 2026-11-07, one 2026-11-20, two 2026-11-24, one 2026-11-28.** The earlier two
 batches are closed; their records are kept below, because
 [`specs/2026-08-12-wl-preproc-design.md`](superpowers/specs/2026-08-12-wl-preproc-design.md)
 §14 items 10–11 point at it and a reference that dead-ends teaches nothing.
+
+---
+
+# OPEN — the console-settings reader: a form is an act, and the NWB file's stimulus tables carry each look as drawn
+
+**Added by the console-settings reader (2026-11-28).** Opened with
+[`specs/2026-11-28-console-settings-reader-design.md`](superpowers/specs/2026-11-28-console-settings-reader-design.md).
+This host now reads wl-xcon's console settings and withdrawn changes (XC-513, XC-529). **Shipped at that merge**,
+not before. Two schema files are re-exported, **descriptions only** (D6): `docs/schemas/nwb_description.json` and
+`docs/schemas/session_listing.json`. No field is added or removed, so a pin is optional.
+
+**`GET /sessions`, and the NWB description: a form counts as one act** (D1)
+- **`training_records.parameter_changes` counts a form as one act**, in the listing and in the description: one per
+  act among a set, a hand-back, a range edit and a revert, since 2026-11-28 a form too. A clear and a switch are
+  not counted, and neither are the new kinds `shaping` and `withdrawn`.
+
+**The NWB file gains** (the stimulus tables' columns are written only where the record carries them: a session
+recorded before wl-xcon's console build has exactly the stimulus columns it had)
+- **The trials' `shaping`** column (on, frozen or full, as the rig's record says), where some line carries it.
+- **`drawn` names `full` and a form's id**, beside the pool and the staircase it already names.
+- **`stimuli` and `stimulus_objects` gain `size_deg`, `window_deg` (objects only) and `light_xy`** (a 2-D column,
+  the CIE 1931 [x, y] of the light a look was drawn in), only where some entry of the file carries them (D3). A
+  missing number is NaN and a missing pair `[NaN, NaN]`. A size or pair wl-xcon wrote unreadably is none.
+- **`parameter_changes` gains the kinds `form`, `shaping` and `withdrawn`, and the column `staged_by_kind`**
+  (D2). A form's `shape`, and a withdrawal's `cid` and `withdrawn` (what was taken back), are in `detail`. A
+  withdrawal's `staged_by` is published by kind only (box, member or system), never by name or account.
+- **A block's `ended` may be `shaping`** (the training switch closed the stage the full task's start ends, or
+  reopened it), in the blocks table and in `RunBlock.ended`; and **`varied` may be `by` `scaled`** (a size scaled
+  by eccentricity).
+- **The colour texts are corrected, and `object_window` may be a multiple** (D7): a trial's `object_window`
+  setting may be a multiple of the object's radius, so `window_deg` is the degrees. A look's light is its colour's
+  `xyz` times its fraction only at saturation 1; at any saturation its drawn chromaticity is its `light_xy`.
+  Each realization's `macaque_row` is its calibration's macaque luminance row.
+
+**A look's light in cd/m² is not published yet.** The requester accepted wl-xcon's shape on 2026-11-28:
+`light_xyz_cd_m2`, CIE 1931 XYZ in cd/m², written beside each look's `light_xy` and null wherever `light_xy` is
+null. wl-xcon has not built it and will tell us the commit; reading it is a later small piece. This piece publishes
+`light_xy` only and computes no light. The earlier ask for `light_luminance_cd_m2` and `light_colorset` is dropped
+in favour of this.
 
 ---
 

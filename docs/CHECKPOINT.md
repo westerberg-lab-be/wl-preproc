@@ -122,8 +122,9 @@ interpreters, 3620 passed on each with 39 skipped and 1 xfailed (`gh run view 45
 - **The pop-out search, read** (`d8fe06b`, just before): two change kinds, `suggested` and `declined`, counted in no act;
   the `drawn` column names a pool and a staircase; each run's `start_block`, `stages_left` and
   `color_sets`; each trial's `color_realized`; a confirming move keeps its `suggestion` in the
-  change's detail. The descriptions say a look's light is its colour's `xyz` at full times its
-  fraction, in the cone luminance `held` names. wl-xcon was told on 2026-11-14 and merged its
+  change's detail. The descriptions said a look's light is its colour's `xyz` times its fraction;
+  since the console-settings reader (2026-11-28) they say that holds only at saturation 1, and
+  that at any saturation a look's drawn chromaticity is its `light_xy`. wl-xcon was told on 2026-11-14 and merged its
   side the same day (its `1d77392`, which writes `color_realized`).
 - **The rig record minors** (`bc5df71`, just before): three descriptions say what an empty value is; a change kind it
   cannot read is none and one no build writes is said; the change log's time and the module's

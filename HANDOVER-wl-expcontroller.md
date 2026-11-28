@@ -584,3 +584,32 @@ and agreed in two messages the same day, the requester answering "accept, with t
   comes with our older minors.
 - *Found in your diagnosis of our `295f9c9`, for our older minors:* a rig clock fit over instants that are all
   one float can report a miss of some 1e15 s rather than that they do not advance; only the sentence is wrong.
+
+# 2026-11-28: the console settings and withdrawn changes (XC-513, XC-529)
+
+Read on `feat/console-settings`, not merged. Where each is published:
+- **Change kinds `form`, `shaping` and `withdrawn`** (the change log, XC-529 and the console settings). All three are
+  known kinds, published as written in `parameter_changes`, with their own fields in its `detail`: a form's `shape`,
+  a withdrawal's `cid` and `withdrawn` (`{kind, now}`). A form is a person's draw or scaling, and counts as one act,
+  as a set does; `shaping` (the training switch: on, frozen or full) and `withdrawn` are counted in no act. A
+  revert that takes the training switch back is a `shaping` row, with its `moment`, not a `revert`.
+- **A withdrawal's `staged_by` is published by kind only**, in a new `parameter_changes` column, `staged_by_kind`
+  (box, member or system). Neither the name nor the account reaches the file, as for every actor; the database keeps the
+  line whole, as today.
+- **The trial line's `shaping`** is the trials table's `shaping` column, written only where some line carries it.
+  `drawn` names `full` (the task's full version, while the training switch is at full) and a person's form (the id of
+  its form change), beside the pool and the staircase.
+- **Each look's size, an object's window and a look's light chromaticity** are `size_deg`, `window_deg` (objects only)
+  and `light_xy` (two numbers: the CIE 1931 [x, y]) in the `stimuli` and `stimulus_objects` tables, written only where
+  some entry of the file carries one, with NaN for a missing number. A per-eye array's objects are read under `left`
+  and `right`, into the same rows as their positions. A `light_xy` or size written unreadably (one number, three,
+  text) is none, said once per field; the trial line is kept.
+- **A block's `ended` may be `shaping`** (the training switch closed the stage the full task's start ends, or
+  reopened it), and a `varied` entry's `by` may be `scaled`, in the blocks table.
+- **The colour texts** now say a look's light is its colour's `xyz` times its fraction only at saturation 1, and
+  that at any saturation its drawn chromaticity is its `light_xy`. A trial's `object_window` setting may be a
+  multiple of the object's radius; `window_deg` is the degrees.
+- **Nothing of the light in cd/m² is read:** this piece publishes `light_xy` only and computes no light. The
+  requester accepted your `light_xyz_cd_m2` on 2026-11-28 (CIE 1931 XYZ in cd/m², written beside each look's
+  `light_xy`, null wherever `light_xy` is null), in place of our earlier ask for `light_luminance_cd_m2` and
+  `light_colorset`, which we drop. Tell us the commit when you have built it; reading it is a later small piece.
