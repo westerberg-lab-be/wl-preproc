@@ -180,11 +180,12 @@ def _place(x: float, y: float) -> dict:
     return {"eccentricity": eccentricity, "direction": None if np.isnan(polar) else polar, "x": x, "y": y}
 
 
-def _stimuli(index_in_run: int, design: str) -> list[dict]:
+def _stimuli(index_in_run: int, design: str, console: bool = False) -> list[dict]:
     """The fixation point and the target (`rig_condition`'s `target_xy_deg`);
     a run's third trial shows a two-object array beside them, and a plain
     run's trials a `Blank` mask after the fixation point, which wl-xcon's
-    `record.py::_stimuli` writes as drawn false."""
+    `record.py::_stimuli` writes as drawn false. With `console`, each entry
+    also says what it was drawn at (`CONSOLE_LOOKS`)."""
     shown = {"kind": "show", "changed": None, "drawn": True, "unresolved": None}
     entries = [{"name": "fix", "frame": 1, "off": 61, **shown, **_place(0.0, 0.0)},
                {"name": "target", "frame": 85, "off": None, **shown, **_place(0.0, 5.0)}]
@@ -193,7 +194,40 @@ def _stimuli(index_in_run: int, design: str) -> list[dict]:
                         "objects": [_place(8.0, 0.0), _place(-8.0, 0.0)]})
     if design == "plain":
         entries.append({"name": "mask", "frame": 61, "off": 85, **shown, "drawn": False, **_place(0.0, 0.0)})
+    if console:
+        for entry in entries:
+            entry.update(CONSOLE_LOOKS[entry["name"]])
+            for item in entry.get("objects", ()):
+                item.update(CONSOLE_OBJECT)
     return entries
+
+
+#: What each look was drawn at, as wl-xcon's console settings build writes it
+#: (`record.py`'s `_stimuli`; design D5): a size in degrees and a drawn
+#: chromaticity (CIE xy), each null where the look has none, and an object's
+#: own size, window and chromaticity.
+LIGHT_XY = [0.3, 0.6]
+CONSOLE_LOOKS = {"fix": {"size_deg": 0.3, "light_xy": LIGHT_XY}, "target": {"size_deg": 1.0, "light_xy": None},
+                 "search": {"size_deg": None, "light_xy": None}, "mask": {"size_deg": None, "light_xy": None}}
+CONSOLE_OBJECT = {"size_deg": 2.4, "window_deg": 3.6, "light_xy": LIGHT_XY}
+
+#: The color set the synthetic rig's task declares, with the one realization
+#: a run's start row records (`taskd.py`'s `color_sets`): each `xyz` is
+#: wl-xcon's formula at saturation 1 for that color's `macaque_row`, so a later
+#: piece that computes the light can reuse this fixture.
+CONSOLE_COLOR_SETS = {"isohue": {
+    "name": "isohue", "colors": {"red": [0.3, 0.6], "green": [0.25, 0.5]}, "apex": [0.3127, 0.329],
+    "luminance_cd_m2": 20.0, "held": "macaque_2deg_LM1", "source": "synthetic",
+    "design": {"space": "CAM16-UCS", "gray_lightness": 65.0, "chroma": 29.49},
+    "realized": [{"luminance_cd_m2": 20.0, "desaturation": 0.0,
+                  "xy": {"red": [0.3, 0.6], "green": [0.25, 0.5]},
+                  "xyz": {"red": [150 / 13, 300 / 13, 50 / 13], "green": [100 / 9, 200 / 9, 100 / 9]},
+                  "drive": {"red": [0.9, 0.2, 0.1], "green": [0.2, 0.9, 0.1]},
+                  "macaque_row": [0.1, 0.8, 0.1]}]}}
+CONSOLE_PARAMS = {
+    "fix_color": {"class": "ColorSetLight", "fields": {"color": "red", "colorset": "isohue", "fraction": 0.5,
+                                                       "luminance": 20.0, "saturation": 1.0}},
+    "search_size": {"class": "Scaled", "fields": {"factor": 0.3}}, "object_window": 3.0}
 
 
 #: Each run's design in a record with `fields` (design spec
@@ -227,7 +261,7 @@ def _planned(index: int, design: str) -> dict | None:
     return None
 
 
-def _trial_fields(index: int, previous: str | None, design: str = "balanced") -> dict:
+def _trial_fields(index: int, previous: str | None, design: str = "balanced", console: bool = False) -> dict:
     """What wl-xcon's engine builds C2a, C2b and C3 and its XC-399 add to a
     trial line (design spec `2026-11-07-rig-record-fields-design.md` section
     10): each run's first trial its block's first, in a sequence-balanced
@@ -235,11 +269,16 @@ def _trial_fields(index: int, previous: str | None, design: str = "balanced") ->
     it and owed, its third held by a person at a contrast that kept it out of
     moving up, with an array beside its target; each trial's planned place by
     its run's design (`_planned`), its hold drawn by the task, and its
-    fluid."""
+    fluid; with `console`, its training switch (`full` through the priming
+    run's lines, which draw the contrast at full) and its looks' settings."""
     fields = {"counting": "counted", "shown": True, "repeat_of": None, "at_once": False, "previous": previous,
               "drummed": False, "drumming": None, "aids": [], "structure": "default", "overridden": [],
               "drawn": {"fix_hold_s": "task"}, "live": [], "eased": [], "planned": _planned(index, design),
-              "fluid_ml": 0.1, "stimuli": _stimuli(index, design)}
+              "fluid_ml": 0.1, "stimuli": _stimuli(index, design, console)}
+    if console:
+        fields["shaping"] = "full" if design == "priming" else "on"
+        if design == "priming":
+            fields["drawn"] = {**fields["drawn"], "contrast": "full"}
     if index == 1:
         fields.update(counting="owed", repeat_of=0, at_once=True, drummed=True, drumming="block", aids=["drumming"])
     if index == 2:
@@ -255,6 +294,7 @@ def write_rig_trials(path: Path, recipe: SessionRecipe, truth: GroundTruth) -> N
     across the session and equal to the stream's TRIAL_NUMBER; and, for a
     record with `fields`, what its later builds add (`_trial_fields`)."""
     fields = recipe.rig_record is not None and recipe.rig_record.fields
+    console = fields and recipe.rig_record.console
     lines, per_run, previous = [], {}, {}
     for position, trial in enumerate(truth.trials, start=1):
         index = per_run.get(trial.block_id, 0)
@@ -265,6 +305,8 @@ def write_rig_trials(path: Path, recipe: SessionRecipe, truth: GroundTruth) -> N
         design = _design(trial.block_id - 1)
         if fields and design == "priming":
             params = {**params, "target_appearance": _planned(index, design)["value"]}
+        if console:
+            params = {**params, **CONSOLE_PARAMS}
         lines.append({
             "index": index,
             "run": trial.block_id - 1,
@@ -274,7 +316,7 @@ def write_rig_trials(path: Path, recipe: SessionRecipe, truth: GroundTruth) -> N
             "block": f"block-{trial.block_id}",
             "condition": condition,
             "params": params,
-            **(_trial_fields(index, previous.get(trial.block_id), design) if fields else {}),
+            **(_trial_fields(index, previous.get(trial.block_id), design, console) if fields else {}),
         })
         previous[trial.block_id] = condition
     if Fault.MISMATCHED_RIG_LINE in recipe.faults:
@@ -370,7 +412,8 @@ def _start_fields(recipe: SessionRecipe, run_index: int) -> dict:
             "versions": {"task": "sha256:synthetic", "allocation": "synthetic"}, "seed": recipe.seed,
             "draws": {"fix_hold_s": {"class": "Uniform", "fields": {"high": 0.35, "low": 0.3, "repeat": "fresh"}}},
             "generated": generated, "directions": [],
-            "trials": recipe.blocks[run_index].n_trials if plan is None else None}
+            "trials": recipe.blocks[run_index].n_trials if plan is None else None,
+            **({"color_sets": CONSOLE_COLOR_SETS} if recipe.rig_record.console else {})}
 
 
 def _end_fields(recipe: SessionRecipe, truth: GroundTruth, run_index: int, faulted: bool) -> dict:
@@ -394,6 +437,14 @@ def _end_fields(recipe: SessionRecipe, truth: GroundTruth, run_index: int, fault
              "after_trial": len(lines) - 1 if lines else None, "block_in_session": run_index + 1,
              "position": 0, "passed_at": None, "varied": {"fix_hold_s": [{"by": "draw"}]},
              "planned": None, "counts": {}}]
+    if recipe.rig_record.console:
+        # The plain run's block ends by the training switch, and the balanced
+        # run's search size varies by scaling.
+        if _design(run_index) == "plain" and not faulted:
+            ends[0]["ended"] = "shaping"
+        if _design(run_index) == "balanced":
+            ends[0]["varied"] = {**ends[0]["varied"],
+                                 "search_size": [{"by": "scaled", "from": 9, "factor": 0.3}]}
     if moved:
         ends.append({"block": "probe", "ended": "run", "by": None, "after_trial": None, "block_in_session": None,
                      "position": 1, "passed_at": None, "varied": {}, "planned": None, "counts": {}})
