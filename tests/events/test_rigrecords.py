@@ -299,3 +299,56 @@ def test_a_change_that_widens_the_pool_keeps_the_suggestion_it_answers():
     assert json.loads(fields[0].detail) == {"suggestion": 4}
     assert json.loads(fields[1].detail)["remakes"] == 5
     assert problems == [] and acts(fields) == 1
+
+
+def test_the_console_settings_kinds_are_known():
+    """wl-xcon's `form`, `shaping` and `withdrawn` (its `record.KINDS` at `293a66e1`): a form is a person's act, a
+    shaping row is not, a withdrawal changes nothing, and its stager is published by kind only (D2)."""
+    from wl_preproc.events.rigrecords import acts, change_fields
+
+    common = {"at": 1773478801.0, "at_local": "2026-03-14T10:00:01+01:00", "run": 0, "by": MEMBER}
+    staged_by = {"kind": "member", "name": "Ada Staged", "account": "ada@lab"}
+    rows = [{**common, "change": 9, "kind": "form", "name": "search_size", "was": None,
+             "now": {"class": "Scaled", "fields": {"factor": 0.3}}, "shape": "scaled", "event_code": 4130,
+             "sequence": 1},
+            {**common, "change": 10, "kind": "shaping", "name": "training", "was": "on", "now": "full",
+             "event_code": None},
+            *({**common, "change": 12, "kind": "withdrawn", "name": name, "was": 0.5, "now": 0.5, "event_code": None,
+               "cid": "c-9f3a2b7e41", "withdrawn": {"kind": "set", "now": 0.8}, "staged_by": staged_by}
+              for name in ("a", "b"))]
+    fields, problems = change_fields([json.dumps(row) for row in rows])
+    assert [field.kind for field in fields] == ["form", "shaping", "withdrawn", "withdrawn"]
+    assert problems == []
+    assert acts(fields) == 1
+    assert fields[0].detail == '{"shape": "scaled"}'
+    assert fields[2].detail == json.dumps({"cid": "c-9f3a2b7e41", "withdrawn": {"kind": "set", "now": 0.8}},
+                                          sort_keys=True)
+    assert all("Ada" not in field.detail and "ada@lab" not in field.detail for field in fields)
+    assert [field.staged_by_kind for field in fields] == [None, None, "member", "member"]
+    assert [field.strobed_nothing for field in fields] == [False, True, True, True]
+
+
+def test_a_revert_of_the_switch_is_a_shaping_row_with_its_moment():
+    from wl_preproc.events.rigrecords import acts, change_fields
+
+    fields, problems = change_fields([json.dumps({"change": 11, "kind": "shaping", "name": "training", "moment": 0,
+                                                  "was": "full", "now": "on", "event_code": None})])
+    assert (fields[0].kind, fields[0].moment, acts(fields), problems) == ("shaping", 0, 0, [])
+
+
+def test_a_staged_by_it_cannot_read_is_none_and_said_once():
+    from wl_preproc.events.rigrecords import change_fields
+
+    rows = [{"name": "a", "kind": "withdrawn", "staged_by": "Ada"}, {"name": "b", "kind": "withdrawn",
+                                                                      "staged_by": "Ada"}]
+    fields, problems = change_fields([json.dumps(row) for row in rows])
+    assert [field.staged_by_kind for field in fields] == [None, None]
+    assert problems == ["2 change rows: `staged_by` is not an object or null, so it is read as none"]
+    assert all("Ada" not in field.detail for field in fields)
+
+
+def test_a_form_is_counted_as_an_act_wherever_the_count_is_described():
+    from wl_preproc.contracts.nwb_description import TrainingRecords
+    from wl_preproc.contracts.protocol import ListedTrainingRecords
+
+    assert "a form" in TrainingRecords.__doc__ and "a form" in ListedTrainingRecords.__doc__

@@ -761,8 +761,8 @@ class ListedTrainingRecords(BaseModel):
     sent when its display process died (`by_kind` "system"). The rows are in the database and the NWB file, not here (design
     spec `2026-10-18-training-records-and-backup-clock-design.md` section 3.4).
     Since 2026-11-07 `parameter_changes` counts a person's acts on a setting,
-    one per act among a set, a hand-back, a range edit and a revert; a clear
-    and a switch are not counted (design spec
+    one per act among a set, a hand-back, a range edit and a revert, since
+    2026-11-28 a form too; a clear and a switch are not counted (design spec
     `2026-11-07-rig-record-fields-design.md` section 7)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)

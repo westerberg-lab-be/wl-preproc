@@ -195,7 +195,8 @@ def _add_changes(module, changes: list[dict]) -> None:
         "kind and the act it belongs to, timed by the code it strobed or, for one that strobed nothing, by the rig's "
         "clock fitted to the recording. A pop-out search's suggested and declined rows change nothing: the rig "
         "suggested a move between stages, or a person held instead; a move itself is a next_block or back_block "
-        "row of the controls table."),
+        "row of the controls table. A withdrawn row changes nothing: a person took back a change before it applied, "
+        "so it had no row of its own; staged_by_kind says who had sent it."),
         columns=[
             column("session_time", "When, in session seconds: its code's time, or, for one that strobed "
                                    "nothing, the rig's clock fitted to the recording, as time_source says (NaN if "
@@ -204,7 +205,7 @@ def _add_changes(module, changes: list[dict]) -> None:
             column("run_number", "The run it was applied in (-1: none, or a run the recording did not measure).",
                    [-1 if change["run_number"] is None else change["run_number"] for change in changes]),
             column("setting", "The setting it changed; block for a suggestion or a decline, whose was and now are "
-                              "stages.", [change["name"] for change in changes]),
+                              "stages; the training switch, whose rows are shaping.", [change["name"] for change in changes]),
             column("was", "Its old value, as JSON text ('' if the row has none).",
                    [change["was"] or "" for change in changes]),
             column("now", "Its new value, as JSON text ('' if the row has none).",
@@ -215,11 +216,16 @@ def _add_changes(module, changes: list[dict]) -> None:
                               "rig's own suggestion).",
                    [change["by_kind"] or "" for change in changes]),
             column("kind", "set (a person's value), hand_back, range (a draw's numbers: was and now are draws), "
-                           "revert, clear, drum, training, suggested (the rig suggested a move: its detail says which, "
+                           "revert, clear, drum, training, form (a person's draw or scaling: its now is the form), "
+                           "shaping (the training switch: on, frozen or full), withdrawn (a person took back a "
+                           "change before it applied), suggested (the rig suggested a move: its detail says which, "
                            "in which block, and the bar it met) or declined (a person held instead: its detail names "
                            "the suggestion); a row written before wl-xcon's engine build C3 is a "
                            "set, one whose kind could not be read is '', and a kind outside these is as written, "
                            "each of the last two said in the notes.", [field.kind for field in fields]),
+            column("staged_by_kind", "Who had sent a withdrawn change, by kind only: box, member or system ('' for "
+                                     "any other row, and if not recorded).",
+                   [field.staged_by_kind or "" for field in fields]),
             column("change", "The act it belongs to, an id a revert's rows share (-1 if not recorded).",
                    [-1 if field.change is None else field.change for field in fields]),
             column("trial_id", "The first trial it applies to (-1 if not recorded).",
@@ -242,7 +248,8 @@ def _add_changes(module, changes: list[dict]) -> None:
                              "hand-back's to, a range's from and block, a revert's moment, a clear's or a "
                              "switch's control fields, a suggestion's move, block, bar, at_hardest and the "
                              "suggestion it remakes (remakes), a decline's suggestion, and the suggestion a change "
-                             "that widens the pool answers ('{}' if none).", [field.detail for field in fields]),
+                             "that widens the pool answers, a form's shape, and a withdrawal's cid and withdrawn (what was "
+                             "taken back) ('{}' if none).", [field.detail for field in fields]),
         ]))
 
 

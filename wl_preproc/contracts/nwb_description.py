@@ -229,7 +229,7 @@ class TrainingRecords(_Frozen):
     `2026-10-18-training-records-and-backup-clock-design.md` section 0,
     decision 6). Since 2026-11-07 `parameter_changes` counts a person's acts
     on a setting, one per act among a set, a hand-back, a range edit and a
-    revert, not the change log's rows (design spec
+    revert, since 2026-11-28 a form too, not the change log's rows (design spec
     `2026-11-07-rig-record-fields-design.md` section 7)."""
 
     parameter_changes: int

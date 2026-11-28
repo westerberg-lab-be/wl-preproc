@@ -746,6 +746,29 @@ def test_the_change_logs_descriptions_say_what_a_suggestion_is(tmp_path):
         assert all("suggestion" in table[name].description for name in ("block", "setting", "by_kind"))
 
 
+def test_a_withdrawals_stager_is_published_by_kind_only(tmp_path):
+    """A withdrawn row changes nothing; `staged_by_kind` says who had sent it, never their name or account (D2)."""
+    from wl_preproc.nwb.rig_record import add_rig_record
+
+    def change(name, fields):
+        return {"session_time": 1.0, "run_number": 1, "name": name, "was": "0.5", "now": "0.5", "sequence": None,
+                "by_kind": "member", "time_source": "rig_clock", "fields": fields}
+
+    record = {**RIG_RECORD, "controls": [], "parameter_changes": [
+        change("a", a_set(kind="withdrawn", staged_by_kind="member", strobed_nothing=True,
+                          detail='{"cid": "c-9f3a2b7e41", "withdrawn": {"kind": "set", "now": 0.8}}')),
+        change("b", a_set())]}
+    _path, io, nwb = _write(tmp_path, lambda nwb: add_rig_record(nwb, record))
+    with io:
+        table = nwb.processing["rig_record"]["parameter_changes"]
+        assert list(table["staged_by_kind"].data[:]) == ["member", ""]
+        assert all(word in table["kind"].description for word in ("form", "shaping", "withdrawn"))
+        assert all(word in table["detail"].description for word in ("shape", "cid", "withdrawn"))
+        assert "shaping" in table["setting"].description
+        assert "took back" in table.description
+        assert "Ada" not in repr(table.to_dataframe().to_dict())
+
+
 def test_a_stop_says_when_it_is_the_tightest_bound_and_not_a_measured_end(tmp_path):
     """A trial's stop is its TRIAL_END, or when that was lost the tightest bound the recording gives
     (`schema/events.py::_trial_stop_time`), and a block's its BLOCK_END or its last event; neither description may
