@@ -56,9 +56,11 @@ def test_each_look_says_its_size_window_and_light(built):
         module = io.read().processing["rig_record"]
         stimuli = module["stimuli"].to_dataframe()
         fix = stimuli[stimuli["stimulus"] == "fix"]
+        assert len(fix) > 0
         assert fix["size_deg"].tolist() == [0.3] * len(fix)
         assert [tuple(value) for value in fix["light_xy"]] == [(0.3, 0.6)] * len(fix)
         target = stimuli[stimuli["stimulus"] == "target"]
+        assert len(target) > 0
         assert target["size_deg"].tolist() == [1.0] * len(target)
         assert all(np.isnan(value).all() and len(value) == 2 for value in target["light_xy"])
         objects = module["stimulus_objects"].to_dataframe()
@@ -87,10 +89,11 @@ def test_the_change_log_knows_the_console_kinds(built):
         assert changes["time_source"].tolist()[-5:] == ["code", "rig_clock", "rig_clock", "rig_clock", "rig_clock"]
         assert changes["staged_by_kind"].tolist() == [""] * (len(changes) - 2) + ["member", "member"]
         assert changes["moment"].tolist()[-3] == 0
-        for column in changes.columns:
-            if changes[column].dtype == object:
-                text = " ".join(str(value) for value in changes[column])
-                assert "Ada" not in text and "ada@lab" not in text, column
+        assert "member" in changes["staged_by_kind"].tolist()
+        # The whole file, not a column: the stager's name and account are
+        # nowhere in it, whatever a column's dtype.
+        raw = built.path.read_bytes()
+        assert b"Ada" not in raw and b"ada@lab" not in raw
         assert "Ada" not in json.dumps(built.description) and "ada@lab" not in json.dumps(built.description)
         assert not [note for note in built.description["notes"] if "which no build of wl-xcon this reader knows" in note]
 
@@ -102,7 +105,8 @@ def test_a_block_ended_by_the_switch_and_the_runs_color_sets(built):
         assert blocks["ended"].tolist() == ["rule", "shaping", "next"]
         runs = nwb.intervals["runs"].to_dataframe()
         sets = json.loads(runs["color_sets"].iloc[0])
-        assert "macaque_row" in json.dumps(sets) and "design" in json.dumps(sets)
+        assert sets["isohue"]["realized"][0]["macaque_row"] == [0.1, 0.8, 0.1]
+        assert sets["isohue"]["design"]["space"] == "CAM16-UCS"
         varied = json.loads(blocks["varied"].iloc[0])
         assert varied["search_size"][0]["by"] == "scaled"
 
