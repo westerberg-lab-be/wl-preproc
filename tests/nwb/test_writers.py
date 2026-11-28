@@ -786,3 +786,30 @@ def test_a_stop_says_when_it_is_the_tightest_bound_and_not_a_measured_end(tmp_pa
             stop = nwb.intervals[table]["stop_time"].description
             assert marker in stop and "lost" in stop and "tightest bound" in stop, stop
             assert "accurate as its start" not in stop, stop
+
+
+def test_the_stimulus_tables_write_the_console_columns_only_when_their_rows_carry_them(tmp_path):
+    from wl_preproc.nwb.rig_record import add_rig_tables
+
+    nan = float("nan")
+    entry = {"trial_id": 1, "entry": 0, "stimulus": "fix", "kind": "show", "frame": 1, "off": -1, "changed": "",
+             "drawn": 1, "unresolved": "", "x_deg": 0.0, "y_deg": 0.0, "eccentricity_deg": 0.0,
+             "polar_deg": nan, "target": -1, "n_objects": 1, "left": "", "right": ""}
+    carrying = [{**entry, "size_deg": 0.3, "light_xy": [0.3, 0.6]}, {**entry, "entry": 1, "size_deg": nan,
+                                                                     "light_xy": [nan, nan]}]
+    objects = [{"trial_id": 1, "entry": 1, "eye": "", "object": 0, "x_deg": 1.0, "y_deg": 0.0,
+                "eccentricity_deg": 1.0, "polar_deg": 0.0, "size_deg": 2.4, "window_deg": 3.6,
+                "light_xy": [nan, nan]}]
+    _path, io, nwb = _write(tmp_path, lambda nwb: add_rig_tables(nwb, {"stimuli": carrying,
+                                                                       "stimulus_objects": objects}))
+    with io:
+        module = nwb.processing["rig_record"]
+        light = module["stimuli"]["light_xy"].data[:]
+        assert light.shape == (2, 2) and light[0].tolist() == [0.3, 0.6] and np.isnan(light[1]).all()
+        assert "drawn chromaticity" in module["stimuli"]["light_xy"].description
+        assert "multiple of the object's radius" in module["stimulus_objects"]["window_deg"].description
+        assert module["stimulus_objects"]["window_deg"].data[:].tolist() == [3.6]
+    (tmp_path / "none").mkdir()
+    _path, io, nwb = _write(tmp_path / "none", lambda nwb: add_rig_tables(nwb, {"stimuli": [entry]}))
+    with io:
+        assert "light_xy" not in nwb.processing["rig_record"]["stimuli"].colnames

@@ -75,14 +75,29 @@ TABLES: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
          ("n_objects", "An array's objects, in stimulus_objects, both eyes' for a per-eye array (0 for one "
                        "stimulus)."),
          ("left", "A per-eye stimulus's left-eye position, after the vergence offset, as JSON text ('' if none)."),
-         ("right", "A per-eye stimulus's right-eye position, likewise ('' if none)."))),
+         ("right", "A per-eye stimulus's right-eye position, likewise ('' if none)."),
+         ("size_deg", "Its look's size as drawn at its place, degrees: a size scaled by eccentricity is its factor "
+                      "times that place's true eccentricity, so a size setting may give the factor and this the "
+                      "degrees (NaN for an array, whose objects carry theirs, for a look with no single size, or if none)."),
+         ("light_xy", "The CIE 1931 [x, y] of the light it was drawn in, where a color set's light drew it, after its "
+                      "saturation and any move into the panel's gamut, as the rig wrote it: its drawn chromaticity at "
+                      "any saturation ([NaN, NaN] for an array's own entry, for a look in no color set's light, or if "
+                      "none)."))),
     "stimulus_objects": (
         "Each object of an array the stimuli table names, by its trial and entry.",
         (("trial_id", "The trial."),
          ("entry", "The array's entry in the stimuli table."),
          ("eye", "'' for an array drawn once, left or right for a per-eye array's ring about that eye's position."),
          ("object", "Its index among the array's objects, from 0."),
-         *_POSITION)),
+         *_POSITION,
+         ("size_deg", "The object's size as drawn at its place, degrees (NaN if none)."),
+         ("window_deg", "Its object window's radius, degrees: a trial's object_window setting may be a multiple of the "
+                        "object's radius, so this, not that setting, is the degrees (NaN where its array has no object "
+                        "window, or if none)."),
+         ("light_xy", "The CIE 1931 [x, y] of the light it was drawn in, where a color set's light drew it, after its "
+                      "saturation and any move into the panel's gamut, as the rig wrote it: its drawn chromaticity at "
+                      "any saturation ([NaN, NaN] for an array's own entry, for a look in no color set's light, or if "
+                      "none)."))),
     "unopened_blocks": (
         "Each block a run's end row says ended without running a trial, so the stream never opened it: a plan's "
         "block can be over before it draws one.",
@@ -138,12 +153,16 @@ def _module(nwb: NWBFile, description: str = DESCRIPTION):
 
 def add_rig_tables(nwb: NWBFile, tables: dict[str, list[dict]]) -> None:
     """Each table of `TABLES` that has a row, in the session's `rig_record`
-    module, added first (`build.py`), or in one made for them alone."""
+    module, added first (`build.py`), or in one made for them alone. Each
+    column is written only when the rows carry its key."""
     for name, (description, columns) in TABLES.items():
         rows = tables.get(name) or []
         if rows:
+            # A column is written only where the rows carry its key: a session
+            # whose records predate the console build has none of its keys.
             _module(nwb, TABLES_DESCRIPTION).add(DynamicTable(name=name, description=description, columns=[
-                column(field, text, [row[field] for row in rows]) for field, text in columns]))
+                column(field, text, [row[field] for row in rows]) for field, text in columns
+                if field in rows[0]]))
 
 
 def add_rig_record(nwb: NWBFile, record: dict) -> None:
