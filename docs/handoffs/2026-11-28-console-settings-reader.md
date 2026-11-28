@@ -34,6 +34,11 @@ By task, each with its commits.
 In the order made, each with what it costs if wrong. Copied from the ledger.
 - Task 3: Ruling (re-grade by effect): add_rig_tables' `if field in rows[0]` filter now applies to EVERY table column, so a later typo or missing key silently drops a published column where it raised KeyError before; make only the console columns (size_deg, window_deg, light_xy) optional, every other column still required — plus a per-eye test with two objects of different AsDrawn per eye pinning each row by (eye, object) — cost: one small round.
 - Task 4: Ruling: 225694e (and any implementer commit) whose Co-Authored-By names Claude Sonnet 5.5 is left as is, as in the last two pieces — it names the model that wrote it — cost if wrong: inconsistent trailers.
+- Final: Ruling: fix wave = I1 (records say files built before this merge from a session with a withdrawn row must be found and rebuilt; no lab host exists, so none is real today) + I2 (every change and control `detail`, of any kind, publishes a mapping carrying a name or account only as its kind) + I3 (the spec's amendment note) + M1-M8 (the byte scan's needles, the act-count note, the shaping rows' name, the objects' light text, the `ended` text from wl-xcon's addendum, the rigtrials docstring, a per-eye reader test, the handoff's review list) — why: I1/I2 are the no-names rule, I3/M2/M5 are texts wl.works or wl-xcon read — cost if wrong: one wave.
+- Final: Ruling: the spec's item 3 ("null in records before the build") stands as D3 met it: such files keep exactly today's columns, and absence reads as null — cost if wrong: a reader expecting NaN columns in old files finds none.
+- Final: Ruling: `staged_by_kind` sits after `kind`, not after `by_kind` as D2 said; column order carries no meaning in a DynamicTable — cost: none.
+- Final: Ruling: Task 5's "_start_fields unguarded" minor is closed: its only caller guards it (peripherals.py:371) — cost: none.
+- Final: Ruling: the reviewer's declined-to-judge items stand (problems counted by occurrence predates the branch; XC-543's fields are its own piece) — cost: none.
 
 Decisions D1 to D7 of the plan bind: the kinds (D1), what the new rows publish (D2), the stimulus tables' columns (D3),
 a trial's `shaping` (D4), the synthetic rig (D5), no table and no contract field changes (D6), and `object_window`
@@ -77,7 +82,20 @@ Named checks, from the plan's Review Focus:
 
 ### The whole-branch review
 
-`FINAL_REVIEW`
+The final review (Opus, `45a4c5a..6853001`) found 0 Critical, 3 Important and 10 Minor, with the verdict "ready
+with fixes". It traced every consumer of `KINDS`, `SETTING_KINDS`, the act count, the new `Stimulus` and `RigTrial`
+fields and `add_rig_tables`, found none whose meaning changed, and confirmed `KINDS` is wl-xcon's tuple exactly.
+- **Fixed in one wave** (`ec4de20`; a scoped re-review found every item addressed and nothing broken):
+  - **I1:** files built before this merge from a session with a withdrawn row carry its stager's name and account
+    in `parameter_changes.detail`. Deploy and the wl.works notice say how to find and rebuild them. No lab host has
+    run this pipeline, so no real file is known to.
+  - **I2:** the same leak stayed open for the next field wl-xcon adds that names a person. Every change and control
+    `detail`, of any kind, now publishes such a mapping only as its kind (`_no_names`, at any depth).
+  - **I3:** the spec carries an amendment note: `light_xyz_cd_m2` accepted in place of the luminance and colour-set
+    ask, and older records get no new columns (D3).
+  - **M1-M8:** the byte scan's longer needles and its comment; the act-count note; the shaping rows' setting name;
+    the objects' `light_xy` text; one exact `ended` text in four places, following wl-xcon's addendum; the rigtrials
+    docstring; a per-eye reader test; Task 6's review named here.
 
 ## Deferred minors
 
@@ -90,6 +108,10 @@ The ledger holds the full wording of each. Copied from it.
 - Task 5: minor (deferred): _start_fields reads rig_record.console unguarded (consistent with _end_fields); lint not run (ruff not in venv).
 - Task 5: minor (deferred): the byte scan relies on vlen text sitting in HDF5's global heap outside chunk compression (true today; say so in a comment).
 
+- Final: minor (deferred): `_no_names` reduces only mappings (a bare top-level name or account on a control row would
+  stay; wl-xcon writes none), and would also reduce a non-actor mapping that has a `name` key (fails safe); 13 lines
+  over 120 characters (CI does not lint).
+
 ## Carried to later parts
 
 - **A look's light in cd/m².** Once wl-xcon writes `light_xyz_cd_m2` and tells us the commit, a small piece reads
@@ -98,7 +120,12 @@ The ledger holds the full wording of each. Copied from it.
 
 ## The suite
 
-`SUITE_RESULTS`
+At `ec4de20`, with every reference set (NSLR, BMD and Boost, Andersson, the OpenIris recording), run one
+interpreter after the other:
+- **Python 3.11:** 3689 passed, 2 skipped, 1 deselected, 1 xfailed, in 1:29:39. The skips: U'n'Eye (numba cannot
+  load OpenMP here) and the `.bhv2` sample (`WLPP_BHV2_SAMPLE` unset).
+- **Python 3.13:** 3689 passed, 3 skipped, 1 xfailed, in 1:24:03. The skips: two Kilosort tests (not installed in
+  that venv) and the `.bhv2` sample.
 
 ## Deploy
 
