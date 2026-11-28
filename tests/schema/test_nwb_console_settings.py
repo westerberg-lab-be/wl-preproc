@@ -91,9 +91,12 @@ def test_the_change_log_knows_the_console_kinds(built):
         assert changes["moment"].tolist()[-3] == 0
         assert "member" in changes["staged_by_kind"].tolist()
         # The whole file, not a column: the stager's name and account are
-        # nowhere in it, whatever a column's dtype.
+        # nowhere in it, whatever a column's dtype. The needles are the full
+        # name and account, and the scan is of the raw bytes because pynwb's
+        # variable-length text sits in HDF5's global heap, outside any chunk's
+        # compression, so a leaked string would be found here as written.
         raw = built.path.read_bytes()
-        assert b"Ada" not in raw and b"ada@lab" not in raw
+        assert b"Ada Staged" not in raw and b"ada@lab" not in raw
         assert "Ada" not in json.dumps(built.description) and "ada@lab" not in json.dumps(built.description)
         assert not [note for note in built.description["notes"] if "which no build of wl-xcon this reader knows" in note]
 

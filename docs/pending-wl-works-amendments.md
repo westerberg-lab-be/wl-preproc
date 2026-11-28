@@ -19,6 +19,14 @@ not before. Two schema files are re-exported, **descriptions only** (D6): `docs/
 - **`training_records.parameter_changes` counts a form as one act**, in the listing and in the description: one per
   act among a set, a hand-back, a range edit and a revert, since 2026-11-28 a form too. A clear and a switch are
   not counted, and neither are the new kinds `shaping` and `withdrawn`.
+- **The listed count rises by one per form row from deploy;** a file built earlier keeps the count it was built
+  with until it is rebuilt, so one session can read differently before and after a rebuild.
+- **A withdrawn row's actor is by kind only, and files built before this merge may differ.** Before this merge a
+  `withdrawn` row was a kind this reader did not know, and its `detail` was published as written, `staged_by`'s name
+  and account included. After it, `detail` replaces any mapping that carries a `name` or an `account` with its
+  `kind`, for every kind. **Any NWB file built before this merge from a session with a withdrawn row must be found
+  and rebuilt:** the rows are the `core.ParameterChange` rows whose stored `row` has `"kind": "withdrawn"`. No lab
+  host has run this pipeline, so no real file is known to carry a name today.
 
 **The NWB file gains** (the stimulus tables' columns are written only where the record carries them: a session
 recorded before wl-xcon's console build has exactly the stimulus columns it had)
@@ -30,8 +38,8 @@ recorded before wl-xcon's console build has exactly the stimulus columns it had)
 - **`parameter_changes` gains the kinds `form`, `shaping` and `withdrawn`, and the column `staged_by_kind`**
   (D2). A form's `shape`, and a withdrawal's `cid` and `withdrawn` (what was taken back), are in `detail`. A
   withdrawal's `staged_by` is published by kind only (box, member or system), never by name or account.
-- **A block's `ended` may be `shaping`** (the training switch closed the stage the full task's start ends, or
-  reopened it), in the blocks table and in `RunBlock.ended`; and **`varied` may be `by` `scaled`** (a size scaled
+- **A block's `ended` may be `shaping`** (the training switch closed the stage the full task's start ends, or ended the
+  full task's block as training was switched back on), in the blocks table and in `RunBlock.ended`; and **`varied` may be `by` `scaled`** (a size scaled
   by eccentricity).
 - **The colour texts are corrected, and `object_window` may be a multiple** (D7): a trial's `object_window`
   setting may be a multiple of the object's radius, so `window_deg` is the degrees. A look's light is its colour's

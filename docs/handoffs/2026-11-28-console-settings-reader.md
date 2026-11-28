@@ -23,6 +23,9 @@ By task, each with its commits.
   and `window_deg` are corrected.
 - **Task 5, the synthetic rig** (`7c05a89`, `4e9c317`). `RigRecordSpec.console` writes wl-xcon's shapes, and a built
   file shows each; the stager's name and account are absent from the whole file.
+- **The final fix wave.** Any mapping carrying a `name` or an `account` is published by kind only in every change and
+  control `detail`, known kind or not; the `ended` text follows wl-xcon's addendum; the spec carries an amendment
+  note; the records above say what files built earlier hold.
 - **Task 6, the records.** `docs/pending-wl-works-amendments.md` (one block), `HANDOVER-wl-expcontroller.md` (one
   section), this handoff, and the correction of one sentence in `docs/CHECKPOINT.md`.
 
@@ -46,11 +49,13 @@ a trial's `shaping` (D4), the synthetic rig (D5), no table and no contract field
 
 ## The task reviews
 
-Tasks 1 to 5 each had a review (Sonnet), all with the spec confirmed. Counts are failures of review, not of tests.
+Tasks 1 to 6 each had a review (Sonnet), all with the spec confirmed. Counts are failures of review, not of tests.
 - **Task 1:** approved, 4 Minor. **Task 2:** approved, 4 Minor.
 - **Task 3:** approved, 4 Minor, after one fix round (`02223cc`): the filter on missing columns had reached every
   column, and the per-eye test did not pin each eye.
 - **Task 4:** approved, 3 Minor (one routed to Task 6, the CHECKPOINT sentence on a look's light).
+- **Task 6:** approved (Sonnet), spec confirmed, 4 Minor; every claim made to wl.works or wl-xcon was checked
+  against the code at HEAD.
 - **Task 5:** one Important (the check that the stager's name is absent filtered on `dtype == object`, which a
   pandas 3 text column is not, so it was likely vacuous) and 4 Minor; the Important was fixed in `4e9c317` with a whole-file byte scan and a proof
   that it fails when a name leaks.
@@ -101,6 +106,13 @@ The ledger holds the full wording of each. Copied from it.
   whole, and `SCHEMA_VERSION` stays 3.
 - **Two descriptions change** (`nwb_description.json`, `session_listing.json`; no field added or removed), so every
   listed session's description reads differently once.
+- **The listed act count rises by one per form row from deploy;** a file built earlier keeps the count it was built
+  with until it is rebuilt.
+- **Files built before this merge may carry a stager's name.** Before it, a `withdrawn` row was a kind this reader
+  did not know, and its `detail` was published as written, `staged_by`'s name and account included. Any NWB file built
+  before this merge from a session with a withdrawn row must be found (the `core.ParameterChange` rows whose stored
+  `row` has `"kind": "withdrawn"`) and rebuilt. No lab host has run this pipeline, so no real file is known to carry
+  a name today; the step is for the first host that does.
 - **`wl.yaml`:** no dependency changed.
 
 ## Told to

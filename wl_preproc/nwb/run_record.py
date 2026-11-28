@@ -62,7 +62,7 @@ RUN_COLUMNS: dict[str, tuple[str, str]] = {
 }
 MARK_FIELDS = ("marked_bad", "bad_reason")
 BLOCK_COLUMNS: dict[str, str] = {
-    "ended": "How the block ended: rule, time, fall_back, next, back, run_time, run or shaping (the training switch closed the stage the full task's start ends, or reopened it) ('' if not recorded).",
+    "ended": "How the block ended: rule, time, fall_back, next, back, run_time, run or shaping (the training switch closed the stage the full task's start ends, or ended the full task's block as training was switched back on) ('' if not recorded).",
     "ended_by": "Who moved the run on or back, by kind only: box, member or system (the rig itself) ('' for nobody, or if not recorded).",
     "after_trial": "The trial_id of the run's last trial before it ended (-1 if none, or not recorded).",
     "position": "Its place in the run's sequence of blocks, from 0: a training progression's stage (-1 if not "

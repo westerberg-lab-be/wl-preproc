@@ -1,5 +1,11 @@
 # Reading wl-xcon's console settings (XC-513) and withdrawn changes (XC-529) — short design
 
+> **Amended 2026-11-28 (after the build).** Two things below no longer read as built. (1) The requester accepted
+> wl-xcon's `light_xyz_cd_m2` (CIE 1931 XYZ in cd/m², written beside each look's `light_xy`, null with it, not yet
+> built upstream) in place of item 4's luminance and colour-set ask; reading it is a later piece. (2) Item 3's
+> "null in records before the build" is met by decision D3: such files get no new columns at all, so absence reads
+> as null to any reader.
+
 **Date:** 2026-11-28. **Status:** approved by the requester 2026-11-28 (the multiple-choice question).
 **Sources (wl-xcon main `293a66e1`):** `docs/pending-wl-preproc-amendments.md`, the sections "ANSWERED 2026-11-18 —
 the console settings" (XC-513, its 2026-11-18 addendum from `d67cfa08`, and `light_xy`) and XC-529 ("withdrawn

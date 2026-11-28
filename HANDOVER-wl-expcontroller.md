@@ -604,8 +604,8 @@ Read on `feat/console-settings`, not merged. Where each is published:
   some entry of the file carries one, with NaN for a missing number. A per-eye array's objects are read under `left`
   and `right`, into the same rows as their positions. A `light_xy` or size written unreadably (one number, three,
   text) is none, said once per field; the trial line is kept.
-- **A block's `ended` may be `shaping`** (the training switch closed the stage the full task's start ends, or
-  reopened it), and a `varied` entry's `by` may be `scaled`, in the blocks table.
+- **A block's `ended` may be `shaping`** (the training switch closed the stage the full task's start ends, or ended the
+  full task's block as training was switched back on), and a `varied` entry's `by` may be `scaled`, in the blocks table.
 - **The colour texts** now say a look's light is its colour's `xyz` times its fraction only at saturation 1, and
   that at any saturation its drawn chromaticity is its `light_xy`. A trial's `object_window` setting may be a
   multiple of the object's radius; `window_deg` is the degrees.

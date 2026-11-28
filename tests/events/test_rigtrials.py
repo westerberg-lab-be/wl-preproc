@@ -274,6 +274,27 @@ def test_each_stimulus_and_object_says_its_size_window_and_light(tmp_path):
     assert record.problems == ()
 
 
+def test_a_per_eyes_objects_say_their_window_and_light_and_a_bad_one_is_said_by_its_path(tmp_path):
+    """The final review's M7: a per-eye array's objects are read under `left` and `right`, each with its own
+    window and light, and an unreadable one is none, named by the eye's path."""
+    from wl_preproc.events.rigtrials import CONSOLE_KEYS, AsDrawn, read_rig_trials
+
+    eyes = {**_CONSOLE, "name": "dot",
+            "left": {"x": 1.0, "objects": [{"x": 2.0, "size_deg": 1.0, "window_deg": 1.5, "light_xy": [0.3, 0.6]}]},
+            "right": {"x": -1.0, "objects": [{"x": -2.0, "size_deg": 1.1, "window_deg": 1.6, "light_xy": [0.2, 0.5]},
+                                             {"x": -3.0, "light_xy": [1, 2, 3]}]}}
+    rows = [json.dumps({**json.loads(_line_c3(1, 0)), "stimuli": [eyes]})]
+    record = read_rig_trials(_record(tmp_path, rows), "pico")
+    (stimulus,) = record.trials[0].stimuli
+    assert stimulus.eye_objects_as_drawn == (
+        ("left", (AsDrawn(1.0, 1.5, (0.3, 0.6)),)),
+        ("right", (AsDrawn(1.1, 1.6, (0.2, 0.5)), AsDrawn())))
+    assert stimulus.carries == set(CONSOLE_KEYS)
+    assert record.problems == (
+        "1 trial line: `stimuli[].right.objects[].light_xy` is not a pair of finite numbers or null, so it is "
+        "read as none",)
+
+
 def test_a_stimulus_before_the_console_build_carries_none_of_its_keys(tmp_path):
     from wl_preproc.events.rigtrials import AsDrawn, read_rig_trials
 

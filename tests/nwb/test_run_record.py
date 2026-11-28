@@ -184,6 +184,8 @@ def test_the_marks_are_written_for_every_run_even_with_no_rig_record():
     assert runs[1]["record"] == {"marked_bad": False, "bad_reason": ""}
 
 
+_ENDED_SHAPING = ("shaping (the training switch closed the stage the full task's start ends, or ended the "
+                  "full task's block as training was switched back on)")
 _ENDED_WORDS = ("rule", "time", "fall_back", "next", "back", "run_time", "run", "shaping")
 
 
@@ -200,6 +202,9 @@ def _ended_texts():
 def test_every_list_of_a_blocks_end_names_shaping(where):
     text = _ended_texts()[where]
     assert [word for word in _ENDED_WORDS if not re.search(rf"\b{word}\b", text)] == []
+    # wl-xcon's addendum: the stage the full task's start closes, and the full task's block as training is
+    # switched on again. One text in all four places.
+    assert _ENDED_SHAPING in " ".join(text.replace("#", " ").split())
 
 
 def test_a_block_ended_by_the_switch_and_a_scaled_size_are_published_as_written():

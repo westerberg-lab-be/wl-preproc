@@ -35,8 +35,11 @@ a live edit overrode; since C3, where each drawn setting's range came from, the
 settings a person held, those whose live change kept it out of moving up, and
 a designed block's planned place; since XC-399, where each stimulus it showed
 was and when (`stimuli`); since the pop-out search, each color set it drew
-at a luminance its run had not yet realized (`color_realized`); and the fluid
-it commanded. Each is optional
+at a luminance its run had not yet realized (`color_realized`); since the
+console settings build, the training switch the trial was drawn under
+(`shaping`) and each look's size, an object's window and its drawn chromaticity
+(`size_deg`, `window_deg`, `light_xy`, on a stimulus entry and on its objects,
+by eye in a per-eye one); and the fluid it commanded. Each is optional
 (`events/rigfields.py`): a line without it reads as before, and one it cannot
 read is read as none, said once per field, never left out for it. `carries`
 names the ones the line has, so a column is published only where some line

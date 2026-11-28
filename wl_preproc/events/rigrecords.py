@@ -153,6 +153,20 @@ def _actor(row: dict) -> dict:
     return {f"by_{field}": _text(by.get(field)) for field in ("kind", "name", "account", "issuer", "token_id")}
 
 
+def _no_names(value):
+    """`value` with every mapping that carries a `name` or an `account`, at any depth (in mappings and lists),
+    replaced by `{"kind": its kind}`: an actor is published by kind only, whichever field holds it, known to this
+    reader or not (the final review's I2)."""
+    if isinstance(value, dict):
+        if "name" in value or "account" in value:
+            kind = value.get("kind")
+            return {"kind": kind if isinstance(kind, str) else None}
+        return {key: _no_names(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_no_names(item) for item in value]
+    return value
+
+
 def _rows(path: Path, problems: list[str], field: str, what: str) -> list[tuple[int, str, dict]]:
     """Each line of `path` that is a JSON object naming its `field`, with its
     number and its text; each other line is a problem, `what` saying what it
@@ -193,7 +207,7 @@ def read_rig_records(session_dir: Path) -> RigRecords:
         controls.append(Control(
             line=line, kind=row["kind"], at=_number(row.get("at")), at_local=_text(row.get("at_local")),
             trial_index=_count(row.get("trial_index")), run_index=_integer(row.get("run")), event_code=code,
-            coded=coded, detail=_json({key: value for key, value in row.items() if key not in _CONTROL_FIELDS}),
+            coded=coded, detail=_json({key: _no_names(value) for key, value in row.items() if key not in _CONTROL_FIELDS}),
             **_actor(row), row=text))
     return RigRecords(changes=tuple(changes), controls=tuple(controls), problems=tuple(problems))
 
@@ -230,7 +244,8 @@ class ChangeFields:
     fields beyond those every change row carries as JSON text, a clear's and
     a switch's control fields among them (`{}` if none). `staged_by_kind` is the
     kind of the actor who staged a withdrawn change, never its name or account
-    (`staged_by` is left out of `detail`)."""
+    (`staged_by` is left out of `detail`, and any other mapping that carries a
+    `name` or an `account` is reduced there to its `kind`)."""
 
     kind: str
     change: int | None
@@ -268,7 +283,7 @@ def change_fields(rows: list[str]) -> tuple[list[ChangeFields], list[str]]:
             from_draw=fields.read(row, "from", TEXT), block=fields.read(row, "block", TEXT),
             moment=fields.read(row, "moment", WHOLE),
             strobed_nothing="event_code" in row and row["event_code"] is None,
-            detail=_json({key: value for key, value in row.items() if key not in _CHANGE_FIELDS}),
+            detail=_json({key: _no_names(value) for key, value in row.items() if key not in _CHANGE_FIELDS}),
             staged_by_kind=fields.read(staged_by or {}, "kind", TEXT, field="staged_by.kind")))
     return out, [*fields.problems(), *(
         f"{n} change {'row' if n == 1 else 'rows'}: `kind` is {kind!r}, which no build of wl-xcon this reader knows "

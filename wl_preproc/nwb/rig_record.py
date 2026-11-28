@@ -101,14 +101,13 @@ TABLES: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
                         "window, or if none)."),
          ("light_xy", "The CIE 1931 [x, y] of the light it was drawn in, where a color set's light drew it, after its "
                       "saturation and any move into the panel's gamut, as the rig wrote it: its drawn chromaticity at "
-                      "any saturation ([NaN, NaN] for an array's own entry, for a look in no color set's light, or if "
-                      "none)."))),
+                      "any saturation ([NaN, NaN] for a look in no color set's light, or if none)."))),
     "unopened_blocks": (
         "Each block a run's end row says ended without running a trial, so the stream never opened it: a plan's "
         "block can be over before it draws one.",
         (("run_number", "The run."),
          ("block", "Its block type."),
-         ("ended", "How it ended: rule, time, fall_back, next, back, run_time, run or shaping (the training switch closed the stage the full task's start ends, or reopened it)."),
+         ("ended", "How it ended: rule, time, fall_back, next, back, run_time, run or shaping (the training switch closed the stage the full task's start ends, or ended the full task's block as training was switched back on)."),
          ("ended_by", "Who moved the run on or back, by kind only ('' for nobody)."),
          ("after_trial", "The trial_id of the run's last trial before it ended (-1 if none)."),
          ("position", "Its place in the run's sequence of blocks, from 0 (-1 if not recorded)."))),
@@ -229,7 +228,7 @@ def _add_changes(module, changes: list[dict]) -> None:
             column("run_number", "The run it was applied in (-1: none, or a run the recording did not measure).",
                    [-1 if change["run_number"] is None else change["run_number"] for change in changes]),
             column("setting", "The setting it changed; block for a suggestion or a decline, whose was and now are "
-                              "stages; the training switch, whose rows are shaping.", [change["name"] for change in changes]),
+                              "stages; shaping for the training switch's rows (their setting is named shaping).", [change["name"] for change in changes]),
             column("was", "Its old value, as JSON text ('' if the row has none).",
                    [change["was"] or "" for change in changes]),
             column("now", "Its new value, as JSON text ('' if the row has none).",
@@ -273,7 +272,8 @@ def _add_changes(module, changes: list[dict]) -> None:
                              "switch's control fields, a suggestion's move, block, bar, at_hardest and the "
                              "suggestion it remakes (remakes), a decline's suggestion, and the suggestion a change "
                              "that widens the pool answers, a form's shape, and a withdrawal's cid and withdrawn (what was "
-                             "taken back) ('{}' if none).", [field.detail for field in fields]),
+                             "taken back); any actor in it, wherever it sits, is its kind only, never its name or account "
+                             "('{}' if none).", [field.detail for field in fields]),
         ]))
 
 
@@ -295,7 +295,8 @@ def _add_controls(module, controls: list[dict]) -> None:
                                   "in or, between trials, the one about to run; not a trial number (-1 if not "
                                   "recorded).",
                    [-1 if control["trial_index"] is None else control["trial_index"] for control in controls]),
-            column("detail", "The control's own fields, as JSON text.", [control["detail"] for control in controls]),
+            column("detail", "The control's own fields, as JSON text; any actor in it is its kind only, never its "
+                             "name or account.", [control["detail"] for control in controls]),
             column("by_kind", "Who sent it, by kind only: box, member or system (the rig itself) ('' for nobody).",
                    [control["by_kind"] or "" for control in controls]),
         ]))

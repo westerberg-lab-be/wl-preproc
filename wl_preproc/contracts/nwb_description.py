@@ -168,7 +168,8 @@ class RunBlock(_Frozen):
     trials: int
     # How it ended, from its run's end row in wl-xcon's record: rule, time,
     # fall_back, next, back, run_time, run or shaping (the training switch
-    # closed the stage the full task's start ends, or reopened it); null where not recorded (design
+    # closed the stage the full task's start ends, or ended the full task's block as training was
+    # switched back on); null where not recorded (design
     # spec `2026-11-07-rig-record-fields-design.md` section 8).
     ended: str | None = None
 
